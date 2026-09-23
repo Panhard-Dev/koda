@@ -20,8 +20,8 @@ __pycache__
 *.pyc
 .pytest_cache
 
-# O host é um binário à parte, que não vai para o repositório: coloque o seu em
-# host/c-host.exe (o backend sobe sem ele, mas aí quem responde é o provider local).
+# Os binários do Koda são distribuídos à parte e ficam em `host/` — não vão para o
+# repositório (são grandes e binários).
 host/*.exe*
 
 # Estado local de ferramentas (memória de assistente, id de projeto)

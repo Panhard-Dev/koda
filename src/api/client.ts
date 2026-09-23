@@ -123,7 +123,7 @@ export const fetchUsage = () => request<ApiUsage>(`/api/usage?tz_offset_minutes=
 
 export const fetchAccount = () => request<ApiAccount>('/api/account')
 
-/** Modelos que o provedor atual aceita (o host local devolve a lista dele). */
+/** Modelos que o provedor atual aceita (o serviço devolve a lista dele). */
 export const listModels = () => request<ApiModel[]>('/api/models')
 
 export const patchAccount = (patch: { phone?: string | null; google?: boolean }) =>

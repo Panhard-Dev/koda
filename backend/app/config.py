@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     )
     model_map: str = "{}"
 
-    # Gateway local (`host/c-host.exe`): a ligação com o serviço de modelos. Ele expõe o
-    # catálogo em /v1/models e recebe a conversa em /v1/chat/completions.
+    # Serviço de modelos: publica o catálogo em /v1/models e recebe a conversa em
+    # /v1/chat/completions.
     gemini_proxy_url: str = Field(
         default="http://127.0.0.1:21128/v1",
         validation_alias=AliasChoices("GEMINI_PROXY_URL", "KODA_GEMINI_PROXY_URL"),
