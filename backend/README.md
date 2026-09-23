@@ -10,7 +10,7 @@ tool calling de verdade — sem chave e sem serviço externo.
 cd backend
 uv sync                                  # cria o .venv e instala as dependências
 uv run uvicorn app.main:app --reload --port 8787
-uv run pytest                            # 77 testes (rotas, stream, ferramentas, busca)
+uv run pytest                            # 110 testes (rotas, stream, ferramentas, identidade)
 ```
 
 Documentação interativa em `http://localhost:8787/docs`.
@@ -300,3 +300,10 @@ tests/test_identidade.py # apresentação do host, com amostras reais do banco
 testar_ferramentas.py # fumaça: as 22 ferramentas na máquina real
 testar_e2e.py      # fumaça: ponta a ponta contra o host
 ```
+
+## Licença
+
+Projeto **proprietário**, todos os direitos reservados: o uso deste código, no todo ou em
+parte, depende de autorização prévia e por escrito do titular — inclusive executar, copiar,
+modificar, distribuir e treinar modelos com ele. O texto completo está em
+[`../LICENSE`](../LICENSE).

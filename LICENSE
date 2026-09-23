@@ -1,0 +1,122 @@
+LICENÇA PROPRIETÁRIA — TODOS OS DIREITOS RESERVADOS
+
+Copyright (c) 2026 Panhard-Dev (@Panhard-Dev). Todos os direitos reservados.
+
+⚠️  ESTE NÃO É SOFTWARE DE CÓDIGO ABERTO.
+
+O uso deste software, no todo ou em parte, SEM AUTORIZAÇÃO PRÉVIA, EXPRESSA E POR ESCRITO
+DO TITULAR é PROIBIDO.
+
+────────────────────────────────────────────────────────────────────────────────────────
+
+ENGLISH NOTICE — This is NOT open-source software. All rights reserved. Any use of this
+software, in whole or in part, without the prior written permission of the copyright holder
+is strictly prohibited. The Portuguese text below is the binding version.
+
+────────────────────────────────────────────────────────────────────────────────────────
+
+1. DEFINIÇÕES
+
+1.1. "Titular": Panhard-Dev, titular dos direitos autorais sobre o Software.
+
+1.2. "Software": todo o conteúdo deste repositório, incluindo, sem limitação, o
+     código-fonte (front-end, back-end, scripts, testes), os arquivos de configuração, a
+     documentação, os textos, os desenhos e ícones SVG, as imagens, o nome "Koda" e a marca
+     da coroa, e qualquer outro material aqui disponibilizado, no todo ou em parte,
+     incluindo versões anteriores e derivadas.
+
+1.3. "Você": qualquer pessoa física ou jurídica que acesse, baixe, copie ou de qualquer
+     forma entre em contato com o Software.
+
+2. PROIBIÇÃO DE USO SEM AUTORIZAÇÃO
+
+2.1. Você NÃO está autorizado a usar o Software, no todo ou em parte, sem autorização
+     prévia, expressa e por escrito do Titular.
+
+2.2. Dependem de autorização do Titular, entre outros, os atos de:
+
+     a) usar, executar, instalar, compilar ou colocar o Software em funcionamento, em
+        ambiente próprio ou de terceiros, com ou sem finalidade econômica;
+     b) copiar, reproduzir, baixar, armazenar, publicar ou redistribuir o Software;
+     c) modificar, adaptar, traduzir, reescrever, descompilar, fazer engenharia reversa ou
+        criar obras derivadas;
+     d) sublicenciar, vender, alugar, ceder, doar, compartilhar ou transferir a terceiros;
+     e) explorar comercialmente, oferecer como serviço (inclusive SaaS, hospedagem ou
+        API), incorporar em produto ou serviço próprio ou de terceiros, ou usá-lo para
+        prestar serviços a terceiros;
+     f) usar o Software, seu código, sua documentação ou seus textos para treinar, ajustar,
+        destilar, avaliar ou alimentar modelos de inteligência artificial (treinamento,
+        fine-tuning, RAG, avaliação automatizada ou qualquer pipeline equivalente);
+     g) remover, ocultar ou alterar avisos de autoria, copyright ou esta licença;
+     h) usar o nome "Koda", a coroa ou qualquer marca, logotipo ou identidade visual do
+        projeto.
+
+3. REPOSITÓRIO PÚBLICO
+
+3.1. O Software está hospedado publicamente na plataforma GitHub, e a publicidade do
+     repositório existe apenas para leitura, consulta e avaliação do projeto.
+
+3.2. As funcionalidades que os Termos de Serviço do GitHub garantem a qualquer usuário da
+     plataforma (como visualizar o repositório e forká-lo dentro do GitHub) permanecem
+     regidas por aqueles termos.
+
+3.3. Fazer um fork não concede licença de uso. Todo e qualquer uso do Software, inclusive a
+     partir de um fork ou de uma cópia, continua proibido e depende de autorização prévia e
+     por escrito do Titular.
+
+4. COMO PEDIR AUTORIZAÇÃO
+
+4.1. Pedidos de autorização devem ser enviados por escrito ao Titular, por uma destas vias:
+     (i) abertura de uma issue neste repositório; ou (ii) contato ao Titular pelo perfil
+     @Panhard-Dev no GitHub.
+
+4.2. A autorização, quando concedida, é dada caso a caso, por escrito, com escopo, prazo e
+     condições definidos pelo Titular, e é revogável a qualquer momento.
+
+5. NENHUMA LICENÇA IMPLÍCITA
+
+5.1. O acesso ao Software não transfere nenhum direito a Você.
+
+5.2. Nenhum direito é concedido por omissão, por tolerância, por uso anterior, por
+     silêncio do Titular ou pela ausência de cobrança.
+
+6. VIOLAÇÃO E CONSEQUÊNCIAS
+
+6.1. O uso não autorizado viola esta licença e a legislação aplicável, incluindo a Lei
+     nº 9.610/1998 (direitos autorais) e a Lei nº 9.609/1998 (programas de computador), no
+     Brasil, além dos tratados e convenções internacionais aplicáveis.
+
+6.2. Em caso de violação, Você deve, imediatamente: (i) cessar todo uso do Software;
+     (ii) destruir todas as cópias, forks e derivados em seu poder ou controle; e
+     (iii) comprovar ao Titular o cumprimento, se solicitado.
+
+6.3. A violação sujeita o infrator às medidas judiciais cabíveis, incluindo indenização por
+     perdas e danos e obrigação de cessar o uso, sem prejuízo das demais sanções cabíveis.
+
+6.4. Qualquer autorização concedida nos termos do item 4 é rescindida automaticamente, de
+     pleno direito e sem aviso prévio, pelo descumprimento de qualquer condição desta
+     licença ou da autorização.
+
+7. AUSÊNCIA DE GARANTIAS
+
+7.1. O Software é disponibilizado "NO ESTADO EM QUE SE ENCONTRA" ("as is"), sem garantia de
+     qualquer natureza, expressa ou implícita, incluindo, sem limitação, garantias de
+     adequação a uma finalidade específica, de não violação, de ausência de erros ou de
+     funcionamento ininterrupto.
+
+7.2. O Titular não responde por perdas, danos diretos ou indiretos, lucros cessantes,
+     perda de dados, ou por consequências do uso, da impossibilidade de uso ou do mau uso
+     do Software, ainda que o Titular tenha sido avisado da possibilidade de tais danos.
+
+7.3. O Software executa comandos e mexe em arquivos da máquina onde roda. A decisão de
+     executá-lo, o ambiente escolhido e as consequências dessa execução são de
+     responsabilidade exclusiva de quem o executa — e essa execução, por si só, depende de
+     autorização do Titular nos termos do item 2.
+
+8. LEI APLICÁVEL E FORO
+
+8.1. Esta licença é regida pelas leis do Brasil.
+
+8.2. Fica eleito o foro do domicílio do Titular para dirimir qualquer controvérsia
+     decorrente desta licença, com renúncia a qualquer outro, por mais privilegiado que
+     seja.
