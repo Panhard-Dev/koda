@@ -1,16 +1,15 @@
 """GET /api/models — quais modelos o provedor atual aceita.
 
-O seletor da interface mostra o catálogo local (Liz/Koda) mais o que vier daqui: no caso
-do host local, os modelos que ele realmente tem — e o `name` que ele publica é o rótulo
-preferido, para o seletor não inventar espaçamento em cima do id.
+O seletor da interface mostra o catálogo da casa (Liz/Koda) mais o que vier daqui: quando
+é o serviço que responde, são os modelos que ele realmente tem — e o `name` que ele publica
+é o rótulo preferido, para o seletor não inventar espaçamento em cima do id.
 
-A lista sai **do maior para o menor**. O host não publica tamanho em lugar nenhum (nem em
-`/v1/models`, nem no `catalog.go` dele, que só repassa a ordem do upstream), então o peso
-é derivado do próprio nome: o tier (`nano` < `mini` < sem tier < `pro` < `max`) e, dentro
-do tier, a geração. Modelo novo do host se encaixa sozinho na regra, sem lista fixa.
+A lista sai **do maior para o menor**. O serviço não publica tamanho em lugar nenhum, então
+o peso é derivado do próprio nome: o tier (`nano` < `mini` < sem tier < `pro` < `max`) e,
+dentro do tier, a geração. Modelo novo se encaixa sozinho na regra, sem lista fixa.
 
-Sem `hint`: o seletor mostra só o nome do modelo. O "host local" que aparecia embaixo de
-cada linha era ruído — o usuário já sabe de onde vem o catálogo.
+Sem `hint`: o seletor mostra só o nome do modelo. O antigo "serviço local" que aparecia
+embaixo de cada linha era ruído — o usuário já sabe de onde vem o catálogo.
 """
 
 from __future__ import annotations

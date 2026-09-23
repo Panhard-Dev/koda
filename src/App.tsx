@@ -150,7 +150,7 @@ function App() {
   /** `null` = backend fora do ar: as respostas voltam a ser simuladas no navegador. */
   const [backend, setBackend] = useState<Health | null>(null)
   const [remoteUsage, setRemoteUsage] = useState<ApiUsage | null>(null)
-  /** Catálogo do provedor (o host local lista os modelos dele em /v1/models). */
+  /** Catálogo do provedor (o serviço lista os modelos dele em /v1/models). */
   const [remoteModels, setRemoteModels] = useState<RemoteModel[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
   const timersRef = useRef<number[]>([])

@@ -12,8 +12,8 @@ from collections.abc import AsyncIterator
 from ..config import Settings
 from .base import ChatOptions, ChatTurn, Piece
 
-#: Nomes de exibição dos modelos do host, para a resposta offline ficar legível.
-#: É só rótulo: quem serve os modelos de verdade é o `c-host.exe`.
+#: Nomes de exibição dos modelos, para a resposta offline ficar legível.
+#: É só rótulo: quem serve os modelos de verdade é o serviço.
 MODEL_LABELS = {
     "liz-nano": "Liz Nano",
     "liz-4": "Liz 4",

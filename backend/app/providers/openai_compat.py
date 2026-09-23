@@ -1,8 +1,8 @@
 """Provider OpenAI-compatível: streaming para o texto e um passo com ferramentas.
 
 Serve OpenAI, Groq, OpenRouter e o Ollama (`http://localhost:11434/v1`) — muda só a
-`OPENAI_BASE_URL` e a chave. `GeminiProxyProvider` herda daqui apontando para o gateway
-local do serviço, que fala o mesmo protocolo.
+`OPENAI_BASE_URL` e a chave. `GeminiProxyProvider` herda daqui apontando para o serviço de
+modelos do projeto, que fala o mesmo protocolo.
 """
 
 from __future__ import annotations
@@ -358,11 +358,11 @@ class OpenAICompatibleProvider:
 
 
 class GeminiProxyProvider(OpenAICompatibleProvider):
-    """O gateway local (`host/c-host.exe`): a mesma API da OpenAI, do lado do serviço.
+    """O provider do serviço de modelos: a mesma API da OpenAI, do outro lado.
 
     O nome `gemini` e a classe vieram do proxy do projeto anterior e ficaram por herança — o
-    que está do outro lado hoje é o gateway, que expõe o catálogo do serviço em `/v1/models`
-    e recebe a conversa em `/v1/chat/completions`.
+    que está do outro lado é o serviço, que publica o catálogo em `/v1/models` e recebe a
+    conversa em `/v1/chat/completions`.
 
     Dele ele mantém a capacidade de **trocar de perfil**: quando o serviço publica os
     perfis disponíveis e um bate no limite, o próximo atende. Sem esse painel o caminho
@@ -456,8 +456,8 @@ class GeminiProxyProvider(OpenAICompatibleProvider):
         self.perfil = livres[self._rotacoes % len(livres)]
         return self.perfil
 
-    #: Nomes decorativos do seletor antigo. Conversa gravada antes do host local ainda
-    #: manda um desses; melhor cair no padrão do que virar um 400 no host.
+    #: Nomes decorativos do seletor antigo. Conversa gravada antes do serviço atual ainda
+    #: manda um desses; melhor cair no padrão do que virar um 400 lá.
     LEGADOS = frozenset(
         {
             "koda-flash",

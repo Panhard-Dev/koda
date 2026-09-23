@@ -1,8 +1,8 @@
 """A voz do assistente: quem ele diz ser — e o que fazer quando ele esquece.
 
-Quando o pedido atravessa um gateway que acrescenta instruções próprias ao histórico, o
-modelo tende a responder se apresentando — nome do serviço e de quem o "criou" — e cola a
-apresentação **na frente** até de resposta de tarefa.
+O serviço pode acrescentar instruções próprias ao histórico, e aí o modelo tende a
+responder se apresentando — nome do serviço e de quem o "criou" — e cola a apresentação
+**na frente** até de resposta de tarefa.
 
 São duas defesas, e as duas juntas:
 

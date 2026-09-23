@@ -9,7 +9,7 @@ import type { MenuOption } from './components/Menu'
  */
 const MODEL_ICON = <KodaLogo className="h-3.5 w-auto" color="currentColor" />
 
-/** Modelo que veio do backend (ex.: o catálogo que o host local publica em /v1/models). */
+/** Modelo que veio do backend (ex.: o catálogo que o serviço publica em /v1/models). */
 export type RemoteModel = {
   value: string
   label: string
@@ -23,11 +23,11 @@ const model = (value: string, label: string): MenuOption => ({
 })
 
 /**
- * Catálogo do host local (`koda/host/c-host.exe`), em `http://127.0.0.1:21128`.
+ * Catálogo da casa, o espelho de emergência do seletor.
  *
- * Esta lista é só o espelho de emergência: quando o backend responde, é o `/api/models`
- * dele — que pergunta ao host — que manda. Os ids daqui são os mesmos que o host aceita
- * em `/v1/chat/completions`; qualquer nome que não esteja no catálogo dele é recusado.
+ * Esta lista é só o que o seletor mostra enquanto o backend não respondeu: quando ele
+ * responde, é o `/api/models` dele — que vem do serviço — que manda. Os ids daqui são os
+ * mesmos que o serviço aceita; qualquer nome fora do catálogo dele é recusado.
  *
  * Ordem do maior para o menor, igual à que o backend calcula em `routers/models.py`.
  */

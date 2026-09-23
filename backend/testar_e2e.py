@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Teste de ponta a ponta pelo HTTP: koda (8787) -> host (21128) -> ferramenta -> volta.
+"""Teste de ponta a ponta pelo HTTP: backend (8787) -> serviço -> ferramenta -> volta.
 
 Le o stream SSE de verdade e confere os eventos. Cria conversas no banco do koda, entao
 e para rodar a mao, nao no pytest.

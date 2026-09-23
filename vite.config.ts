@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     watch: {
-      // `host/c-host.exe` fica dentro do projeto e o backend o mantém rodando. O watcher
+      // A pasta `host/` guarda binários que ficam em execução dentro do projeto. O watcher
       // do Vite tenta abrir o arquivo, leva EBUSY (resource busy or locked) e derruba o
       // servidor de desenvolvimento inteiro — não é erro de HMR, é o processo morrendo.
       // Como nada aqui é código do frontend, o jeito é não vigiar a pasta.

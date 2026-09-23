@@ -2,9 +2,8 @@
 
 Servidor do Koda em Python: **FastAPI** para as rotas, **SSE** para o texto chegar
 enquanto é gerado e **SQLite** para conversas, uso e conta. Sem `.env` nenhum ele já
-funciona: o provider local responde de forma offline e explícita. Com o **host local**
-(`host/c-host.exe`, `127.0.0.1:21128`) no ar ele é escolhido sozinho e aí o chat passa a ter
-os modelos do serviço e tool calling de verdade.
+funciona: o provider local responde de forma offline e explícita. Com o serviço de modelos
+acessível ele é escolhido sozinho, e aí o chat passa a ter modelo e tool calling de verdade.
 
 ```bash
 cd backend
@@ -85,9 +84,9 @@ O `done` fecha com `steps` e `completed`. O que a tela mostra é o que fica no b
 passos são gravados na mensagem (coluna `steps`) e voltam no histórico.
 
 Detalhe obrigatório: as `tool_calls` são ecoadas **exatamente** como vieram (id + string de
-argumentos) — o host guarda a assinatura da chamada do lado dele e casa pelo id, como no
-projeto TOOLS original. Trocar o id, reserializar os argumentos ou reordenar o histórico
-quebra o casamento e o passo volta com erro.
+argumentos) — o serviço guarda a assinatura da chamada do lado dele e casa pelo id, como no
+projeto anterior. Trocar o id, reserializar os argumentos ou reordenar o histórico quebra o
+casamento e o passo volta com erro.
 
 O corpo aceita `"tools": false` para responder **essa** mensagem sem ferramenta (e
 `true` para exigir, que dá erro se o provedor não souber). No servidor, `KODA_TOOLS=off`
@@ -103,8 +102,8 @@ O modelo retoma de onde parou em vez de recomeçar. São três defesas, nesta or
 
 1. **Cota e indisponibilidade** (408, 409, 425, 429, 5xx) são repetidas com backoff de 3s e
    6s (`KODA_RETRY_ATTEMPTS`, padrão 3 tentativas). O **404** também entra na lista quando o
-   provider é o do host: no projeto TOOLS original o upstream devolvia 404 no meio da
-   conversa e o passo seguinte costumava funcionar, então ele é tratado como transitório.
+   provider é o do serviço: no projeto anterior o upstream devolvia 404 no meio da conversa
+   e o passo seguinte costumava funcionar, então ele é tratado como transitório.
 2. **Erro "de vez"** (400/401/403) ganha **uma** segunda chance em outro perfil: quando o
    serviço publica os perfis disponíveis (é o endereço que `GEMINI_WEB_URL` aponta), o
    provider passa para o próximo perfil livre em vez de desistir na hora. Sem outro perfil
@@ -119,9 +118,9 @@ foi executado fica gravado em `steps` na mensagem.
 
 ### Identidade do assistente
 
-Quando o pedido atravessa um gateway que acrescenta instruções próprias ao histórico, o
-modelo pode responder **se apresentando** — nome do serviço e de quem o "criou" — inclusive
-**colado na frente de resposta de tarefa**. E o pior efeito era indireto: o histórico gravado
+O serviço pode acrescentar instruções próprias ao histórico, e aí o modelo pode responder
+**se apresentando** — nome do serviço e de quem o "criou" — inclusive **colado na frente de
+resposta de tarefa**. E o pior efeito era indireto: o histórico gravado
 ensina, então a apresentação se repetia em todas as mensagens seguintes.
 
 São duas defesas, e as duas juntas (`app/identidade.py`):
@@ -165,9 +164,9 @@ Três travas que não são óbvias:
   com erro; `KODA_ACESSO_LIVRE=on` libera. Sem isso, um `read_file` com caminho absoluto
   lia qualquer coisa da máquina, e o modelo é justamente quem lê página da web. Vale o
   mesmo aviso de sempre: `shell` e `terminal` sempre puderam tudo, por definição.
-- **Redirects.** `url_reader`/`browser` checam o host de partida e **cada salto** do
-  redirecionamento, até 5. O `follow_redirects=True` do httpx checava só a URL inicial, e
-  um host público devolvendo `Location: http://127.0.0.1:8787` (ou
+- **Redirects.** `url_reader`/`browser` checam o endereço de partida e **cada salto** do
+  redirecionamento, até 5. O `follow_redirects=True` do httpx checava só a URL inicial, e um
+  site público devolvendo `Location: http://127.0.0.1:8787` (ou
   `169.254.169.254/latest/meta-data/`) entrava direto — SSRF clássico.
 - **Git.** As ferramentas `git_*` rodam `git rev-parse --show-toplevel` e recusam quando a
   raiz do repositório não é a pasta de trabalho. O Koda mora dentro de uma pasta que já é
@@ -223,24 +222,23 @@ meia-noite, segunda-feira e dia 1º **no relógio do cliente**. Os limites ficam
 
 ## Providers
 
-`KODA_PROVIDER=auto` (padrão) procura nesta ordem: OpenAI (se houver chave), o host local
-(se estiver respondendo) e o provider local.
+`KODA_PROVIDER=auto` (padrão) procura nesta ordem: OpenAI (se houver chave), o serviço de
+modelos (se estiver respondendo) e o provider local.
 
 - **local** — responde sem chave, em pedaços, dizendo que não há modelo configurado. **Não
   sabe chamar ferramenta**: com ele o chat funciona, mas o agente não executa nada
   (`tools_ready: false` no `/api/health`).
-- **gemini** — o **gateway local** em `host/c-host.exe` (`GEMINI_PROXY_URL`, padrão
-  `http://127.0.0.1:21128/v1`), que traz os modelos do serviço e o tool calling. É o que liga
-  o agente na interface. O nome do provider ficou `gemini` por herança do proxy do projeto
-  anterior, mas o que está do outro lado hoje é o gateway.
+- **gemini** — o provider do **serviço de modelos** (`GEMINI_PROXY_URL`), que traz o
+  catálogo e o tool calling. É o que liga o agente na interface. O nome ficou `gemini` por
+  herança do proxy do projeto anterior, mas o que está do outro lado hoje é o serviço.
 - **openai** — `/chat/completions` com `stream: true`; serve OpenAI, Groq, OpenRouter e o
   Ollama (`OPENAI_BASE_URL=http://localhost:11434/v1`). `KODA_MODEL_MAP` traduz os nomes
   da interface (`{"liz-nano": "gpt-4o"}`).
 
-Duas decisões que o provider do host toma e que não são óbvias:
+Duas decisões que o provider do serviço toma e que não são óbvias:
 
-- **o id do modelo vai como veio.** O catálogo é do host, não nosso, então `resolve_model`
-  não inventa tradução: id desconhecido passa intacto e quem recusa é o host, com erro
+- **o id do modelo vai como veio.** O catálogo é do serviço, não nosso, então `resolve_model`
+  não inventa tradução: id desconhecido passa intacto e quem recusa é o serviço, com erro
   explícito. Só nomes vazios ou os decorativos antigos (`koda-flash`, `koda-pro`,
   `koda-vision`, `liz-flash`, `liz-pro`, `liz-vision`) caem no `GEMINI_MODEL`. Antes disso o
   provider engolia qualquer id que não começasse com `gemini` e devolvia o padrão — escolher
@@ -251,7 +249,7 @@ Duas decisões que o provider do host toma e que não são óbvias:
   vez, guarda o que cada modelo aceita e manda um valor seguro quando o desejado não serve —
   catálogo fora do ar também cai no valor seguro, que passa em todos.
 - **a sondagem espera até 3s.** O serviço monta o catálogo na primeira chamada e demora; com
-  timeout curto o `auto` concluía que o gateway estava fora e caía no `local` (sem
+  timeout curto o `auto` concluía que o serviço estava fora e caía no `local` (sem
   ferramentas). A sonda mora em `proxy_disponivel()`.
 
 Para acrescentar outro provedor, implemente `stream(turns, options)` e registre em
@@ -260,20 +258,20 @@ Para acrescentar outro provedor, implemente `stream(turns, options)` e registre 
 ## Verificação manual (fora do pytest)
 
 Dois scripts de fumaça ficam na raiz do backend. Eles **não** são `test_*.py`, então o
-pytest ignora — servem para provar o sistema contra a máquina de verdade, com o host no ar:
+pytest ignora — servem para provar o sistema contra a máquina de verdade, com o serviço no ar:
 
 ```bash
 uv run python testar_ferramentas.py   # as 22 ferramentas, uma a uma
-uv run python testar_e2e.py           # HTTP: koda (8787) → host (21128) → ferramenta → volta
+uv run python testar_e2e.py           # HTTP: backend → serviço → ferramenta → volta
 ```
 
 `testar_ferramentas.py` bate em todas as 22 (29 chamadas), confere que as travas de segurança
 **recusam** o que têm que recusar e, para as `git_*`, monta um repositório temporário de
 verdade (`git init` → commit → log → diff) — porque só testar a recusa não prova que a
 ferramenta funciona. `testar_e2e.py` cobre stream puro, agente com ferramenta, um segundo
-modelo e um id inválido (que tem que voltar com erro limpo do host, não estourar).
+modelo e um id inválido (que tem que voltar com erro limpo do serviço, não estourar).
 
-Ambos exigem o host de pé; sem ele o resultado não diz nada sobre o nosso código.
+Ambos exigem o serviço acessível; sem ele o resultado não diz nada sobre o nosso código.
 
 ## Estrutura
 
@@ -284,15 +282,15 @@ app/
   db.py            # conexão SQLite e criação do esquema
   repository.py    # consultas de conversas, mensagens, uso e conta
   schemas.py       # modelos Pydantic e formatação do SSE
-  providers/       # local, o do host (gemini) e o openai-compatível, com o contrato comum
+  providers/       # local, o do serviço (gemini) e o openai-compatível, com o contrato comum
   tools/           # catálogo de ferramentas + loop agentic (do projeto TOOLS)
   routers/         # chat, conversations, usage, account
   main.py          # create_app(), CORS, lifespan
 tests/test_api.py  # rotas, stream e modo agente
 tests/test_tools.py # catálogo de ferramentas e loop (sem rede)
-tests/test_identidade.py # apresentação do host, com amostras reais do banco
+tests/test_identidade.py # apresentação do modelo, com amostras do banco
 testar_ferramentas.py # fumaça: as 22 ferramentas na máquina real
-testar_e2e.py      # fumaça: ponta a ponta contra o host
+testar_e2e.py      # fumaça: ponta a ponta contra o serviço
 ```
 
 ## Licença

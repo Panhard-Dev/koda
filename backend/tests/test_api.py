@@ -406,7 +406,7 @@ def test_models_do_host_viram_opcoes_do_seletor() -> None:
     assert itens[1].label == "Koda 1"
     assert itens[2].label == "Modelo Sem Nome"
     assert itens[3].label == "Liz Mini 1.3"
-    # Sem "host local" embaixo de cada linha: o seletor mostra só o nome do modelo.
+    # Sem o nome do serviço embaixo de cada linha: o seletor mostra só o nome do modelo.
     assert all(item.hint is None for item in itens)
 
 

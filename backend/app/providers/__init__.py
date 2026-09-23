@@ -1,6 +1,6 @@
 """Escolha do provider a partir da configuração.
 
-`auto` procura nesta ordem: OpenAI (se houver chave), o host local (se estiver
+`auto` procura nesta ordem: OpenAI (se houver chave), o serviço de modelos (se estiver
 respondendo) e, por fim, o provider local — que responde sem depender de nada.
 """
 
@@ -36,11 +36,11 @@ __all__ = [
 
 
 def proxy_disponivel(settings: Settings, timeout: float = 3.0) -> bool:
-    """O host local está no ar? Uma pergunta só, com timeout generoso.
+    """O serviço de modelos está no ar? Uma pergunta só, com timeout generoso.
 
-    O timeout já foi 0,6 s e era apertado demais: o `/v1/models` do host busca o catálogo
-    do upstream na primeira chamada, e uma resposta um pouco mais lenta fazia o `auto`
-    concluir que o host estava fora — caindo no provider `local`, que **não tem
+    O timeout já foi 0,6 s e era apertado demais: o `/v1/models` do serviço busca o catálogo
+    na primeira chamada, e uma resposta um pouco mais lenta fazia o `auto`
+    concluir que o serviço estava fora — caindo no provider `local`, que **não tem
     ferramentas**. O agente ficava sem tool calling sem nada avisar. Como isto roda uma
     vez, na subida, esperar alguns segundos é barato; escolher o provider errado não é.
     """
