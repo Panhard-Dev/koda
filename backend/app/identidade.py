@@ -1,9 +1,8 @@
 """A voz do assistente: quem ele diz ser — e o que fazer quando ele esquece.
 
-O host (`host/c-host.exe`) injeta uma persona própria junto do nosso prompt. Quando o
-modelo fala de si, é essa persona que vence: ele cumprimenta se apresentando ("oii, eu sou
-a Liz, criada pela Liz AI Studio") e, no `liz-4`, cola a apresentação **na frente** até de
-resposta de tarefa — foi o que ficou gravado nas conversas de 23/09.
+Quando o pedido atravessa um gateway que acrescenta instruções próprias ao histórico, o
+modelo tende a responder se apresentando — nome do serviço e de quem o "criou" — e cola a
+apresentação **na frente** até de resposta de tarefa.
 
 São duas defesas, e as duas juntas:
 
@@ -73,9 +72,9 @@ _AUTORREFERENCIA = re.compile(
     re.IGNORECASE,
 )
 
-#: Nome próprio com cara de assistente (o da persona do host e os do catálogo local) — é
-#: o que distingue "sou a Liz, criada pela Liz AI Studio" de "sou um modelo de linguagem
-#: criado por pesquisadores": a segunda frase é conversa normal e fica.
+#: Nome próprio com cara de assistente (os do catálogo do serviço) — é o que distingue
+#: "sou a Koda, criada por Fulano Labs" de "sou um modelo de linguagem criado por
+#: pesquisadores": a segunda frase é conversa normal e fica.
 _MARCA = re.compile(r"\b(?:liz|koda|layze|layz|gemini|ai\s*studio|studio)\b", re.IGNORECASE)
 
 

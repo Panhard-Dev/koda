@@ -39,7 +39,7 @@ O Koda é uma área de código com cara de chat, separada em três peças que co
 | --- | --- |
 | **front** (`src/`) | React 19 + Vite + Tailwind 4, com o composer, o histórico, a tela de configuração e o desenho das ferramentas |
 | **backend** (`backend/`) | FastAPI em Python, respostas em **SSE**, histórico em **SQLite** e o **loop agentic** das ferramentas |
-| **host** (`host/`) | o serviço local de modelos em `127.0.0.1:21128`, compatível com a API da OpenAI e **sem chave** — o binário é distribuído à parte ([host/README.md](host/README.md)) |
+| **gateway** (`host/`) | a ligação desta máquina com o serviço de modelos: expõe a conversa em `127.0.0.1:21128` no formato da API da OpenAI, que é o endereço que o backend usa. O binário é distribuído à parte ([host/README.md](host/README.md)) |
 
 O agente é o comportamento normal, não um modo que se liga: quando o provedor sabe chamar
 ferramenta, o modelo recebe as **22 ferramentas** e usa o que precisar antes de responder —
@@ -65,7 +65,7 @@ própria mensagem. Com o backend de pé, a sessão inteira passa a vir dele — 
 de uso, conta e ferramentas. O endereço da API é `VITE_API_URL` (padrão
 `http://localhost:8787`).
 
-Para ter **tool calling de verdade**, coloque o binário do host em `host/c-host.exe` e suba-o
+Para falar com os **modelos do serviço**, coloque o gateway em `host/c-host.exe` e suba-o:
 ele escuta em `127.0.0.1:21128` e o backend o encontra sozinho (`KODA_PROVIDER=auto`). Sem
 ele nada quebra: quem responde é o provider local, offline e explícito sobre isso. O
 `/api/health` diz qual dos dois está no ar.
@@ -165,30 +165,25 @@ tela mostra é o que fica no banco.
 Quem não sabe chamar ferramentas (o provider `local`) continua respondendo normalmente —
 apenas sem executar nada, e o `/api/health` diz isso em `tools_ready`.
 
-## Host local (modelos)
+## Modelos e o gateway local
 
-O host abre uma API compatível com a da OpenAI em `http://127.0.0.1:21128` e **não pede
-chave nenhuma**. O catálogo **não está escrito no nosso código**: `GET /v1/models` é a
-fonte, e o seletor monta os grupos pelo prefixo do id — modelo novo que apareça no host
-entra sozinho no menu. O id vai para o host **como veio**: quem valida é ele, e um id
-inventado volta como erro explícito em vez de virar silenciosamente outro modelo.
+Os modelos são **próprios do projeto** e vêm do serviço de modelos. O que fica nesta máquina
+é apenas a **ligação**: o gateway em `host/` conversa com o serviço e expõe a conversa no
+formato da API da OpenAI em `http://127.0.0.1:21128` — o endereço que o backend usa
+(`GEMINI_PROXY_URL`).
 
-Três armadilhas que já custaram tempo aqui, e que o código trata:
+O catálogo **não está escrito no nosso código**: o seletor monta os grupos a partir do que o
+serviço publica em tempo de execução, então modelo novo aparece no menu sem mexer no front.
+O id escolhido vai **como veio** — quem valida é o serviço, e um id inválido volta como erro
+explícito em vez de virar silenciosamente outro modelo.
 
-- **o host injeta uma persona própria** na conversa, e ela vencia quando o modelo falava de
-  si (as respostas começavam com "oii, eu sou a Liz, criada pela Liz AI Studio! 💜"). O
-  backend manda uma regra de identidade no prompt e **corta a apresentação da saída**,
-  inclusive no histórico reenviado — `backend/app/identidade.py`. O nome do assistente é
-  `KODA_ASSISTENTE`;
-- **dois modelos recusam `reasoning_effort: none` com 400**, com ou sem ferramentas no corpo.
-  O provider lê o `targetFormat` de cada modelo no catálogo e manda `minimal` para esses;
-- **o host é lento na primeira chamada**, então a sondagem de disponibilidade espera até 3s —
-  com timeout curto o `auto` concluía que o host estava fora e caía no provider local, sem
-  ferramenta nenhuma.
+O binário do gateway **não é versionado** (é grande e binário): coloque o seu em
+`host/c-host.exe`. Sem ele o app continua de pé, com o provider local respondendo offline —
+só sem modelo e sem ferramenta.
 
-E uma do Vite: o `c-host.exe` roda dentro do projeto, o watcher tenta abrir o arquivo, leva
-`EBUSY` e derruba o servidor de desenvolvimento inteiro — por isso `host/` está em
-`server.watch.ignored` no `vite.config.ts`.
+Um detalhe do Vite: o gateway roda dentro do projeto, o watcher tenta abrir o arquivo, leva
+`EBUSY` (travado por estar em execução) e derruba o servidor de desenvolvimento inteiro — por
+isso `host/` está em `server.watch.ignored` no `vite.config.ts`.
 
 ## O que ainda é simulado
 
@@ -208,7 +203,7 @@ src/                  # front: App, componentes, markdown mínimo e o desenho da
   effort.ts           # níveis de esforço do seletor ao lado do modelo
   models.tsx          # catálogo de modelos do seletor
 backend/              # FastAPI + SSE + SQLite (ver backend/README.md)
-  app/identidade.py   # identidade do assistente e corte da apresentação do host
+  app/identidade.py   # identidade do assistente: regras do prompt + corte da apresentação
   app/tools/          # catálogo das 22 ferramentas + loop agentic
   tests/              # 110 testes, sem rede
 host/                 # o binário do host não é versionado — ver host/README.md
