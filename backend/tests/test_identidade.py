@@ -1,8 +1,9 @@
 """Testes da identidade do assistente.
 
-Os textos usados aqui são **amostras reais**, copiadas do `data/koda.db`: foi assim que o
-vazamento apareceu (modelos do host se apresentando como "Liz, criada pela Liz AI Studio",
-inclusive colado na frente de resposta de tarefa).
+Os textos têm a **forma exata** do que chegava: apresentação com o nome do assistente e de
+quem o "criou", às vezes colada na frente de resposta de tarefa — foi assim que o vazamento
+apareceu nas conversas gravadas. Os nomes do criador são placeholders; os dos assistentes
+são os do catálogo, que é o que o filtro precisa reconhecer.
 """
 
 from __future__ import annotations
@@ -22,14 +23,13 @@ from app.providers.base import ChatOptions, ChatTurn, system_prompt
 from app.routers.chat import _turns
 from app.schemas import Message
 
-#: Amostras reais, do banco.
 AMOSTRAS = [
-    "oii, eu sou a Liz, criada pela Liz AI Studio! 💜\n\nComo posso te ajudar hoje?",
-    "Oii, tudo ótimo! Me chamo Liz, criada pela Liz AI Studio — como posso te ajudar? 😊",
-    "oii! Eu sou a Koda, criada pela Liz AI Studio. 😊\n\nComo posso te ajudar hoje?",
-    "Sou a Liz, criada pela Liz AI Studio.",
-    "Olá! Eu sou a Layze, uma IA criada pela Liz AI Studio, e estou aqui para ajudar.",
-    "Oii! Meu nome é Liz, fui criada pela Liz AI Studio. No que posso ajudar?",
+    "oii, eu sou a Koda, criada pela Fulano Labs! 💜\n\nComo posso te ajudar hoje?",
+    "Oii, tudo ótimo! Me chamo Layze, criada pela Fulano Labs — como posso te ajudar? 😊",
+    "oii! Eu sou a Koda, criada pela Fulano Labs. 😊\n\nComo posso te ajudar hoje?",
+    "Sou a Koda, criada pela Fulano Labs.",
+    "Olá! Eu sou a Layze, uma IA criada pela Fulano Labs, e estou aqui para ajudar.",
+    "Oii! Meu nome é Koda, fui criado pela Fulano Labs. No que posso ajudar?",
 ]
 
 
@@ -39,16 +39,16 @@ AMOSTRAS = [
 @pytest.mark.parametrize("texto", AMOSTRAS)
 def test_apresentacao_sai_do_comeco(texto: str) -> None:
     limpo = remover_intro(texto)
-    assert "Liz AI Studio" not in limpo
+    assert "Fulano Labs" not in limpo
     assert "criada" not in limpo.lower()
-    assert "sou a Liz" not in limpo
-    assert "me chamo Liz" not in limpo.lower()
+    assert "sou a Koda" not in limpo
+    assert "me chamo Layze" not in limpo
 
 
 def test_resposta_de_tarefa_fica_intacta_depois_do_corte() -> None:
-    """O caso do `liz-4`: apresentação colada na frente do trabalho de verdade."""
+    """Apresentação colada na frente do trabalho de verdade."""
     texto = (
-        "oii, eu sou a Liz, criada pela Liz AI Studio! 💜\n\n"
+        "oii, eu sou a Koda, criada pela Fulano Labs! 💜\n\n"
         "Fui dar uma olhadinha lá no caminho `C:\\recorte\\site` e olha o que achei:\n\n"
         "Tem **1 arquivo** lá dentro:\n- `hello word.html`\n\n"
         "Quer que eu abra ele pra ver o conteúdo?"
@@ -56,11 +56,11 @@ def test_resposta_de_tarefa_fica_intacta_depois_do_corte() -> None:
     limpo = remover_intro(texto)
     assert limpo.startswith("Fui dar uma olhadinha")
     assert "hello word.html" in limpo
-    assert "Liz" not in limpo
+    assert "Fulano" not in limpo
 
 
 def test_resposta_vazia_sai_com_a_identidade_do_app() -> None:
-    assert limpar_identidade("Sou a Liz, criada pela Liz AI Studio.").startswith("Sou o Koda")
+    assert limpar_identidade("Sou a Koda, criada pela Fulano Labs.").startswith("Sou o Koda")
 
 
 def test_pergunta_de_python_nao_e_tocada() -> None:
@@ -86,7 +86,7 @@ def test_quem_foi_criado_sem_nome_de_assistente_nao_conta() -> None:
 
 
 def test_travessao_separa_apresentacao_de_resposta() -> None:
-    limpo = remover_intro("Me chamo Liz, criada pela Liz AI Studio — como posso te ajudar? 😊")
+    limpo = remover_intro("Me chamo Layze, criada pela Fulano Labs — como posso te ajudar? 😊")
     assert limpo.startswith("como posso te ajudar?")
 
 
@@ -95,10 +95,10 @@ def test_travessao_separa_apresentacao_de_resposta() -> None:
 
 def test_filtro_tira_a_apresentacao_pedaco_a_pedaco() -> None:
     """A apresentação pode vir cortada no meio de um pedaço — é o caso normal."""
-    texto = "oii, eu sou a Liz, criada pela Liz AI Studio! 💜\n\nTotal: 7 arquivos."
+    texto = "oii, eu sou a Koda, criada pela Fulano Labs! 💜\n\nTotal: 7 arquivos."
     filtro = FiltroIdentidade()
     saida = "".join(filtro.push(letra) for letra in texto) + filtro.fechar()
-    assert "Liz" not in saida
+    assert "Fulano" not in saida
     assert "Total: 7 arquivos." in saida
     assert filtro.descartou is True
 
@@ -116,7 +116,7 @@ def test_filtro_segura_so_a_saudacao_ate_decidir() -> None:
     filtro = FiltroIdentidade()
     assert filtro.push("oii! ") == ""
     assert filtro.push("Eu sou a Koda, criada pela ") == ""
-    assert filtro.push("Liz AI Studio. 😊\n\n") == ""
+    assert filtro.push("Fulano Labs. 😊\n\n") == ""
     assert filtro.descartou is True
     assert filtro.fechar() == "Sou o Koda, o assistente de código deste app. Como posso ajudar?"
 
@@ -149,7 +149,7 @@ def test_regras_pedem_identidade_propria_sem_criador() -> None:
 def test_system_prompt_do_modo_texto_leva_as_regras() -> None:
     texto = system_prompt(ChatOptions(model="liz-nano"))
     assert "Sua identidade nesta conversa" in texto
-    assert "Liz AI Studio" not in texto
+    assert "Fulano Labs" not in texto
 
 
 def test_system_prompt_usa_o_nome_configurado() -> None:
@@ -173,20 +173,20 @@ def test_historico_reenviado_perde_a_apresentacao() -> None:
         Message(
             id="2",
             role="assistant",
-            text="oii, eu sou a Liz, criada pela Liz AI Studio! 💜\n\nComo posso ajudar?",
+            text="oii, eu sou a Koda, criada pela Fulano Labs! 💜\n\nComo posso ajudar?",
             at=0,
         ),
         Message(id="3", role="user", text="liste src", at=0),
     ]
     turns = _turns(mensagens)
     assert [turn.role for turn in turns] == ["user", "assistant", "user"]
-    assert "Liz AI Studio" not in " ".join(turn.text for turn in turns)
+    assert "Fulano Labs" not in " ".join(turn.text for turn in turns)
 
 
 def test_mensagem_que_era_so_apresentacao_sai_do_historico() -> None:
     mensagens = [
         Message(id="1", role="user", text="oi", at=0),
-        Message(id="2", role="assistant", text="Sou a Liz, criada pela Liz AI Studio.", at=0),
+        Message(id="2", role="assistant", text="Sou a Koda, criada pela Fulano Labs.", at=0),
         Message(id="3", role="user", text="e aí?", at=0),
     ]
     turns = _turns(mensagens)

@@ -1,8 +1,8 @@
 """Provider OpenAI-compatível: streaming para o texto e um passo com ferramentas.
 
 Serve OpenAI, Groq, OpenRouter e o Ollama (`http://localhost:11434/v1`) — muda só a
-`OPENAI_BASE_URL` e a chave. `GeminiProxyProvider` herda daqui apontando para o proxy
-local do projeto TOOLS, que fala o mesmo protocolo mas é sem chave.
+`OPENAI_BASE_URL` e a chave. `GeminiProxyProvider` herda daqui apontando para o gateway
+local do serviço, que fala o mesmo protocolo.
 """
 
 from __future__ import annotations
@@ -48,10 +48,10 @@ TIME_STREAM = httpx.Timeout(120.0, connect=10.0)
 ESFORCO_LIGADO = "minimal"
 ESFORCO_DESLIGADO = "none"
 
-#: Nem todo modelo aceita `none`: os de alvo `openai-responses` do host (`liz-4`,
-#: `layze-2`) recusam o campo com **400**, com ou sem ferramentas no corpo — era o erro que
-#: aparecia na tela. `minimal` passa em todos os medidos, então é ele que vai quando o
-#: modelo não está na lista dos que aceitam `none` (ou quando o catálogo não responde).
+#: Nem todo modelo aceita `none`: parte do catálogo do serviço recusa o campo com **400**,
+#: com ou sem ferramentas no corpo — era o erro que aparecia na tela. `minimal` passa em
+#: todos os medidos, então é ele que vai quando o modelo não está na lista dos que aceitam
+#: `none` (ou quando o catálogo não responde).
 ESFORCO_SEGURO = "minimal"
 
 
@@ -358,17 +358,15 @@ class OpenAICompatibleProvider:
 
 
 class GeminiProxyProvider(OpenAICompatibleProvider):
-    """O host local (`host/c-host.exe`): mesma API da OpenAI, sem chave.
+    """O gateway local (`host/c-host.exe`): a mesma API da OpenAI, do lado do serviço.
 
-    O nome `gemini` e a classe vêm do proxy do projeto TOOLS e ficaram por herança — o que
-    está do outro lado hoje é o host, que serve o catálogo free-tier em `/v1/models` e
-    aceita `/v1/chat/completions` sem autenticação.
+    O nome `gemini` e a classe vieram do proxy do projeto anterior e ficaram por herança — o
+    que está do outro lado hoje é o gateway, que expõe o catálogo do serviço em `/v1/models`
+    e recebe a conversa em `/v1/chat/completions`.
 
-    Do proxy original ele mantém a capacidade de **trocar de conta**: quando o outro lado
-    publica as contas em `/api/accounts` (`is_valid` + `available`) e uma bate no limite, a
-    próxima atende — o mesmo `listar_perfis` do `loop_agente.py`. O host atual não publica
-    esse painel (responde 404), então na prática esse caminho fica inerte e o que resolve é
-    o retry com backoff.
+    Dele ele mantém a capacidade de **trocar de perfil**: quando o serviço publica os
+    perfis disponíveis e um bate no limite, o próximo atende. Sem esse painel o caminho
+    fica inerte e quem resolve é o retry com backoff.
     """
 
     name = "gemini"
@@ -392,7 +390,7 @@ class GeminiProxyProvider(OpenAICompatibleProvider):
         return base
 
     async def contas_livres(self) -> list[str]:
-        """Perfis válidos e fora do cooldown, do jeito que o painel do proxy conta."""
+        """Perfis válidos e livres, do jeito que o serviço publica."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resposta = await client.get(self.contas_url)
@@ -411,10 +409,10 @@ class GeminiProxyProvider(OpenAICompatibleProvider):
             and conta.get("profile_id")
         ]
 
-    #: Modelos que aceitam `reasoning_effort: none`. O host publica o alvo de cada um em
-    #: `/v1/models` (`targetFormat`); os de alvo `openai-responses` recusam o campo com
-    #: 400, então ficam de fora. Lido uma vez e guardado — o catálogo não muda em execução,
-    #: e um catálogo que não responde deixa o conjunto vazio (todo mundo vai de `minimal`).
+    #: Modelos que aceitam `reasoning_effort: none`. O serviço publica o alvo de cada um no
+    #: catálogo e os que recusam o campo com 400 ficam de fora. Lido uma vez e guardado — o
+    #: catálogo não muda em execução, e um catálogo que não responde deixa o conjunto vazio
+    #: (todo mundo vai de `minimal`).
     async def _modelos_que_aceitam_none(self) -> frozenset[str]:
         if self._aceitam_none is not None:
             return self._aceitam_none

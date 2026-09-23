@@ -4,7 +4,7 @@ Servidor do Koda em Python: **FastAPI** para as rotas, **SSE** para o texto cheg
 enquanto é gerado e **SQLite** para conversas, uso e conta. Sem `.env` nenhum ele já
 funciona: o provider local responde de forma offline e explícita. Com o **host local**
 (`host/c-host.exe`, `127.0.0.1:21128`) no ar ele é escolhido sozinho e aí o chat passa a ter
-tool calling de verdade — sem chave e sem serviço externo.
+os modelos do serviço e tool calling de verdade.
 
 ```bash
 cd backend
@@ -105,13 +105,10 @@ O modelo retoma de onde parou em vez de recomeçar. São três defesas, nesta or
    6s (`KODA_RETRY_ATTEMPTS`, padrão 3 tentativas). O **404** também entra na lista quando o
    provider é o do host: no projeto TOOLS original o upstream devolvia 404 no meio da
    conversa e o passo seguinte costumava funcionar, então ele é tratado como transitório.
-2. **Erro "de vez"** (400/401/403) ganha **uma** segunda chance em outra conta: o provider lê
-   `/api/accounts` do painel (`GEMINI_WEB_URL`) e passa para a próxima conta válida e fora do
-   cooldown, mandando o `X-Profile-Id` novo. Sem outra conta livre ele não insiste — aí é bug
-   nosso, não cota. **No host atual isso é inerte**: o `c-host.exe` não publica
-   `/api/accounts` (responde 404) e não tem conta para girar, então o passo 2 simplesmente
-   não encontra candidato e segue para o 3. O código fica porque o mecanismo é genérico de
-   proxy — se um host futuro expuser o painel, a troca volta a funcionar sem mexer em nada.
+2. **Erro "de vez"** (400/401/403) ganha **uma** segunda chance em outro perfil: quando o
+   serviço publica os perfis disponíveis (é o endereço que `GEMINI_WEB_URL` aponta), o
+   provider passa para o próximo perfil livre em vez de desistir na hora. Sem outro perfil
+   ele não insiste — aí é bug nosso, não limite do serviço.
 3. **Última cartada**: esgotadas as tentativas, espera `KODA_RETRY_FINAL_WAIT_S`
    (padrão 12s, `0` desliga) e tenta uma vez mais, porque um 429 em rajada passa rápido.
 
@@ -120,13 +117,12 @@ Cada movimento aparece escrito na conversa (`_(passo 1: … — tentando de novo
 ainda assim não passar, o turno termina com `completed: false` e o motivo, e o que já
 foi executado fica gravado em `steps` na mensagem.
 
-### Identidade (e a persona que o host injeta)
+### Identidade do assistente
 
-O `c-host.exe` injeta uma persona própria na conversa, junto do nosso prompt. Quando o
-modelo fala de si, é essa persona que vence: as respostas começavam com "oii, eu sou a
-Liz, criada pela Liz AI Studio! 💜" — inclusive **colado na frente de resposta de tarefa**
-(no `liz-4`, para uma pergunta sobre uma pasta). E o pior efeito era indireto: o histórico
-gravado ensina, então a apresentação se repetia em todas as mensagens seguintes.
+Quando o pedido atravessa um gateway que acrescenta instruções próprias ao histórico, o
+modelo pode responder **se apresentando** — nome do serviço e de quem o "criou" — inclusive
+**colado na frente de resposta de tarefa**. E o pior efeito era indireto: o histórico gravado
+ensina, então a apresentação se repetia em todas as mensagens seguintes.
 
 São duas defesas, e as duas juntas (`app/identidade.py`):
 
@@ -233,11 +229,10 @@ meia-noite, segunda-feira e dia 1º **no relógio do cliente**. Os limites ficam
 - **local** — responde sem chave, em pedaços, dizendo que não há modelo configurado. **Não
   sabe chamar ferramenta**: com ele o chat funciona, mas o agente não executa nada
   (`tools_ready: false` no `/api/health`).
-- **gemini** — o **host local** em `host/c-host.exe` (`GEMINI_PROXY_URL`, padrão
-  `http://127.0.0.1:21128/v1`), sem chave, com tool calling. É ele que liga o modo Tools na
-  interface. O nome do provider ficou `gemini` por herança do proxy do projeto TOOLS, mas o
-  que está do outro lado hoje é o host. Detalhes do catálogo e das armadilhas na seção
-  *Host local (modelos)* do README da raiz.
+- **gemini** — o **gateway local** em `host/c-host.exe` (`GEMINI_PROXY_URL`, padrão
+  `http://127.0.0.1:21128/v1`), que traz os modelos do serviço e o tool calling. É o que liga
+  o agente na interface. O nome do provider ficou `gemini` por herança do proxy do projeto
+  anterior, mas o que está do outro lado hoje é o gateway.
 - **openai** — `/chat/completions` com `stream: true`; serve OpenAI, Groq, OpenRouter e o
   Ollama (`OPENAI_BASE_URL=http://localhost:11434/v1`). `KODA_MODEL_MAP` traduz os nomes
   da interface (`{"liz-nano": "gpt-4o"}`).
@@ -250,14 +245,13 @@ Duas decisões que o provider do host toma e que não são óbvias:
   `koda-vision`, `liz-flash`, `liz-pro`, `liz-vision`) caem no `GEMINI_MODEL`. Antes disso o
   provider engolia qualquer id que não começasse com `gemini` e devolvia o padrão — escolher
   `koda-1` pedia outro modelo, **em silêncio**, e todos os modelos viravam um só.
-- **`reasoning_effort: none` só vai para quem aceita.** Dois modelos do host (`liz-4` e
-  `layze-2`) têm alvo `openai-responses` em `/v1/models` e **recusam o campo com 400**, com ou
-  sem ferramentas no corpo — era um erro na tela em vez de resposta, justamente com o botão
-  Reasoning desligado. O provider lê o `targetFormat` do catálogo do host (uma vez, e guarda) e
-  manda `minimal` para esses; catálogo fora do ar também cai em `minimal`, que passa em todos
-  os modelos medidos.
-- **a sondagem espera até 3s.** O host busca o catálogo do upstream na primeira chamada e
-  demora; com timeout curto o `auto` concluía que ele estava fora e caía no `local` (sem
+- **`reasoning_effort: none` só vai para quem aceita.** Nem todo modelo do serviço aceita o
+  campo: parte do catálogo **recusa com 400**, com ou sem ferramentas no corpo, e isso virava
+  erro na tela justamente com o botão Reasoning desligado. O provider confere o catálogo uma
+  vez, guarda o que cada modelo aceita e manda um valor seguro quando o desejado não serve —
+  catálogo fora do ar também cai no valor seguro, que passa em todos.
+- **a sondagem espera até 3s.** O serviço monta o catálogo na primeira chamada e demora; com
+  timeout curto o `auto` concluía que o gateway estava fora e caía no `local` (sem
   ferramentas). A sonda mora em `proxy_disponivel()`.
 
 Para acrescentar outro provedor, implemente `stream(turns, options)` e registre em

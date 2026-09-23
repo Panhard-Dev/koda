@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # Retentativas do agente quando quem falha é o provedor, não a tarefa.
     retry_attempts: int = 3
-    """Última cartada: espera essa janela de cooldown e tenta uma vez mais (0 desliga)."""
+    """Última cartada: espera essa janela e tenta uma vez mais (0 desliga)."""
     retry_final_wait_s: int = 12
 
     # Chaves sem prefixo, como todo mundo espera encontrar no .env.
@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     )
     model_map: str = "{}"
 
-    # Host local (`koda/host/c-host.exe`), sem chave: só apontar e usar. Ele serve o
-    # catálogo free-tier em /v1/models e aceita /v1/chat/completions sem autenticação.
+    # Gateway local (`host/c-host.exe`): a ligação com o serviço de modelos. Ele expõe o
+    # catálogo em /v1/models e recebe a conversa em /v1/chat/completions.
     gemini_proxy_url: str = Field(
         default="http://127.0.0.1:21128/v1",
         validation_alias=AliasChoices("GEMINI_PROXY_URL", "KODA_GEMINI_PROXY_URL"),
@@ -88,9 +88,9 @@ class Settings(BaseSettings):
         default="liz-nano",
         validation_alias=AliasChoices("GEMINI_MODEL", "KODA_GEMINI_MODEL"),
     )
-    """Perfil do proxy (`X-Profile-Id`); vazio deixa o host escolher a conta."""
+    """Perfil usado no serviço, quando ele trabalha com mais de um; vazio deixa ele escolher."""
     gemini_profile: str | None = None
-    """Onde o host expõe o painel de contas (`/api/accounts`) — de onde sai a troca de conta."""
+    """Onde o serviço publica os perfis disponíveis — de onde sai a troca de perfil."""
     gemini_web_url: str = Field(
         default="http://127.0.0.1:21128",
         validation_alias=AliasChoices("GEMINI_WEB_URL", "KODA_GEMINI_WEB_URL"),
