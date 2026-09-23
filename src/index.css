@@ -1,0 +1,265 @@
+@import 'tailwindcss';
+
+/*
+ * Tokens semânticos. As utilidades (`bg-koda-bg`, `text-koda-fg/60`, …) apontam
+ * para estas variáveis, então trocar `data-theme`/`data-accent`/`data-font` no
+ * <html> repinta o app inteiro sem re-renderizar nada no React.
+ *
+ * `light-dark()` resolve pelo `color-scheme` em vigor: com `dark` no :root temos
+ * o tema escuro, com `light dark` o navegador decide (modo "Sistema").
+ */
+@theme inline {
+  --color-koda-bg: var(--koda-bg);
+  --color-koda-panel: var(--koda-panel);
+  --color-koda-surface: var(--koda-surface);
+  --color-koda-input: var(--koda-input);
+  --color-koda-fg: var(--koda-fg);
+  --color-koda-accent: var(--koda-accent);
+  --color-koda-accent-strong: var(--koda-accent-strong);
+  --font-sans: var(--koda-font-sans);
+}
+
+:root {
+  color-scheme: dark;
+  --koda-bg: light-dark(#f6f6f8, #0d0d0f);
+  --koda-panel: light-dark(#ffffff, #141416);
+  --koda-surface: light-dark(#ffffff, #1a1a1e);
+  --koda-input: light-dark(#ffffff, #1c1c20);
+  --koda-fg: light-dark(#16171c, #ffffff);
+  --koda-accent: #a78bfa;
+  --koda-accent-strong: #8b5cf6;
+  --koda-shadow: light-dark(rgba(18, 18, 26, 0.16), rgba(0, 0, 0, 0.95));
+  --koda-zoom: 1;
+  --koda-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='system'] {
+  color-scheme: light dark;
+}
+
+:root[data-accent='azul'] {
+  --koda-accent: #7dd3fc;
+  --koda-accent-strong: #3b82f6;
+}
+
+:root[data-accent='verde'] {
+  --koda-accent: #6ee7b7;
+  --koda-accent-strong: #10b981;
+}
+
+:root[data-accent='rosa'] {
+  --koda-accent: #f9a8d4;
+  --koda-accent-strong: #ec4899;
+}
+
+:root[data-font='serif'] {
+  --koda-font-sans: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+}
+
+:root[data-font='mono'] {
+  --koda-font-sans: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Menlo, Consolas, monospace;
+}
+
+:root[data-scale='compacto'] {
+  --koda-zoom: 0.9;
+}
+
+:root[data-scale='grande'] {
+  --koda-zoom: 1.15;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+#root {
+  zoom: var(--koda-zoom);
+}
+
+body {
+  margin: 0;
+  background: var(--koda-bg);
+  color: var(--koda-fg);
+  font-family: var(--koda-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.msg-in {
+  animation: msg-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.menu-in {
+  animation: menu-in 0.14s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: top;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Filhos entram em cascata: o container recebe `stagger` e cada um espera um pouco. */
+.stagger > * {
+  animation: rise 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.stagger > *:nth-child(2) {
+  animation-delay: 0.05s;
+}
+
+.stagger > *:nth-child(3) {
+  animation-delay: 0.1s;
+}
+
+.stagger > *:nth-child(4) {
+  animation-delay: 0.15s;
+}
+
+.stagger > *:nth-child(5) {
+  animation-delay: 0.2s;
+}
+
+.stagger > *:nth-child(6) {
+  animation-delay: 0.25s;
+}
+
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.bar-grow {
+  transform-origin: left center;
+  animation: bar-grow 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.heat-col {
+  animation: fade-in 0.35s ease-out both;
+}
+
+@keyframes dot-pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.dot-pulse {
+  animation: dot-pulse 1.2s infinite ease-in-out;
+}
+
+/* Brilho que atravessa a coroa enquanto o Koda pensa. */
+@keyframes thinking-shine {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(1130px);
+  }
+}
+
+.thinking-shine {
+  fill: var(--koda-accent);
+  animation: thinking-shine 1.5s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+
+/* Arco da ferramenta em execução. */
+@keyframes tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tool-spin {
+  transform-origin: 12px 12px;
+  animation: tool-spin 0.9s linear infinite;
+}
+
+/*
+ * Reduzir animações é escolha explícita em Aparência. Não seguimos
+ * `prefers-reduced-motion` sozinhos: em máquinas com "mostrar animações" desligado nas
+ * configurações do Windows isso desligava o app inteiro sem o usuário pedir.
+ */
+:root[data-motion='reduced'] *,
+:root[data-motion='reduced'] *::before,
+:root[data-motion='reduced'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--koda-fg) 14%, transparent);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--koda-fg) 24%, transparent);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
