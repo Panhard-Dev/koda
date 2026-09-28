@@ -7,7 +7,6 @@
   "scripts": {
     "dev": "vite",
     "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787",
-    "test:api": "cd backend && uv run pytest -q",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",

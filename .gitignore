@@ -33,6 +33,11 @@ backend/.mimosa/
 backend/.tmp-cmd/
 backend/.tmp-debug/
 
+# Testes e sondas ficam só na máquina: o repositório é de leitura, não leva teste
+backend/tests/
+backend/testar_*.py
+backend/probe_*.py
+
 # Sandbox do pytest (symlinks e projetos temporários) — não é código
 backend/.pytest-local/
 

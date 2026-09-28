@@ -9,7 +9,6 @@ acessível ele é escolhido sozinho, e aí o chat passa a ter modelo e tool call
 cd backend
 uv sync                                  # cria o .venv e instala as dependências
 uv run uvicorn app.main:app --reload --port 8787
-uv run pytest                            # 110 testes (rotas, stream, ferramentas, identidade)
 ```
 
 Documentação interativa em `http://localhost:8787/docs`.
@@ -634,39 +633,6 @@ pasta de downloads do sistema, com o progresso na tela.
 - A pasta é a de downloads do sistema; `KODA_DOWNLOAD_DIR` troca isso (útil em teste e em
   quem embute o Koda).
 
-## Verificação manual (fora do pytest)
-
-Três scripts de fumaça ficam na raiz do backend. Eles **não** são `test_*.py`, então o
-pytest ignora — servem para provar o sistema contra a máquina de verdade, com o serviço no ar:
-
-```bash
-uv run python testar_ferramentas.py   # as 37 ferramentas, uma a uma
-uv run python testar_e2e.py           # HTTP: backend → serviço → ferramenta → volta
-uv run python testar_vivo.py          # o modelo de verdade trabalhando, com portões de parada
-```
-
-`testar_ferramentas.py` bate em todas as 37 (93 chamadas), confere que as travas de segurança
-**recusam** o que têm que recusar e, para as `git_*`, monta um repositório temporário de
-verdade (`git init` → commit → log → diff) — porque só testar a recusa não prova que a
-ferramenta funciona. O aceite usa a **mesma** regra do loop (`saida_ok`), então comando que
-roda e falha conta como falha. `testar_e2e.py` cobre stream puro, agente com ferramenta, um
-segundo modelo e um id inválido (que tem que voltar com erro limpo do serviço, não estourar).
-
-`testar_vivo.py` é o único que põe o **modelo de verdade** para trabalhar (precisa do app
-aberto e da sessão da conta, porque quem responde é o `c-host.exe`). Ele cria um projeto JS
-descartável no TEMP com um bug de verdade, roda duas tarefas e cobra as invariantes dos
-portões de parada — não o texto da resposta, que muda a cada dia:
-
-- promessa no fim (`anunciou`) **não** pode terminar com `completed: true`;
-- tarefa que mexeu em arquivo de código tem de ter executado algo **depois** da última
-  mudança;
-- o fechamento honesto tem de ficar gravado, e não só na tela;
-- o bug tem de estar corrigido no arquivo no fim.
-
-A pasta de trabalho em uso e o modo de permissão são restaurados no fim, e a pasta de teste
-é apagada. Os três exigem o serviço acessível; sem ele o resultado não diz nada sobre o
-nosso código.
-
 ## Estrutura
 
 ```
@@ -682,14 +648,6 @@ app/
   nuvem.py         # ponte com o Koda Cloud (update, changelog) e o que ela não pode fazer
   routers/         # chat, conversations, usage, account, cloud
   main.py          # create_app(), CORS, lifespan
-tests/test_nuvem.py # nuvem: HTTPS, link inseguro, timeout, nuvem fora do ar
-tests/test_api.py  # rotas, stream e modo agente
-tests/test_tools.py # catálogo de ferramentas e loop (sem rede)
-tests/test_identidade.py # apresentação do modelo, com amostras do banco
-tests/test_contexto.py # compactação de contexto: encolher sem quebrar o histórico
-testar_ferramentas.py # fumaça: as 37 ferramentas (e os apelidos) na máquina real
-testar_e2e.py      # fumaça: ponta a ponta contra o serviço
-testar_vivo.py     # fumaça: o modelo de verdade trabalhando, com os portões de parada
 ```
 
 ## Licença

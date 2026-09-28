@@ -95,7 +95,6 @@ npm run lint         # checagem estática
 npm run build        # build de produção
 
 npm run dev:api      # backend em http://127.0.0.1:8787  (opcional)
-npm run test:api     # os testes do backend
 ```
 
 Todas as variáveis do backend são opcionais — sem nenhuma ele já roda com o provider local e
