@@ -27,6 +27,17 @@ host/*.exe*
 # Estado local de ferramentas (memória de assistente, id de projeto)
 .workbuddy-ai/
 .freebuff/
+.mimosa/
+backend/.mimosa/
+.tmp-agente/
+backend/.tmp-cmd/
+backend/.tmp-debug/
+
+# Sandbox do pytest (symlinks e projetos temporários) — não é código
+backend/.pytest-local/
+
+# Backups locais de binários (o host .exe é grande e não vai para o repositório)
+backups/
 
 # Saída solta de teste — os logs já estão cobertos por *.log acima
 out.txt

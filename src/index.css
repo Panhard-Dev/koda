@@ -263,3 +263,18 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* O arco do medidor de contexto girando enquanto o agente trabalha. */
+@keyframes contexto-girando {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.contexto-girando {
+  animation: contexto-girando 0.9s linear infinite;
+  transform-origin: center;
+}

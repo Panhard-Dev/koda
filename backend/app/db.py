@@ -27,8 +27,11 @@ CREATE TABLE IF NOT EXISTS messages (
   attachments     TEXT NOT NULL DEFAULT '[]',
   model           TEXT,
   elapsed_ms      INTEGER,
+  tokens          INTEGER,
+  contexto        INTEGER,
   at              INTEGER NOT NULL,
-  steps           TEXT NOT NULL DEFAULT '[]'
+  steps           TEXT NOT NULL DEFAULT '[]',
+  todos           TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, at);
@@ -42,6 +45,34 @@ CREATE TABLE IF NOT EXISTS account (
   google INTEGER NOT NULL DEFAULT 0,
   email  TEXT
 );
+
+-- Pastas de verdade: cada projeto é uma pasta do disco, com o caminho completo
+-- guardado aqui (o app nunca guarda só o nome — nome muda de máquina para máquina).
+CREATE TABLE IF NOT EXISTS projects (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  path         TEXT NOT NULL UNIQUE,
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+
+-- O que é do app, não da conta: pasta aberta agora e como o agente pede permissão.
+CREATE TABLE IF NOT EXISTS app_settings (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  approval_mode TEXT NOT NULL DEFAULT 'default',
+  project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL
+);
+
+-- Decisões que valem para sempre («sempre permitir» / «nunca permitir»).
+CREATE TABLE IF NOT EXISTS approval_rules (
+  id         TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  scope      TEXT NOT NULL,
+  decision   TEXT NOT NULL CHECK (decision IN ('sempre', 'nunca')),
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_rules_kind ON approval_rules(kind, scope);
 """
 
 
@@ -62,6 +93,12 @@ class Database:
         colunas = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
         if "steps" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN steps TEXT NOT NULL DEFAULT '[]'")
+        if "tokens" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN tokens INTEGER")
+        if "contexto" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN contexto INTEGER")
+        if "todos" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN todos TEXT NOT NULL DEFAULT '[]'")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

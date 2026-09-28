@@ -10,13 +10,15 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .identidade import NOME
+from .projects import area_de_trabalho
 
-ProviderName = Literal["auto", "local", "openai", "gemini"]
+ProviderName = Literal["auto", "local", "openai", "host"]
 
 
 class Settings(BaseSettings):
@@ -24,11 +26,20 @@ class Settings(BaseSettings):
         env_file=(".env",),
         env_prefix="KODA_",
         extra="ignore",
+        # Sem isto, campo com `validation_alias` só aceitaria o nome alternativo: o
+        # construtor `Settings(cloud_url="...")` seria ignorado em silêncio e o valor
+        # viria do ambiente. Os testes (e quem embute o Koda) passam pelo nome do campo.
+        validate_by_name=True,
     )
 
     provider: ProviderName = "auto"
     database_path: Path = Path("data/koda.db")
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # `http://tauri.localhost` é a origem que o app desktop (Tauri/WebView2) usa
+    # quando roda empacotado; no dev a interface vem do Vite, nas portas 5173.
+    cors_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://tauri.localhost,https://tauri.localhost"
+    )
     local_stream_delay_ms: int = 18
 
     assistente: str = NOME
@@ -50,10 +61,37 @@ class Settings(BaseSettings):
     proteção contra o modelo ser convencido por uma página lida na web a mexer em
     algo do sistema. O `shell`/`terminal` continua podendo tudo — é o que ele é.
     """
-    max_steps: int = 12
-    """Orçamento de tempo de uma tarefa do agente, em segundos (0 = sem limite)."""
-    tool_timeout_s: int = 120
+    max_steps: int = 0
+    """Teto de passos de uma mensagem do agente. **0 = sem teto.**
+
+    Era 12, e 12 não é "tarefa grande": montar um projeto, refatorar um módulo ou rodar uma
+    bateria de testes passa disso no meio de trabalho legítimo — e o agente parava com a
+    tarefa pela metade. Projeto gigante não cabe em número fixo de passos, então o padrão é
+    não ter teto. Quem impede um loop sem fim é o tempo abaixo, o botão de parar e o
+    contador de respostas vazias do loop.
+    """
+    tool_timeout_s: int = 0
+    """Orçamento de tempo da tarefa inteira, em segundos (0 = **sem limite**).
+
+    Era 1800 s (meia hora), e uma tarefa grande de verdade estoura isso: o agente fechava
+    com "o tempo da tarefa acabou antes de terminar" no meio do trabalho. O dono foi
+    explícito: a tarefa vai até acabar, não importa o tamanho. O que impede um loop sem fim
+    é o botão de parar, o contador de respostas vazias e o de provedor fora do ar.
+    """
     tool_output_limit: int = 4000
+    contexto_tokens: int = 1_000_000
+    """Quanto a conversa pode ocupar, em tokens, antes de ser compactada em resumo.
+
+    O agente reenvia o histórico inteiro a cada passo. Num projeto grande isso vira o
+    problema principal: cada saída de ferramenta entra na conta e, depois de dezenas de
+    passos, o pedido passa do que o provedor aceita — e a tarefa morre no meio. Ao chegar
+    neste teto, o que já foi resolvido é resumido (ver `contexto.py`).
+
+    O padrão é **1 milhão**, que é a janela que os modelos do serviço aceitam. O teto
+    existe para o pedido não passar do que o provedor aguenta; compactar antes disso joga
+    fora contexto que ainda cabia — era o defeito do padrão antigo, de 200 mil. **Zero**
+    desliga a compactação: o histórico vai inteiro, como antes.
+    """
 
     # Busca na web: só o Bing, raspando a página de resultados. Sem chave, sem serviço
     # no meio e sem plano B — se o Bing bloquear, a busca volta vazia.
@@ -78,23 +116,78 @@ class Settings(BaseSettings):
     )
     model_map: str = "{}"
 
-    # Serviço de modelos: publica o catálogo em /v1/models e recebe a conversa em
-    # /v1/chat/completions.
-    gemini_proxy_url: str = Field(
+    # Serviço de modelos oficial (Liz): é o host em `host/c-host.exe`, que publica o
+    # catálogo em /v1/models e recebe a conversa em /v1/chat/completions.
+    host_url: str = Field(
         default="http://127.0.0.1:21128/v1",
-        validation_alias=AliasChoices("GEMINI_PROXY_URL", "KODA_GEMINI_PROXY_URL"),
+        validation_alias=AliasChoices("HOST_URL", "KODA_HOST_URL"),
     )
-    gemini_model: str = Field(
-        default="liz-nano",
-        validation_alias=AliasChoices("GEMINI_MODEL", "KODA_GEMINI_MODEL"),
+    host_model: str = Field(
+        default="liz-4",
+        validation_alias=AliasChoices("HOST_MODEL", "KODA_HOST_MODEL"),
     )
-    """Perfil usado no serviço, quando ele trabalha com mais de um; vazio deixa ele escolher."""
-    gemini_profile: str | None = None
-    """Onde o serviço publica os perfis disponíveis — de onde sai a troca de perfil."""
-    gemini_web_url: str = Field(
-        default="http://127.0.0.1:21128",
-        validation_alias=AliasChoices("GEMINI_WEB_URL", "KODA_GEMINI_WEB_URL"),
+    """Modelo padrão do serviço, para id que ele não reconheça (ou vazio)."""
+
+    host_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HOST_KEY", "KODA_HOST_KEY"),
     )
+    """Chave de cliente do host, para o build que exige uma.
+
+    O `c-host.exe` com autorização remota recusa quem não manda chave: 401. O host aberto
+    não olha o cabeçalho. Sem nada aqui o `Authorization` simplesmente não vai, então o
+    padrão continua funcionando com o host aberto; com o host fechado, isto é o que faz o
+    agente voltar a ter ferramentas em vez de cair no provider local.
+    """
+
+    # --- Nuvem (Koda Cloud) ---
+    # O backend na nuvem é um extra: aviso de atualização, changelog e catálogo publicado.
+    # O Koda funciona inteiro sem ele — toda falha da nuvem vira "indisponível" e a tela
+    # segue como está. Vazio desliga.
+    cloud_url: str = Field(
+        default="https://koda-cloud-api.studiosluxgames.workers.dev",
+        validation_alias=AliasChoices("KODA_CLOUD_URL", "KODA_BACKEND_URL"),
+    )
+    cloud_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("KODA_CLOUD_TOKEN", "KODA_BACKEND_TOKEN"),
+    )
+    """Token do app na nuvem (opcional). Vai só no cabeçalho, nunca na URL nem no log."""
+    cloud_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
+    cloud_canal: Literal["stable", "beta"] = "stable"
+    cloud_versao: str = ""
+    """Versão a comparar com a publicada. Vazio usa a versão deste backend."""
+    cloud_download_hosts: str = ""
+    """Domínios aceitos no link de download que a nuvem devolve (vazio = qualquer HTTPS)."""
+    cloud_check_on_start: bool = False
+    """Consulta a nuvem ao subir. Desligado por padrão: nada de saída de rede sem pedido."""
+    download_dir: str = ""
+    """Pasta onde o instalador baixado é salvo. Vazio usa a pasta de downloads do sistema."""
+
+    @field_validator("cloud_url")
+    @classmethod
+    def _conferir_url_da_nuvem(cls, value: str) -> str:
+        """Só HTTPS, sem credenciais embutidas e sem barra sobrando no fim.
+
+        `http://` escapa apenas em endereço local (desenvolvimento); qualquer outro host é
+        recusado na configuração, e não em tempo de requisição.
+        """
+        limpo = (value or "").strip().rstrip("/")
+        if not limpo:
+            return ""
+        partes = urlsplit(limpo)
+        if partes.scheme not in ("http", "https") or not partes.hostname:
+            raise ValueError("KODA_CLOUD_URL precisa ser uma URL http(s) completa")
+        if partes.username or partes.password:
+            raise ValueError("KODA_CLOUD_URL não aceita usuário/senha no endereço")
+        local = partes.hostname in ("localhost", "127.0.0.1", "::1")
+        if partes.scheme != "https" and not local:
+            raise ValueError("KODA_CLOUD_URL precisa ser HTTPS")
+        return limpo
+
+    @property
+    def cloud_download_permitidos(self) -> list[str]:
+        return [item.strip().lower() for item in self.cloud_download_hosts.split(",") if item.strip()]
 
     @property
     def origins(self) -> list[str]:
@@ -115,10 +208,15 @@ class Settings(BaseSettings):
 
     @property
     def workspace_path(self) -> Path:
-        """Pasta onde as ferramentas trabalham (padrão: a raiz do projeto)."""
+        """Pasta onde as ferramentas trabalham.
+
+        O padrão é a **Área de Trabalho** de quem está usando, em qualquer PC: é onde a
+        pessoa vê o que o agente fez, sem precisar procurar. `KODA_WORKSPACE` manda mais
+        que isso, e o projeto escolhido no prompt box manda mais que os dois.
+        """
         if self.workspace:
             return Path(self.workspace).expanduser().resolve()
-        return Path(__file__).resolve().parents[2]
+        return area_de_trabalho()
 
     @property
     def tools_negadas(self) -> set[str]:

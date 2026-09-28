@@ -1,17 +1,7 @@
 import { ChevronRight, TriangleAlert } from 'lucide-react'
 import type { ToolStep } from '../api/client'
-import { rotuloFerramenta } from '../tools'
+import { resumoArgumentos, rotuloFerramenta } from '../tools'
 import { ToolIcon, ToolSpinner } from './ToolIcon'
-
-const resumoArgs = (argumentos: Record<string, unknown>, limite = 96) => {
-  const partes = Object.entries(argumentos).map(([chave, valor]) => {
-    const texto = typeof valor === 'string' ? valor : JSON.stringify(valor)
-    const curto = (texto ?? '').replace(/\s+/g, ' ').slice(0, 44)
-    return `${chave}: ${curto}${(texto ?? '').length > 44 ? '…' : ''}`
-  })
-  const resumo = partes.join(' · ')
-  return resumo.length > limite ? `${resumo.slice(0, limite)}…` : resumo
-}
 
 /**
  * Ferramentas que o modelo chamou nesta resposta: uma linha seca por chamada — ícone da
@@ -27,7 +17,7 @@ export default function ToolSteps({ steps }: { steps: ToolStep[] }) {
       {steps.map((step, index) => {
         const rodando = step.output === '' && step.duration_ms === 0
         const chave = step.call_id || `${step.name}-${index}`
-        const resumo = resumoArgs(step.arguments)
+        const resumo = resumoArgumentos(step.arguments)
 
         return (
           <details key={chave} className="group">

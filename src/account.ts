@@ -1,16 +1,32 @@
-/** Estado da conta local. Nada disso sai do navegador nesta build. */
-export type Account = {
-  phone: string | null
-  google: boolean
+/**
+ * Como a conta aparece na interface.
+ *
+ * Quem guarda a conta — identidade, sessão, vínculos — é o painel do Koda; aqui só mora o
+ * que é preciso para *mostrar* isso na tela: o apelido e as iniciais do avatar.
+ */
+
+/** Conta como a interface a vê: só o que é exibido. */
+type ContaVisivel = { email: string; nome?: string | null }
+
+/**
+ * Nome curto da conta: o nome que a pessoa escolheu, senão a parte antes do @, senão uma
+ * palavra neutra. Nunca inventa um nome — o que aparece é o que está no painel.
+ */
+export const apelidoDaConta = (conta: ContaVisivel | null): string => {
+  const nome = conta?.nome?.trim()
+  if (nome) return nome
+  const local = conta?.email?.split('@')[0]?.trim()
+  return local && local !== '' ? local : 'Sua conta'
 }
 
-export const INITIAL_ACCOUNT: Account = { phone: null, google: false }
-
-/** Mostra só os últimos dígitos, como um app de verdade faz. */
-export const maskPhone = (value: string) => {
-  const digits = value.replace(/\D/g, '')
-  if (digits.length < 8) return null
-  return `+55 •••••-${digits.slice(-4)}`
+/**
+ * Duas letras para o avatar. Nome composto dá as iniciais ("Pessoa Nova" → PN); nome de uma
+ * palavra dá as duas primeiras letras ("admpanpan" → AD).
+ */
+export const iniciaisDaConta = (apelido: string): string => {
+  const palavras = apelido.split(/[\s._-]+/).filter((palavra) => palavra !== '')
+  const duas = palavras.length >= 2 ? `${palavras[0][0]}${palavras[1][0]}` : apelido.slice(0, 2)
+  return duas.toUpperCase()
 }
 
 /** Navegador e sistema desta sessão, lidos do `userAgent` (dado real). */

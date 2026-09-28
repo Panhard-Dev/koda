@@ -10,8 +10,15 @@ export default defineConfig({
       // A pasta `host/` guarda binários que ficam em execução dentro do projeto. O watcher
       // do Vite tenta abrir o arquivo, leva EBUSY (resource busy or locked) e derruba o
       // servidor de desenvolvimento inteiro — não é erro de HMR, é o processo morrendo.
-      // Como nada aqui é código do frontend, o jeito é não vigiar a pasta.
-      ignored: ['**/host/**'],
+      // Como nada aqui é código do frontend, o jeito é não vigiar a pasta. O mesmo vale
+      // para o estado de ferramenta (`.mimosa/`), os artefatos do Tauri
+      // (`src-tauri/target`) e o ambiente virtual do backend (`backend/.venv`).
+      ignored: [
+        '**/host/**',
+        '**/.mimosa/**',
+        '**/src-tauri/target/**',
+        '**/backend/.venv/**',
+      ],
     },
   },
 })

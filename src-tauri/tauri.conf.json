@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Koda",
+  "version": "0.3.10",
+  "identifier": "app.koda.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Koda",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 860,
+        "minHeight": 540,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "visible": false,
+        "backgroundColor": "#0d0d0f",
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8787 http://localhost:8787 https://koda-cloud-api.studiosluxgames.workers.dev"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../host/*": "host/",
+      "runtime/backend/python": "backend/python",
+      "runtime/backend/app": "backend/app"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "sidebarImage": "installer/sidebar.bmp",
+        "headerImage": "installer/header.bmp",
+        "uninstallerHeaderImage": "installer/header.bmp",
+        "installMode": "currentUser",
+        "languages": ["PortugueseBR"],
+        "customLanguageFiles": {
+          "PortugueseBR": "installer/PortugueseBR.nsh"
+        },
+        "installerHooks": "installer/hooks.nsh",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

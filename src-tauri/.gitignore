@@ -1,0 +1,8 @@
+# Artefatos de compilação do Rust
+/target
+
+# Esquemas gerados pelo Tauri a partir das capabilities
+/gen/schemas
+
+# Runtime do backend montado por `scripts/gerar-runtime-backend.mjs` para o instalador
+/runtime

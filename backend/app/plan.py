@@ -20,7 +20,10 @@ class Plan:
 PLAN = Plan(name="Free", daily_messages=20, weekly_messages=100, monthly_messages=300)
 
 ACCOUNT_DEFAULTS = {
-    "name": "Conta Koda",
+    # Sem nome de fábrica: quem dá nome à conta é o painel, no login. Se este campo
+    # aparecer vazio na tela, é porque o nome ainda não chegou — melhor vazio que o
+    # nome de outra pessoa.
+    "name": "",
     "plan": PLAN.name,
     "phone": None,
     "google": 0,

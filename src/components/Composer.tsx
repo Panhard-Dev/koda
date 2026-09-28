@@ -4,21 +4,61 @@ import {
   ArrowUp,
   BrainCircuit,
   ChevronDown,
+  CircleDot,
   FolderKanban,
+  FolderOpen,
+  FolderPlus,
   Gauge,
   Globe,
+  Hand,
   Image as ImageIcon,
   Mic,
   Paperclip,
   Plus,
+  ShieldAlert,
+  ShieldCheck,
   Square,
   X,
 } from 'lucide-react'
 import Menu from './Menu'
+import type { MenuOption } from './Menu'
+import ApprovalCard from './ApprovalCard'
+import ContextRing from './ContextRing'
 import { EFFORT_MENU, EFFORT_PADRAO, effortDoModelo, effortLabel } from '../effort'
 import type { Effort } from '../effort'
-import { findModel, modelMenu, MODELO_PADRAO, PROJECTS, projectName } from '../models'
+import { findModel, modelMenu, MODELO_PADRAO } from '../models'
 import type { RemoteModel } from '../models'
+import { MODOS_PERMISSAO, modoDe } from '../permissao'
+
+/**
+ * Ícone de cada modo — fica aqui porque ícone é JSX, e o módulo de modos é TS puro.
+ *
+ * O automático usa **escudo com exclamação**, não raio: ele é o modo em que o agente não
+ * pergunta nada, e o ícone tem de dizer isso — raio dizia "rápido", que não é o risco.
+ */
+export const ICONE_DO_MODO: Record<ModoPermissao, ReactNode> = {
+  manual: <Hand className="h-3.5 w-3.5 text-emerald-400" strokeWidth={1.7} />,
+  default: <ShieldCheck className="h-3.5 w-3.5 text-amber-300" strokeWidth={1.7} />,
+  auto: <ShieldAlert className="h-3.5 w-3.5 text-red-400" strokeWidth={1.7} />,
+}
+
+/**
+ * A cor de cada modo no gatilho: verde, amarelo, vermelho.
+ *
+ * É a única diferença entre os três — o contorno saiu. Quem olha de longe precisa ver a
+ * cor, não decifrar um anel em volta do botão.
+ */
+const COR_DO_MODO: Record<ModoPermissao, string> = {
+  manual: 'text-emerald-400',
+  default: 'text-amber-300',
+  auto: 'text-red-400',
+}
+import type {
+  ApiProject,
+  DecisaoPermissao,
+  ModoPermissao,
+  PedidoPermissao,
+} from '../api/client'
 
 export type SendPayload = {
   text: string
@@ -28,8 +68,10 @@ export type SendPayload = {
   web: boolean
   /** Esforço de raciocínio do modelo escolhido (`auto` deixa o Reasoning decidir). */
   effort: Effort
-  project: string | null
+  /** Pasta de trabalho (caminho completo) escolhida no seletor de projeto. */
+  project_path: string | null
 }
+
 
 const PLUS_ACTIONS = [
   {
@@ -44,6 +86,18 @@ const PLUS_ACTIONS = [
     hint: 'Código, PDF, planilha ou texto',
     icon: <Paperclip className="h-4 w-4" strokeWidth={1.7} />,
   },
+]
+
+/** Menu de comandos do "/": visual, igual ao print de referência — sem execução. */
+const COMANDOS = [
+  { nome: '/goal', descricao: 'Show or set the current session goal.' },
+  { nome: '/workflow', descricao: 'Design and launch a dynamic workflow for a task.' },
+  {
+    nome: '/compact',
+    descricao: 'Compact the current conversation with optional instructions.',
+  },
+  { nome: '/init', descricao: 'Create or update workspace AGENTS.md instructions.' },
+  { nome: '/plan', descricao: 'Switch to Plan mode and optionally send a task.' },
 ]
 
 type SpeechResult = {
@@ -116,22 +170,54 @@ export function Composer({
   onStop,
   busy = false,
   variant = 'home',
-  project = 'sem-projeto',
+  projects = [],
+  projectId = null,
+  pastaPadrao = '',
   onProjectChange,
+  onOpenFolders,
+  permissionMode = 'default',
+  onPermissionModeChange,
+  pedido = null,
+  respondendoPermissao = false,
+  erroPermissao = null,
+  onDecidirPermissao,
   model = MODELO_PADRAO,
   onModelChange,
   remoteModels = [],
+  contextoPorModelo = {},
+  contextoJanela = null,
 }: {
   onSend?: (payload: SendPayload) => void
   onStop?: () => void
   busy?: boolean
   variant?: 'home' | 'chat'
-  project?: string
-  onProjectChange?: (value: string) => void
+  /** Pastas registradas nesta máquina (o projeto é sempre uma pasta de verdade). */
+  projects?: ApiProject[]
+  /** Id da pasta aberta agora; `null` = conversa solta. */
+  projectId?: string | null
+  /** Pasta usada quando não há projeto aberto (a Área de Trabalho desta máquina). */
+  pastaPadrao?: string
+  onProjectChange?: (id: string | null) => void
+  /** Abre o escolhedor de pasta (existente ou nova). */
+  onOpenFolders?: () => void
+  permissionMode?: ModoPermissao
+  onPermissionModeChange?: (modo: ModoPermissao) => void
+  /** Pedido de permissão esperando resposta (o agente está parado nele). */
+  pedido?: PedidoPermissao | null
+  respondendoPermissao?: boolean
+  erroPermissao?: string | null
+  onDecidirPermissao?: (decisao: DecisaoPermissao) => void
   model?: string
   onModelChange?: (value: string) => void
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[]
+  /**
+   * Contexto já usado, por modelo, em tokens de entrada (o `prompt_tokens` do último
+   * passo da última resposta daquele modelo). Vazio = nada medido ainda.
+   */
+  contextoPorModelo?: Record<string, number>
+  /** Teto de contexto (a janela) que o backend aplica — o denominador do anel. */
+  contextoJanela?: number | null
 }) {
   const [message, setMessage] = useState('')
   const [reasoning, setReasoning] = useState(true)
@@ -145,6 +231,8 @@ export function Composer({
   const recognitionRef = useRef<Recognition | null>(null)
 
   const isChat = variant === 'chat'
+  /** Digitar "/" abre o menu de comandos acima da caixa (só visual). */
+  const mostrarComandos = message.startsWith('/')
   const micAvailable =
     typeof window !== 'undefined' &&
     Boolean(
@@ -163,9 +251,68 @@ export function Composer({
   const canSend = !busy && (message.trim().length > 0 || attachments.length > 0)
   const activeModel = findModel(model, remoteModels)
   const effort = effortDoModelo(efforts, model)
-  const activeProject = PROJECTS.find((item) => item.value === project)
-  const projectLabel =
-    project === 'sem-projeto' ? 'Selecionar projeto' : activeProject?.label
+  const ativo = projects.find((item) => item.id === projectId) ?? null
+  const projetoLabel = ativo ? ativo.nome : 'Selecionar projeto'
+  const modo = modoDe(permissionMode)
+
+  /**
+   * Cada modelo do seletor ganha o medidor de contexto à direita.
+   *
+   * O anel é montado aqui e não em `models.tsx` porque ícone/anel é JSX — lá o módulo é
+   * dado puro. A recursão cobre as categorias (Liz, Koda, Layze), que são submenus.
+   */
+  const comMedidor = (opcoes: MenuOption[]): MenuOption[] =>
+    opcoes.map((opcao) =>
+      opcao.options
+        ? { ...opcao, options: comMedidor(opcao.options) }
+        : {
+            ...opcao,
+            trailing: (
+              <ContextRing
+                usado={contextoPorModelo[opcao.value] ?? 0}
+                janela={contextoJanela}
+                trabalhando={busy && opcao.value === model}
+                className="text-koda-fg/60"
+              />
+            ),
+          },
+    )
+
+  /** O seletor lista as pastas salvas e as duas formas de escolher uma nova. */
+  const projectOptions: MenuOption[] = [
+    {
+      value: 'sem-projeto',
+      label: 'Nenhum projeto',
+      hint: pastaPadrao
+        ? `Conversa solta, trabalhando em ${pastaPadrao}`
+        : 'Conversa solta, sem contexto de código',
+    },
+    ...projects.map((item) => ({
+      value: item.id,
+      label: item.nome,
+      hint: item.existe ? item.caminho : `${item.caminho} · pasta não encontrada`,
+    })),
+    {
+      value: 'abrir-pasta',
+      label: 'Usar pasta existente',
+      hint: 'Escolher uma pasta que já está no disco',
+      icon: <FolderOpen className="h-4 w-4" strokeWidth={1.7} />,
+    },
+    {
+      value: 'nova-pasta',
+      label: 'Começar do zero',
+      hint: 'Criar uma pasta nova e trabalhar nela',
+      icon: <FolderPlus className="h-4 w-4" strokeWidth={1.7} />,
+    },
+  ]
+
+  const handleProjectSelect = (value: string) => {
+    if (value === 'abrir-pasta' || value === 'nova-pasta') {
+      onOpenFolders?.()
+      return
+    }
+    onProjectChange?.(value === 'sem-projeto' ? null : value)
+  }
 
   const send = () => {
     if (!canSend) return
@@ -176,7 +323,7 @@ export function Composer({
       reasoning,
       web,
       effort,
-      project: projectName(project),
+      project_path: ativo?.caminho ?? null,
     })
     setMessage('')
     setAttachments([])
@@ -224,18 +371,28 @@ export function Composer({
 
   const projectTriggerClass = [
     'flex w-full items-center gap-2 rounded-lg py-1 text-[13px]',
-    project === 'sem-projeto' ? 'text-koda-fg/45 hover:text-koda-fg/75' : 'text-koda-accent',
+    projectId === null ? 'text-koda-fg/45 hover:text-koda-fg/75' : 'text-koda-accent',
     'transition-colors duration-150 focus-visible:outline-none',
   ].join(' ')
-  const handleProjectSelect = (value: string) => onProjectChange?.(value)
 
   return (
-    <div
-      className={[
-        'w-full max-w-3xl shadow-[0_30px_60px_-30px_var(--koda-shadow)] ring-1',
-        isChat ? 'rounded-3xl bg-koda-input p-4 ring-koda-fg/8' : 'rounded-3xl ring-koda-fg/5',
-      ].join(' ')}
-    >
+    <div className="w-full max-w-3xl">
+      {/* O agente está parado esperando permissão: o cartão fica logo acima da caixa. */}
+      {pedido ? (
+        <ApprovalCard
+          pedido={pedido}
+          respondendo={respondendoPermissao}
+          erro={erroPermissao}
+          onDecidir={(decisao) => onDecidirPermissao?.(decisao)}
+        />
+      ) : null}
+
+      <div
+        className={[
+          'w-full shadow-[0_30px_60px_-30px_var(--koda-shadow)] ring-1',
+          isChat ? 'rounded-3xl bg-koda-input p-4 ring-koda-fg/8' : 'rounded-3xl ring-koda-fg/5',
+        ].join(' ')}
+      >
       <div className={isChat ? '' : 'rounded-t-3xl bg-koda-input p-4 pb-3'}>
         {attachments.length > 0 ? (
           <ul className="mb-2 flex flex-wrap gap-1.5 px-1">
@@ -259,6 +416,32 @@ export function Composer({
               </li>
             ))}
           </ul>
+        ) : null}
+
+        {mostrarComandos ? (
+          <div className="mb-1">
+            <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
+              Commands
+            </p>
+            <div className="max-h-60 overflow-y-auto">
+              {COMANDOS.map((comando, index) => (
+                <div
+                  key={comando.nome}
+                  className={[
+                    'flex items-baseline gap-2 px-1 py-2 text-[13.5px]',
+                    index === 0 ? 'bg-koda-fg/6' : '',
+                  ].join(' ')}
+                >
+                  <span className="shrink-0 font-semibold text-koda-fg">{comando.nome}</span>
+                  <span className="min-w-0 truncate text-koda-fg/45">{comando.descricao}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 border-t border-koda-fg/8 pt-2.5 pb-1 text-[12.5px] text-koda-fg/45">
+              <CircleDot className="h-3.5 w-3.5 shrink-0" strokeWidth={1.7} />
+              Type to search commands, skills, or agents
+            </div>
+          </div>
         ) : null}
 
         <label htmlFor="koda-input" className="sr-only">
@@ -325,11 +508,38 @@ export function Composer({
               <Globe className="h-4 w-4" strokeWidth={1.7} />
             </TogglePill>
 
+            {/* Quanto o agente pode fazer sozinho. A cor é a mensagem: verde = pergunta
+                tudo, amarelo = o comum sozinho, vermelho = não pergunta nada. Sem
+                contorno e sem ícone — quem olha de longe precisa ver a cor. */}
+            <Menu
+              options={MODOS_PERMISSAO.map((item) => ({
+                value: item.id,
+                label: item.label,
+                hint: item.hint,
+                icon: ICONE_DO_MODO[item.id],
+              }))}
+              value={permissionMode}
+              onSelect={(value) => onPermissionModeChange?.(value as ModoPermissao)}
+              align="start"
+              direction="up"
+              label={`Permissão: ${modo.label}`}
+              panelClassName="w-72"
+              triggerClassName={[
+                'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium',
+                'transition-colors duration-150 hover:bg-koda-fg/8',
+                'focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none',
+                COR_DO_MODO[modo.id],
+              ].join(' ')}
+            >
+              {modo.curto}
+              <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.7} />
+            </Menu>
+
           </div>
 
           <div className="flex items-center gap-1">
             <Menu
-              options={modelMenu(remoteModels)}
+              options={comMedidor(modelMenu(remoteModels))}
               value={model}
               onSelect={(value) => onModelChange?.(value)}
               align="end"
@@ -339,6 +549,13 @@ export function Composer({
             >
               <span className="text-koda-fg/60">{activeModel.icon}</span>
               <span className="hidden sm:inline">{activeModel.label}</span>
+              {/* O contexto do modelo escolhido, ao lado do nome dele. */}
+              <ContextRing
+                usado={contextoPorModelo[model] ?? 0}
+                janela={contextoJanela}
+                trabalhando={busy}
+                className="text-koda-fg/70"
+              />
               <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.7} />
             </Menu>
 
@@ -443,22 +660,23 @@ export function Composer({
       {isChat ? null : (
         <div className="rounded-b-3xl bg-koda-panel px-4 py-2.5">
           <Menu
-            options={PROJECTS}
-            value={project}
+            options={projectOptions}
+            value={projectId ?? 'sem-projeto'}
             onSelect={handleProjectSelect}
             align="start"
             direction="up"
             label="Selecionar projeto"
             className="w-full"
-            panelClassName="w-72"
+            panelClassName="w-80"
             triggerClassName={projectTriggerClass}
           >
             <FolderKanban className="h-4 w-4" strokeWidth={1.6} />
-            {projectLabel}
+            {projetoLabel}
             <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.6} />
           </Menu>
         </div>
       )}
+      </div>
     </div>
   )
 }

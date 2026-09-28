@@ -1,7 +1,10 @@
-"""Provider local: responde sem chave nenhuma, digitando aos poucos.
+"""Provider local: responde sem modelo nenhum, digitando aos poucos.
 
-É o que entra quando não há provedor configurado, para o app continuar funcionando de
-ponta a ponta — e para deixar explícito, na própria resposta, que não é um modelo real.
+É o que entra quando a credencial da conta não está valendo — ninguém logado, sessão
+vencida, ou o serviço de modelos recusando quem falou. A resposta existe para o app não
+ficar mudo, e diz na cara o que está acontecendo: quem lê precisa saber que **não** é um
+modelo de verdade, e o que fazer para voltar a ele. Nada aqui fala em chave de API: o app
+não tem chave, quem autoriza é a conta (ver `app/host_auth.py`).
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+from .. import host_auth
 from ..config import Settings
 from .base import ChatOptions, ChatTurn, Piece
 
@@ -32,6 +36,27 @@ class LocalProvider:
     def __init__(self, settings: Settings) -> None:
         self.delay = max(0, settings.local_stream_delay_ms) / 1000
 
+    def _explicacao(self) -> str:
+        """Por que esta resposta não é de um modelo, e o que fazer a respeito.
+
+        Com sessão guardada no backend, a credencial chegou e o serviço de modelos é quem
+        recusou (sessão expirada ou revogada); sem sessão, ninguém está logado. As duas
+        situações se resolvem do mesmo jeito — entrar de novo —, mas o texto diz qual é,
+        porque é isso que evita a pessoa procurar o problema no lugar errado.
+        """
+        if host_auth.atual() is None:
+            return (
+                "Sou o servidor local do Koda: você não está conectado à sua conta, então "
+                "esta resposta foi gerada aqui na máquina — sem modelo de verdade e sem "
+                "ferramentas. Entre na sua conta para falar com os modelos do Koda."
+            )
+        return (
+            "Sou o servidor local do Koda: a sessão da sua conta não está valendo para o "
+            "serviço de modelos, então esta resposta foi gerada aqui na máquina — sem "
+            "modelo de verdade e sem ferramentas. Saia da conta e entre de novo para "
+            "voltar aos modelos do Koda."
+        )
+
     def _reply(self, turns: list[ChatTurn], options: ChatOptions) -> str:
         last_user = next((turn.text for turn in reversed(turns) if turn.role == "user"), "")
         parts = [
@@ -42,20 +67,10 @@ class LocalProvider:
         if options.project:
             parts.append(f"projeto {options.project}")
         settings_line = " · ".join(parts)
-        blocks = [
-            "Sou o backend local do Koda: não há provedor de modelo configurado, então esta "
-            "resposta é gerada aqui no servidor Python, sem sair da máquina.",
-            f"Recebi: “{last_user}”.",
-        ]
+        blocks = [self._explicacao(), f"Recebi: “{last_user}”."]
         if options.attachments:
             blocks.append("Anexos recebidos: " + ", ".join(options.attachments) + ".")
         blocks.append(settings_line)
-        blocks.append(
-            "Já é real nesta build: a conversa inteira é gravada em SQLite, o histórico "
-            "sobrevive ao reload e as cotas de uso saem dessas mensagens. Para respostas de "
-            "um modelo de verdade, preencha OPENAI_API_KEY (ou aponte OPENAI_BASE_URL para o "
-            "Ollama) no backend/.env e reinicie o servidor."
-        )
         return "\n\n".join(part for part in blocks if part)
 
     async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:

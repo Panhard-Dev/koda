@@ -1,10 +1,12 @@
 import type { ReactNode } from 'react'
 import {
+  Cable,
   Folder,
   History,
   Menu as MenuIcon,
   MessagesSquare,
   Plus,
+  Puzzle,
   Search,
   Settings,
   User,
@@ -12,8 +14,11 @@ import {
 } from 'lucide-react'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
-import { PROJECTS } from '../models'
+import { apelidoDaConta } from '../account'
+import type { MenuOption } from './Menu'
+import { WindowControls } from './WindowControls'
 import type { SettingsSection } from './SettingsScreen'
+import type { ApiMcp, ApiProject, ApiSkill } from '../api/client'
 
 export type ConversationSummary = {
   id: string
@@ -52,31 +57,126 @@ function IconButton({
   )
 }
 
+function Interruptor({ on }: { on: boolean }) {
+  /**
+   * Interruptor de status: a bolinha desliza para a direita quando está ligado.
+   * Ligado usa o roxo de destaque do app; desligado, vermelho. Só indica estado;
+   * o clique da linha inteira alterna, e quem guarda o estado é o menu (via `onSelect`).
+   */
+  return (
+    <span
+      aria-hidden
+      className={[
+        'relative block h-5 w-9 rounded-full transition-colors duration-150',
+        on ? 'bg-koda-accent-strong' : 'bg-red-400/80',
+      ].join(' ')}
+    >
+      <span
+        className={[
+          'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.35)]',
+          'transition-all duration-150',
+          on ? 'left-[18px]' : 'left-0.5',
+        ].join(' ')}
+      />
+    </span>
+  )
+}
+
+/** Linha informativa do submenu: “2 ativas · 1 desativada”, com as contas coloridas. */
+function Resumo({
+  ativos,
+  singularAtivo,
+  pluralAtivo,
+  desativados,
+  singularDesativado,
+  pluralDesativado,
+}: {
+  ativos: number
+  singularAtivo: string
+  pluralAtivo: string
+  desativados: number
+  singularDesativado: string
+  pluralDesativado: string
+}) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+      <span className="text-emerald-400">
+        {ativos} {ativos === 1 ? singularAtivo : pluralAtivo}
+      </span>
+      <span className="text-koda-fg/30">·</span>
+      <span className="text-red-400">
+        {desativados} {desativados === 1 ? singularDesativado : pluralDesativado}
+      </span>
+    </span>
+  )
+}
+
 export function Header({
   searchOpen,
   searchQuery,
   resultLabel,
-  project,
+  projects,
+  projectId,
+  conta,
   conversations,
+  skills,
+  mcps,
+  onToggleSkill,
+  onToggleMcp,
   onToggleSearch,
   onSearchQueryChange,
   onNewChat,
   onProjectChange,
+  onOpenFolders,
   onOpenConversation,
   onOpenSettings,
 }: {
   searchOpen: boolean
   searchQuery: string
   resultLabel: string | null
-  project: string
+  /** Pastas salvas (o projeto é sempre uma pasta de verdade, com caminho completo). */
+  projects: ApiProject[]
+  projectId: string | null
+  /** Conta do painel: o menu mostra o nome dela, nunca um rótulo inventado. */
+  conta: { email: string; nome?: string | null } | null
   conversations: ConversationSummary[]
+  skills: ApiSkill[]
+  mcps: ApiMcp[]
+  onToggleSkill: (name: string) => void
+  onToggleMcp: (name: string) => void
   onToggleSearch: () => void
   onSearchQueryChange: (value: string) => void
   onNewChat: () => void
-  onProjectChange: (value: string) => void
+  onProjectChange: (id: string | null) => void
+  /** Abre o escolhedor de pasta (existente ou nova). */
+  onOpenFolders: () => void
   onOpenConversation: (id: string) => void
   onOpenSettings: (section?: SettingsSection) => void
 }) {
+  /** O submenu de projeto lista as pastas salvas e as duas formas de abrir outra. */
+  const projectOptions = [
+    {
+      value: 'sem-projeto',
+      label: 'Nenhum projeto',
+      hint: 'Conversa solta, sem contexto de código',
+    },
+    ...projects.map((item) => ({
+      value: item.id,
+      label: item.nome,
+      hint: item.existe ? item.caminho : `${item.caminho} · pasta não encontrada`,
+    })),
+    {
+      value: 'pasta-existente',
+      label: 'Usar pasta existente',
+      hint: 'Escolher uma pasta que já está no disco',
+    },
+    {
+      value: 'pasta-nova',
+      label: 'Começar do zero',
+      hint: 'Criar uma pasta nova e trabalhar nela',
+    },
+  ]
+
   const historyOptions =
     conversations.length > 0
       ? conversations.map((conversation) => ({
@@ -95,6 +195,88 @@ export function Header({
           },
         ]
 
+  const skillsAtivas = skills.filter((skill) => skill.enabled).length
+  const skillsDesativadas = skills.length - skillsAtivas
+  const mcpsAtivos = mcps.filter((mcp) => mcp.enabled).length
+  const mcpsDesativados = mcps.length - mcpsAtivos
+
+  const skillsSubmenu: MenuOption[] =
+    skills.length > 0
+      ? [
+          {
+            value: 'skills-resumo',
+            disabled: true,
+            label: (
+              <Resumo
+                ativos={skillsAtivas}
+                singularAtivo="ativa"
+                pluralAtivo="ativas"
+                desativados={skillsDesativadas}
+                singularDesativado="desativada"
+                pluralDesativado="desativadas"
+              />
+            ),
+          },
+          ...skills.map((skill) => ({
+            value: `skill:${skill.name}`,
+            label: skill.name,
+            trailing: <Interruptor on={skill.enabled} />,
+            // Alterna sem fechar o menu: dá para ligar e desligar várias seguidas.
+            keepOpen: true,
+          })),
+          {
+            value: 'skills-ajustes',
+            label: 'Gerenciar nos ajustes',
+            icon: <Settings className="h-4 w-4" strokeWidth={1.7} />,
+          },
+        ]
+      : [
+          {
+            value: 'skills-vazia',
+            disabled: true,
+            label: 'Nenhuma skill instalada',
+            hint: 'Uma pasta com SKILL.md em .agents/skills aparece aqui',
+          },
+        ]
+
+  const mcpsSubmenu: MenuOption[] =
+    mcps.length > 0
+      ? [
+          {
+            value: 'mcps-resumo',
+            disabled: true,
+            label: (
+              <Resumo
+                ativos={mcpsAtivos}
+                singularAtivo="ativo"
+                pluralAtivo="ativos"
+                desativados={mcpsDesativados}
+                singularDesativado="desativado"
+                pluralDesativado="desativados"
+              />
+            ),
+          },
+          ...mcps.map((mcp) => ({
+            value: `mcp:${mcp.name}`,
+            label: mcp.name,
+            trailing: <Interruptor on={mcp.enabled} />,
+            keepOpen: true,
+          })),
+          {
+            value: 'mcps-ajustes',
+            label: 'Gerenciar nos ajustes',
+            icon: <Settings className="h-4 w-4" strokeWidth={1.7} />,
+          },
+        ]
+      : [
+          {
+            value: 'mcps-vazia',
+            disabled: true,
+            label: 'Nenhum servidor MCP',
+            hint: 'O Koda ainda não conecta servidores MCP',
+          },
+        ]
+
   const menuOptions = [
     {
       value: 'configuracao',
@@ -108,8 +290,8 @@ export function Header({
       options: [
         {
           value: 'conta',
-          label: 'Conta Koda',
-          hint: 'Plano Free · contas vinculadas',
+          label: apelidoDaConta(conta),
+          hint: conta?.email ?? 'Entrar na conta',
           icon: <User className="h-4 w-4" strokeWidth={1.7} />,
         },
       ],
@@ -131,20 +313,43 @@ export function Header({
       value: 'projeto',
       label: 'Projeto',
       icon: <Folder className="h-4 w-4" strokeWidth={1.7} />,
-      options: PROJECTS,
+      options: projectOptions,
+    },
+    {
+      value: 'skills',
+      label: 'Skills',
+      icon: <Puzzle className="h-4 w-4" strokeWidth={1.7} />,
+      options: skillsSubmenu,
+    },
+    {
+      value: 'mcps',
+      label: 'MCPs',
+      icon: <Cable className="h-4 w-4" strokeWidth={1.7} />,
+      options: mcpsSubmenu,
     },
   ]
 
   const handleSelect = (value: string) => {
     if (value === 'configuracao') onOpenSettings('geral')
     else if (value === 'conta') onOpenSettings('conta')
+    else if (value.startsWith('skill:')) onToggleSkill(value.slice('skill:'.length))
+    else if (value.startsWith('mcp:')) onToggleMcp(value.slice('mcp:'.length))
+    else if (value === 'skills-ajustes') onOpenSettings('skills')
+    else if (value === 'mcps-ajustes') onOpenSettings('mcps')
     else if (value === 'nova-conversa') onNewChat()
-    else if (PROJECTS.some((option) => option.value === value)) onProjectChange(value)
+    else if (value === 'pasta-existente' || value === 'pasta-nova') onOpenFolders()
+    else if (value === 'sem-projeto') onProjectChange(null)
+    else if (projects.some((item) => item.id === value)) onProjectChange(value)
     else onOpenConversation(value)
   }
 
   return (
-    <header className="relative z-20 flex shrink-0 items-center gap-3 p-5">
+    // `data-tauri-drag-region`: no app desktop, arrastar por essa linha move a
+    // janela (a titlebar nativa foi desligada). Filhos clicáveis ficam de fora.
+    <header
+      data-tauri-drag-region
+      className="relative z-20 flex shrink-0 items-center gap-3 p-5"
+    >
       <button
         type="button"
         onClick={onNewChat}
@@ -157,7 +362,7 @@ export function Header({
       <div className="flex items-center gap-0.5 rounded-full bg-koda-surface px-1.5 py-1 shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]">
         <Menu
           options={menuOptions}
-          value={project}
+          value={projectId ?? 'sem-projeto'}
           onSelect={handleSelect}
           direction="down"
           label="Abrir menu"
@@ -212,6 +417,11 @@ export function Header({
           ) : null}
         </div>
       ) : null}
+
+      {/* Controles da janela no canto direito — só aparecem dentro do app Tauri. */}
+      <div className="-mr-2 ml-auto">
+        <WindowControls />
+      </div>
     </header>
   )
 }

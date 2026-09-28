@@ -14,6 +14,7 @@ from .schemas import (
     Conversation,
     ConversationSummary,
     Message,
+    TodoItem,
     ToolStepOut,
     Usage,
     UsageWindow,
@@ -54,6 +55,11 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         for item in _carregar_json(row["steps"] if "steps" in colunas else "[]", [])
         if isinstance(item, dict)
     ]
+    todos = [
+        TodoItem.model_validate(item)
+        for item in _carregar_json(row["todos"] if "todos" in colunas else "[]", [])
+        if isinstance(item, dict)
+    ]
     return Message(
         id=row["id"],
         role=row["role"],
@@ -61,8 +67,11 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         attachments=[str(item) for item in _carregar_json(row["attachments"], [])],
         model=row["model"],
         elapsed_ms=row["elapsed_ms"],
+        tokens=row["tokens"] if "tokens" in colunas else None,
+        contexto=row["contexto"] if "contexto" in colunas else None,
         at=row["at"],
         steps=passos,
+        todos=todos,
     )
 
 
@@ -92,8 +101,9 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
     conn.execute(
         """
         INSERT INTO messages
-          (id, conversation_id, role, text, attachments, model, elapsed_ms, at, steps)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
+           contexto, at, steps, todos)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -103,9 +113,14 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
             json.dumps(message.attachments, ensure_ascii=False),
             message.model,
             message.elapsed_ms,
+            message.tokens,
+            message.contexto,
             message.at,
             json.dumps(
                 [passo.model_dump() for passo in message.steps], ensure_ascii=False
+            ),
+            json.dumps(
+                [item.model_dump() for item in message.todos], ensure_ascii=False
             ),
         ),
     )
@@ -192,6 +207,30 @@ def _window_start_ms(now_ms: int, tz_offset_minutes: int, window: str) -> int:
     return int((start + timedelta(minutes=tz_offset_minutes)).timestamp() * 1000)
 
 
+def _dias_com_uso(
+    conn: sqlite3.Connection, now_ms: int, tz_offset_minutes: int, dias: int = 365
+) -> dict[str, int]:
+    """Mensagens por dia **no relógio do cliente**, para o mapa de atividade.
+
+    O mapa do ano não é enfeite nem estimativa: cada quadrado é o que ficou no banco desta
+    máquina naquele dia. O dia sai do deslocamento do fuso que o cliente manda (o mesmo da
+    cota diária), e não do UTC do servidor — senão a noite de quem usa cairia no dia
+    seguinte e o mapa pareceria errado justamente em quem conversa tarde.
+    """
+    inicio = _window_start_ms(now_ms, tz_offset_minutes, "daily") - (dias - 1) * 86_400_000
+    linhas = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d', (at - ?) / 1000, 'unixepoch') AS dia,
+               COUNT(*) AS total
+          FROM messages
+         WHERE at >= ?
+         GROUP BY dia
+        """,
+        (tz_offset_minutes * 60_000, inicio),
+    ).fetchall()
+    return {str(linha["dia"]): int(linha["total"]) for linha in linhas if linha["dia"]}
+
+
 def usage(conn: sqlite3.Connection, now_ms: int, tz_offset_minutes: int) -> Usage:
     def count_since(start_ms: int) -> int:
         row = conn.execute(
@@ -219,6 +258,7 @@ def usage(conn: sqlite3.Connection, now_ms: int, tz_offset_minutes: int) -> Usag
         ),
         conversations=int(totals["conversations"]),
         messages=int(totals["messages"]),
+        dias=_dias_com_uso(conn, now_ms, tz_offset_minutes),
     )
 
 

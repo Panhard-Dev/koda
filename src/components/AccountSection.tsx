@@ -1,14 +1,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronRight, LogOut, Smartphone, X } from 'lucide-react'
-import { describeDevice, maskPhone } from '../account'
-import type { Account } from '../account'
-
-const ACTION = [
-  'shrink-0 rounded-lg px-2 py-1 text-[13px] font-medium text-koda-accent',
-  'transition-colors duration-150 hover:bg-koda-accent/10',
-  'focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none',
-].join(' ')
+import { ChevronRight, LogOut, Smartphone } from 'lucide-react'
+import { apelidoDaConta, describeDevice, iniciaisDaConta } from '../account'
 
 function Group({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -41,6 +34,15 @@ function Row({
   )
 }
 
+/** Etiqueta neutra, para o que ainda não está pronto (mesma família visual dos ajustes). */
+function Tag({ children }: { children: ReactNode }) {
+  return (
+    <span className="shrink-0 rounded-full bg-koda-fg/6 px-2 py-0.5 text-[10.5px] font-semibold tracking-wider text-koda-fg/55 uppercase">
+      {children}
+    </span>
+  )
+}
+
 /** Marca do Google: o "G" colorido, sem depender de imagem externa. */
 function GoogleMark() {
   return (
@@ -53,101 +55,45 @@ function GoogleMark() {
 }
 
 export function AccountSection({
-  account,
-  onLinkPhone,
-  onUnlinkPhone,
-  onToggleGoogle,
+  contaKoda = null,
   onSignOut,
 }: {
-  account: Account
-  onLinkPhone: (value: string) => void
-  onUnlinkPhone: () => void
-  onToggleGoogle: (connected: boolean) => void
+  /** Quem entrou na tela de login — a conta existe no painel, não nesta máquina. */
+  contaKoda?: { email: string; nome?: string | null } | null
   onSignOut: () => void
 }) {
-  const [editingPhone, setEditingPhone] = useState(false)
-  const [draft, setDraft] = useState('')
   const [devicesOpen, setDevicesOpen] = useState(false)
   const [confirmingSignOut, setConfirmingSignOut] = useState(false)
   const [device] = useState(() => describeDevice(navigator.userAgent))
 
-  const maskedPhone = account.phone ? maskPhone(account.phone) : null
-
-  const savePhone = () => {
-    if (!maskPhone(draft)) return
-    onLinkPhone(draft)
-    setDraft('')
-    setEditingPhone(false)
-  }
+  const apelido = apelidoDaConta(contaKoda)
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col items-center pt-1">
         <span className="flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-br from-koda-accent to-koda-accent-strong text-[28px] font-semibold text-white shadow-[0_16px_36px_-16px_var(--koda-shadow)]">
-          KA
+          {iniciaisDaConta(apelido)}
         </span>
-        <p className="mt-4 text-[16px] font-semibold text-koda-fg">Conta Koda</p>
-        <p className="mt-1 text-[12.5px] text-koda-fg/45">Plano Free · vínculos desta conta</p>
+        <p className="mt-4 max-w-full truncate px-4 text-[16px] font-semibold text-koda-fg">
+          {apelido}
+        </p>
+        <p className="mt-1 max-w-full truncate px-4 text-[12.5px] text-koda-fg/45">
+          {contaKoda ? contaKoda.email : 'Plano Free · vínculos desta conta'}
+        </p>
       </div>
 
+      {/*
+        Telefone e Google ainda não são vínculos de verdade: quem guarda a conta é o painel,
+        e lá não existe entrar por telefone nem por Google. Em vez de um botão que só
+        mexe num campo local, a linha diz o que é — ainda não está pronto.
+      */}
       <Group label="Contas vinculadas">
         <Row icon={<Smartphone className="h-4 w-4" strokeWidth={1.7} />} label="Telefone">
-          {maskedPhone ? (
-            <>
-              <span className="shrink-0 text-[13px] text-koda-fg/60">{maskedPhone}</span>
-              <button
-                type="button"
-                onClick={onUnlinkPhone}
-                aria-label="Remover telefone"
-                className="shrink-0 rounded-lg p-1 text-koda-fg/40 transition-colors hover:bg-koda-fg/8 hover:text-koda-fg/80 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-              >
-                <X className="h-3.5 w-3.5" strokeWidth={2} />
-              </button>
-            </>
-          ) : editingPhone ? (
-            <span className="flex shrink-0 items-center gap-1">
-              <input
-                autoFocus
-                value={draft}
-                inputMode="tel"
-                placeholder="(11) 91234-5678"
-                aria-label="Número de telefone"
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') savePhone()
-                  if (event.key === 'Escape') setEditingPhone(false)
-                }}
-                className="w-36 rounded-lg bg-koda-fg/6 px-2 py-1 text-[13px] text-koda-fg placeholder:text-koda-fg/35 focus:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
-              />
-              <button type="button" onClick={savePhone} className={ACTION}>
-                Salvar
-              </button>
-            </span>
-          ) : (
-            <button type="button" onClick={() => setEditingPhone(true)} className={ACTION}>
-              Vincular
-            </button>
-          )}
+          <Tag>Em breve</Tag>
         </Row>
 
         <Row icon={<GoogleMark />} label="Google">
-          {account.google ? (
-            <>
-              <span className="shrink-0 text-[13px] text-koda-fg/60">koda@gmail.com</span>
-              <button
-                type="button"
-                onClick={() => onToggleGoogle(false)}
-                aria-label="Desvincular Google"
-                className="shrink-0 rounded-lg p-1 text-koda-fg/40 transition-colors hover:bg-koda-fg/8 hover:text-koda-fg/80 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-              >
-                <X className="h-3.5 w-3.5" strokeWidth={2} />
-              </button>
-            </>
-          ) : (
-            <button type="button" onClick={() => onToggleGoogle(true)} className={ACTION}>
-              Conectar
-            </button>
-          )}
+          <Tag>Em breve</Tag>
         </Row>
       </Group>
 
@@ -185,7 +131,8 @@ export function AccountSection({
       {confirmingSignOut ? (
         <div className="flex items-center justify-between gap-3 rounded-2xl bg-koda-panel px-4 py-3 ring-1 ring-koda-fg/8">
           <p className="min-w-0 text-[12.5px] leading-5 text-koda-fg/60">
-            Isso limpa a conversa, o histórico e as contas vinculadas à sua conta.
+            Isso limpa a conversa e o histórico desta máquina — e o Koda volta a pedir a sua
+            senha para entrar.
           </p>
           <span className="flex shrink-0 items-center gap-1">
             <button

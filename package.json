@@ -2,7 +2,7 @@
   "name": "koda",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.0.0",
+  "version": "0.3.10",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,11 @@
     "test:api": "cd backend && uv run pytest -q",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "app": "tauri dev",
+    "app:runtime": "node scripts/gerar-runtime-backend.mjs",
+    "app:build": "npm run app:runtime && tauri build"
   },
   "dependencies": {
     "lucide-react": "^1.47.0",
@@ -19,6 +23,8 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

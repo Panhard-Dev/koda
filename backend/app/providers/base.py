@@ -36,8 +36,13 @@ class ChatOptions:
     attachments: list[str] = field(default_factory=list)
     #: Nome com que o assistente se identifica (o host injeta uma persona própria).
     assistente: str = NOME
+    #: Quem está logado (`Nome (email)`), quando há conta. `None` = não fala de identidade.
+    conta: str | None = None
     #: Esforço de raciocínio escolhido no seletor (`None` = o botão Reasoning decide).
     effort: str | None = None
+    #: Resumo do histórico antigo, quando a conversa não cabe mais inteira no contexto.
+    #: Vai no prompt de sistema — é contexto de fundo, não uma fala de ninguém.
+    resumo: str = ""
 
 
 @dataclass(slots=True)
@@ -76,8 +81,19 @@ def system_prompt(options: ChatOptions) -> str:
         parts.append("Pense passo a passo antes de concluir, sem narrar o raciocínio inteiro.")
     if options.web:
         parts.append("Se precisar de informação atual, diga que a busca na Web não está disponível aqui.")
+    if options.resumo:
+        parts.append(options.resumo)
     if options.attachments:
         parts.append("O usuário anexou: " + ", ".join(options.attachments) + ".")
+    # Quem está do outro lado. Sem isto o assistente responde "não tenho acesso aos dados
+    # da sua conta" — tecnicamente verdade, e uma péssima primeira impressão para quem
+    # acabou de entrar. O e-mail é o da conta no painel, e vai só para o provedor da
+    # conversa; nada é gravado aqui.
+    if options.conta:
+        parts.append(
+            f"Quem está falando com você está logado como {options.conta}: trate a pessoa "
+            "pelo nome quando fizer sentido e não pergunte quem ela é nem peça o e-mail."
+        )
     # A identidade vai por último: é a instrução que precisa vencer a persona que o host
     # injeta na conversa (ver `app/identidade.py`).
     parts.append(regras(options.assistente))

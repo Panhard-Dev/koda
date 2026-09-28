@@ -1,22 +1,32 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   ArrowLeft,
   Activity,
+  Cable,
   ChevronDown,
   ChevronRight,
   CircleUser,
+  CloudDownload,
   Info,
+  Loader2,
   Moon,
   Palette,
+  Puzzle,
+  RefreshCw,
   Sliders,
   Sun,
   SunMoon,
 } from 'lucide-react'
 import AccountSection from './AccountSection'
+import DiagnosticoLocal from './DiagnosticoLocal'
+import type { Conta as ContaKoda } from '../api/cloud'
+import type { ApiProject } from '../api/client'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
-import { findModel, modelMenu, PROJECTS } from '../models'
+import { WindowControls } from './WindowControls'
+import { apelidoDaConta, iniciaisDaConta } from '../account'
+import { findModel, modelMenu } from '../models'
 import type { RemoteModel } from '../models'
 import {
   PLAN,
@@ -29,7 +39,15 @@ import {
 } from '../plan'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
-import type { Account } from '../account'
+import { cloudChangelog, cloudUpdate } from '../api/client'
+import type {
+  ApiCloud,
+  ApiCloudRelease,
+  ApiCloudUpdate,
+  ApiMcp,
+  ApiSkill,
+  CloudCanal,
+} from '../api/client'
 
 export type UsageSummary = {
   conversations: number
@@ -38,6 +56,8 @@ export type UsageSummary = {
   todayMessages: number
   weekMessages: number
   monthMessages: number
+  /** Mensagens por dia (`AAAA-MM-DD` local): o mapa do ano é isto, não estimativa. */
+  dias: Record<string, number>
   /** Tetos das cotas: vêm do backend quando ele está no ar. */
   limits: { daily: number; weekly: number; monthly: number }
   model: string
@@ -50,12 +70,24 @@ export type BackendSummary = {
   provider: string | null
   ready: boolean
   model: string | null
+  /** Versão que o backend reporta no health — é a versão local para a nuvem. */
+  version: string | null
   /** Pasta onde as ferramentas do agente trabalham. */
   workspace: string | null
   toolCount: number
+  /** Teto de contexto em tokens; 0 quando a compactação está desligada. */
+  contextoTokens: number
 }
 
-export type SettingsSection = 'geral' | 'aparencia' | 'conta' | 'uso' | 'sobre'
+export type SettingsSection =
+  | 'geral'
+  | 'aparencia'
+  | 'conta'
+  | 'uso'
+  | 'skills'
+  | 'mcps'
+  | 'nuvem'
+  | 'sobre'
 
 const SECTIONS: {
   id: SettingsSection
@@ -93,6 +125,27 @@ const SECTIONS: {
     subtitle: 'O que você rodou no Koda, contado na mesma conta.',
   },
   {
+    id: 'skills',
+    label: 'Skills',
+    icon: <Puzzle className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Skills',
+    subtitle: 'Capacidades extras que o agente carrega quando a tarefa pede.',
+  },
+  {
+    id: 'mcps',
+    label: 'MCPs',
+    icon: <Cable className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'MCPs',
+    subtitle: 'Servidores externos conectados pelo Model Context Protocol.',
+  },
+  {
+    id: 'nuvem',
+    label: 'Nuvem',
+    icon: <CloudDownload className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Nuvem',
+    subtitle: 'Atualizações e notas de versão vindas do serviço do Koda.',
+  },
+  {
     id: 'sobre',
     label: 'Sobre',
     icon: <Info className="h-4 w-4" strokeWidth={1.7} />,
@@ -120,6 +173,31 @@ function Card({
       </header>
       {children}
     </section>
+  )
+}
+
+/** Selo verde/vermelho de estado, igual ao do submenu do header. */
+function StatusBadge({ on, ligado, desligado }: { on: boolean; ligado: string; desligado: string }) {
+  return (
+    <span
+      className={[
+        'inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5',
+        'text-[10.5px] font-semibold tracking-wider uppercase',
+        on ? 'bg-emerald-400/10 text-emerald-400' : 'bg-red-400/10 text-red-400',
+      ].join(' ')}
+    >
+      <span className={['h-1.5 w-1.5 rounded-full', on ? 'bg-emerald-400' : 'bg-red-400'].join(' ')} />
+      {on ? ligado : desligado}
+    </span>
+  )
+}
+
+/** Etiqueta neutra, para o que não é estado (ex.: “obrigatória”). */
+function Tag({ children }: { children: ReactNode }) {
+  return (
+    <span className="shrink-0 rounded-full bg-koda-fg/6 px-2 py-0.5 text-[10.5px] font-semibold tracking-wider text-koda-fg/55 uppercase">
+      {children}
+    </span>
   )
 }
 
@@ -182,6 +260,232 @@ function Switch({
         />
       </button>
     </div>
+  )
+}
+
+const CANAIS: { value: CloudCanal; label: string; hint: string }[] = [
+  { value: 'stable', label: 'Estável', hint: 'Só versões prontas para todo mundo.' },
+  { value: 'beta', label: 'Beta', hint: 'Antecipadas, podem quebrar.' },
+]
+
+const dataCurta = (iso: string | null) => {
+  if (!iso) return null
+  const data = new Date(iso)
+  if (Number.isNaN(data.getTime())) return null
+  return data.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+const horaCurta = (ms: number) =>
+  new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+
+/** Linha rótulo/valor do cartão de atualizações. */
+function CloudRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 px-5 py-3.5">
+      <span className="min-w-0 text-[13.5px] font-medium text-koda-fg/90">{label}</span>
+      <span className="flex min-w-0 shrink-0 items-center gap-2 text-[13px] text-koda-fg/70">
+        {children}
+      </span>
+    </div>
+  )
+}
+
+/**
+ * Atualizações da nuvem, dentro de Geral: de onde vem o aviso, qual é a versão
+ * publicada e o que mudou. Quem fala com a nuvem é o backend local; se ele não
+ * responde, o cartão diz isso e o resto dos Ajustes segue igual.
+ */
+function Atualizacoes({ cloud, version }: { cloud: ApiCloud | null; version: string | null }) {
+  const ativo = cloud?.ativo ?? false
+  // Sem `cloud` não é a nuvem que falhou: é o backend local, que nunca chegou a responder.
+  const semBackend = cloud === null
+  const [canal, setCanal] = useState<CloudCanal>(cloud?.canal === 'beta' ? 'beta' : 'stable')
+  const [detalhe, setDetalhe] = useState<ApiCloudUpdate | null>(null)
+  const [releases, setReleases] = useState<ApiCloudRelease[]>([])
+  // Já entra em “consultando”: a primeira coisa que o cartão faz é chamar a nuvem.
+  const [carregando, setCarregando] = useState(ativo)
+  const [falhou, setFalhou] = useState(false)
+  const [verificadoEm, setVerificadoEm] = useState<number | null>(null)
+
+  const verificar = useCallback(
+    async (refresh = false) => {
+      if (!ativo) return
+      setCarregando(true)
+      try {
+        const [estado, notas] = await Promise.all([
+          cloudUpdate({ versao: version ?? undefined, canal, refresh }),
+          cloudChangelog(canal),
+        ])
+        setDetalhe(estado)
+        setReleases(notas)
+        setFalhou(false)
+        setVerificadoEm(Date.now())
+      } catch {
+        // Backend local fora do ar no meio do caminho: o cartão avisa, não quebra.
+        setFalhou(true)
+      } finally {
+        setCarregando(false)
+      }
+    },
+    [ativo, canal, version],
+  )
+
+  useEffect(() => {
+    // Consulta na abertura e a cada troca de canal. Sai num `setTimeout` para a
+    // montagem do cartão não encadear renders por causa do estado de carregamento.
+    const timer = window.setTimeout(() => void verificar(), 0)
+    return () => window.clearTimeout(timer)
+  }, [verificar])
+
+  const disponivel = detalhe?.disponivel ?? cloud?.disponivel ?? false
+  const atualizacao = detalhe?.atualizacao ?? null
+  const novidade = atualizacao?.update_available ?? cloud?.update_available ?? false
+  const publicada = atualizacao?.latest_version ?? cloud?.latest_version ?? null
+  const baixar = atualizacao?.download_url ?? cloud?.download_url ?? null
+
+  return (
+    <Card
+      title="Atualizações"
+      description="O Koda pergunta a um serviço na nuvem se há versão mais nova. Nada é baixado sem você pedir."
+    >
+      <div className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
+        <CloudRow label="Estado">
+          <StatusBadge on={disponivel} ligado="Conectada" desligado="Sem resposta" />
+        </CloudRow>
+
+        {cloud?.servico ? (
+          <CloudRow label="Serviço">
+            <span className="truncate font-mono text-[12px] text-koda-fg/60">
+              {cloud.servico}
+            </span>
+          </CloudRow>
+        ) : null}
+
+        <CloudRow label="Sua versão">
+          <span className="font-mono text-[12.5px] text-koda-fg/85">
+            {version ? `v${version}` : '—'}
+          </span>
+        </CloudRow>
+
+        <CloudRow label="Canal">
+          <Menu
+            options={CANAIS}
+            value={canal}
+            onSelect={(next) => setCanal(next as CloudCanal)}
+            align="end"
+            direction="down"
+            label="Escolher canal de atualização"
+            triggerClassName="flex items-center gap-1.5 rounded-xl bg-koda-fg/6 px-3 py-2 text-[13px] text-koda-fg/85 transition-colors duration-150 hover:bg-koda-fg/10 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+          >
+            {CANAIS.find((opcao) => opcao.value === canal)?.label ?? canal}
+          </Menu>
+        </CloudRow>
+
+        <CloudRow label="Publicada">
+          {publicada ? (
+            <>
+              <span className="truncate font-mono text-[12.5px] text-koda-fg/85">
+                v{publicada}
+              </span>
+              {atualizacao?.mandatory || atualizacao?.update_required ? (
+                <Tag>Obrigatória</Tag>
+              ) : null}
+            </>
+          ) : (
+            <span className="text-koda-fg/50">nenhuma versão publicada</span>
+          )}
+        </CloudRow>
+
+        <div className="flex items-center justify-between gap-4 px-5 py-4">
+          <p className="min-w-0 text-[12.5px] leading-5 text-koda-fg/45">
+            {carregando
+              ? 'Consultando a nuvem…'
+              : semBackend
+                ? 'O backend local não respondeu — é ele quem consulta a nuvem.'
+                : falhou
+                  ? 'O backend local não respondeu a esta consulta.'
+                  : verificadoEm
+                    ? disponivel
+                      ? `Verificado às ${horaCurta(verificadoEm)} · o resultado fica em cache por 15 minutos.`
+                      : 'A nuvem não respondeu nesta consulta — a próxima abertura tenta de novo.'
+                    : 'Ainda não consultado.'}
+          </p>
+          <button
+            type="button"
+            disabled={carregando || !ativo}
+            onClick={() => void verificar(true)}
+            className={[
+              'flex shrink-0 items-center gap-1.5 rounded-xl bg-koda-fg/6 px-3 py-2',
+              'text-[13px] text-koda-fg/85 transition-colors duration-150',
+              'hover:bg-koda-fg/10 hover:text-koda-fg disabled:opacity-50',
+              'focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none',
+            ].join(' ')}
+          >
+            {carregando ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.8} />
+            )}
+            Verificar de novo
+          </button>
+        </div>
+      </div>
+
+      {novidade ? (
+        <div className="flex items-center gap-4 border-t border-koda-fg/8 bg-koda-accent/8 px-5 py-4">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-koda-accent/15 text-koda-accent">
+            <CloudDownload className="h-4 w-4" strokeWidth={1.8} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[13.5px] font-semibold text-koda-fg">
+              {publicada ? `Koda ${publicada} está disponível` : 'Atualização disponível'}
+            </span>
+            <span className="mt-0.5 block text-[12.5px] leading-5 text-koda-fg/55">
+              {atualizacao?.notes?.trim() ||
+                'Há uma versão mais nova publicada no canal escolhido.'}
+            </span>
+          </span>
+          {baixar ? (
+            <a
+              href={baixar}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="shrink-0 rounded-xl bg-koda-accent-strong px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-koda-accent-strong/85 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+            >
+              Baixar
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+
+      {releases.length > 0 ? (
+        <div className="border-t border-koda-fg/8">
+          <p className="px-5 pt-4 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
+            Notas de versão
+          </p>
+          <ul className="mt-1 divide-y divide-koda-fg/8">
+            {releases.map((release) => (
+              <li key={`${release.versao}-${release.publicado_em ?? ''}`} className="px-5 py-3.5">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="font-mono text-[13px] font-medium text-koda-fg/90">
+                    v{release.versao}
+                  </span>
+                  {release.obrigatoria ? <Tag>Obrigatória</Tag> : null}
+                  <span className="ml-auto shrink-0 text-[12px] text-koda-fg/45">
+                    {dataCurta(release.publicado_em) ?? 'sem data'}
+                  </span>
+                </div>
+                {release.notas?.trim() ? (
+                  <p className="mt-1.5 text-[12.5px] leading-5 whitespace-pre-wrap text-koda-fg/60">
+                    {release.notas}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </Card>
   )
 }
 
@@ -382,24 +686,6 @@ function Swatches<T extends string>({
   )
 }
 
-/**
- * Hash com avalanche final. Sem essa etapa, dias vizinhos caem no mesmo nível e o
- * gráfico aparece em blocos por mês em vez de espalhado.
- */
-const rand = (value: string) => {
-  let result = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    result ^= value.charCodeAt(index)
-    result = Math.imul(result, 16777619)
-  }
-  result ^= result >>> 15
-  result = Math.imul(result, 2246822507)
-  result ^= result >>> 13
-  result = Math.imul(result, 3266489909)
-  result ^= result >>> 16
-  return (result >>> 0) / 4294967296
-}
-
 // Segue a cor de destaque escolhida em Aparência, por opacidade crescente.
 const LEVELS = [
   'bg-koda-fg/6',
@@ -409,24 +695,25 @@ const LEVELS = [
   'bg-koda-accent',
 ]
 
-/** Nível 0 = sem uso; -1 = dia que ainda não chegou (fica fora do gráfico). */
-const levelFor = (date: Date, todayKey: string, todayMessages: number) => {
-  const key = dayKey(date)
-  if (key === todayKey) return todayMessages === 0 ? 0 : Math.min(4, todayMessages)
-  if (key > todayKey) return -1
-  const roll = rand(key)
-  if (roll < 0.55) return 0
-  if (roll < 0.7) return 1
-  if (roll < 0.82) return 2
-  if (roll < 0.93) return 3
+/**
+ * Nível do quadrado: 0 = sem uso, 4 = dia cheio; -1 = dia que ainda não chegou (some do
+ * gráfico). As faixas são grosseiras de propósito — o mapa serve para ver **onde** houve
+ * trabalho, e o número exato está no title de cada quadrado.
+ */
+const levelFor = (mensagens: number, futuro: boolean) => {
+  if (futuro) return -1
+  if (mensagens <= 0) return 0
+  if (mensagens <= 2) return 1
+  if (mensagens <= 5) return 2
+  if (mensagens <= 10) return 3
   return 4
 }
 
-const describeDay = (date: Date, level: number) => {
+const describeDay = (date: Date, mensagens: number) => {
   const label = date.toLocaleDateString('pt-BR')
-  if (level === 0) return `${label} · sem uso`
-  if (level === 1) return `${label} · 1 mensagem`
-  return `${label} · ${level >= 4 ? '4+' : level} mensagens`
+  if (mensagens === 0) return `${label} · sem uso`
+  if (mensagens === 1) return `${label} · 1 mensagem`
+  return `${label} · ${mensagens} mensagens`
 }
 
 /**
@@ -441,6 +728,7 @@ function UsageLimit({
   seriesClass,
   resetsOn,
   detail,
+  unidade = 'mensagens',
 }: {
   title: string
   used: number
@@ -449,18 +737,32 @@ function UsageLimit({
   seriesClass: string
   resetsOn: string
   detail: string
+  /** O que a cota conta, para a frase de teto estourado. */
+  unidade?: string
 }) {
   const [open, setOpen] = useState(false)
   const percent = percentUsed(used, limit)
+  // Passar do teto acontece: a cota é do plano, e o que já entrou não sai do histórico.
+  // Marcar em âmbar e dizer o número de verdade é melhor do que mostrar "100,00%" com
+  // "39 de 20" embaixo, que parece erro de conta.
+  const excedeu = limit > 0 && used > limit
+  const exato = limit === 0 ? 0 : Math.round((used / limit) * 100)
 
   return (
     <section className="flex flex-col rounded-2xl bg-koda-panel p-4 ring-1 ring-koda-fg/8">
       <div className="flex items-start justify-between gap-3">
         <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-koda-fg/70">
           {title}
-          <span className="text-[13.5px] font-semibold text-koda-fg">
-            {percent.toFixed(2)}%
+          <span
+            className={`text-[13.5px] font-semibold ${excedeu ? 'text-amber-400' : 'text-koda-fg'}`}
+          >
+            {excedeu ? `${exato}%` : `${percent.toFixed(2)}%`}
           </span>
+          {excedeu ? (
+            <span className="rounded-full bg-amber-400/12 px-2 py-0.5 text-[10.5px] font-semibold tracking-wide text-amber-400 uppercase">
+              acima do teto
+            </span>
+          ) : null}
         </p>
         <button
           type="button"
@@ -481,10 +783,20 @@ function UsageLimit({
         className="mt-3 h-2 w-full overflow-hidden rounded-full bg-koda-fg/10"
       >
         <div
-          className={['bar-grow h-full rounded-full', seriesClass].join(' ')}
+          className={[
+            'bar-grow h-full rounded-full',
+            excedeu ? 'bg-amber-400/80' : seriesClass,
+          ].join(' ')}
           style={{ width: `${percent}%` }}
         />
       </div>
+
+      {excedeu ? (
+        <p className="mt-2 text-[12px] leading-4 text-amber-400/90">
+          Você está {used - limit} {unidade} acima do teto do plano, que é de {limit} nesta
+          janela. O que já foi feito continua no histórico.
+        </p>
+      ) : null}
 
       {open ? (
         <p className="mt-2 text-[12px] leading-4 text-koda-fg/50">{detail}</p>
@@ -501,7 +813,7 @@ function UsageLimit({
   )
 }
 
-function ActivityHeatmap({ todayMessages }: { todayMessages: number }) {
+function ActivityHeatmap({ dias }: { dias: Record<string, number> }) {
   const { weeks, monthLabels, todayKey } = useMemo(() => {
     const today = new Date()
     // A última coluna é a semana atual: recua até a segunda-feira dela e volta 52 semanas.
@@ -566,12 +878,14 @@ function ActivityHeatmap({ todayMessages }: { todayMessages: number }) {
                 style={{ animationDelay: `${weekIndex * 8}ms` }}
               >
                 {column.map((date) => {
-                  const level = levelFor(date, todayKey, todayMessages)
+                  const key = dayKey(date)
+                  const mensagens = dias[key] ?? 0
+                  const level = levelFor(mensagens, key > todayKey)
                   const upcoming = level < 0
                   return (
                     <span
-                      key={dayKey(date)}
-                      title={upcoming ? undefined : describeDay(date, level)}
+                      key={key}
+                      title={upcoming ? undefined : describeDay(date, mensagens)}
                       className={[
                         'h-[11px] w-[11px] rounded-[3px]',
                         upcoming ? 'bg-transparent' : LEVELS[level],
@@ -602,54 +916,90 @@ function ActivityHeatmap({ todayMessages }: { todayMessages: number }) {
 export function SettingsScreen({
   onClose,
   usage,
-  project,
+  projects,
+  projectId,
+  onOpenFolders,
   onProjectChange,
   model,
   onModelChange,
-  showProcessed,
-  onToggleProcessed,
+  mostrarRodape,
+  onToggleRodape,
   appearance,
   onAppearanceChange,
-  account,
-  onLinkPhone,
-  onUnlinkPhone,
-  onToggleGoogle,
   onSignOut,
+  contaKoda = null,
   initialSection,
   backend,
+  cloud = null,
   remoteModels = [],
+  skills = [],
+  mcps = [],
 }: {
   onClose: () => void
   usage: UsageSummary
   backend: BackendSummary
-  project: string
-  onProjectChange: (value: string) => void
+  /** Resumo da nuvem que vem no `/api/health`; `null` quando o backend não respondeu. */
+  cloud?: ApiCloud | null
+  /** Pastas salvas nesta máquina; o projeto é sempre uma pasta de verdade. */
+  projects: ApiProject[]
+  projectId: string | null
+  onProjectChange?: (id: string | null) => void
+  /** Abre o escolhedor de pasta (existente ou nova). */
+  onOpenFolders?: () => void
   model: string
   onModelChange: (value: string) => void
-  showProcessed: boolean
-  onToggleProcessed: () => void
+  /** Números da rodada (uso, tempo, hora) na ficha no fim de cada resposta. */
+  mostrarRodape: boolean
+  onToggleRodape: () => void
   appearance: Appearance
   onAppearanceChange: (patch: Partial<Appearance>) => void
-  account: Account
-  onLinkPhone: (value: string) => void
-  onUnlinkPhone: () => void
-  onToggleGoogle: (connected: boolean) => void
+  /** Conta do painel (quem entrou na tela de login). `null` só em tese: o app não abre sem ela. */
+  contaKoda?: ContaKoda | null
   onSignOut: () => void
   /** Seção aberta ao entrar na tela (ex.: Conta, vindo do menu do header). */
   initialSection?: SettingsSection
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[]
+  /** Skills instaladas, lidas do backend (projeto + máquina). */
+  skills?: ApiSkill[]
+  /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
+  mcps?: ApiMcp[]
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? 'geral')
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]
+  // Quem está logado aparece pelo nome que está no painel, não por um rótulo fixo.
+  const apelido = apelidoDaConta(contaKoda)
   const activeModel = findModel(model, remoteModels)
   const activeProject =
-    PROJECTS.find((option) => option.value === project)?.label ?? 'Nenhum projeto'
+    projects.find((item) => item.id === projectId)?.nome ?? 'Nenhum projeto'
+
+  /** As pastas salvas + as duas formas de abrir outra, igual ao prompt box. */
+  const projectOptions = [
+    { value: 'sem-projeto', label: 'Nenhum projeto', hint: 'Conversa solta, sem contexto de código' },
+    ...projects.map((item) => ({
+      value: item.id,
+      label: item.nome,
+      hint: item.existe ? item.caminho : `${item.caminho} · pasta não encontrada`,
+    })),
+    { value: 'abrir-pasta', label: 'Usar pasta existente', hint: 'Escolher uma pasta que já está no disco' },
+    { value: 'nova-pasta', label: 'Começar do zero', hint: 'Criar uma pasta nova e trabalhar nela' },
+  ]
+
+  const handleProjectSelect = (value: string) => {
+    if (value === 'abrir-pasta' || value === 'nova-pasta') {
+      onOpenFolders?.()
+      return
+    }
+    onProjectChange?.(value === 'sem-projeto' ? null : value)
+  }
 
   return (
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-60 shrink-0 flex-col border-r border-koda-fg/8 p-3">
-        <div className="mb-3 flex items-center gap-2 px-2.5 py-1.5">
+        <div
+          data-tauri-drag-region
+          className="mb-3 flex items-center gap-2 px-2.5 py-1.5"
+        >
           <KodaLogo className="h-4 w-auto" />
           <span className="text-[13.5px] font-semibold text-koda-fg">Koda</span>
           <span className="ml-auto text-[10.5px] font-semibold tracking-wider text-koda-fg/35 uppercase">
@@ -703,15 +1053,28 @@ export function SettingsScreen({
           ].join(' ')}
         >
           <span className="flex w-full items-center gap-2 text-[13px] font-medium text-koda-fg/90">
-            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-koda-accent to-koda-accent-strong text-[11px] font-semibold text-white">
-              KA
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-koda-accent to-koda-accent-strong text-[11px] font-semibold text-white">
+              {iniciaisDaConta(apelido)}
             </span>
-            Conta Koda
-            <ChevronRight className="ml-auto h-3.5 w-3.5 text-koda-fg/40" strokeWidth={1.8} />
+            <span className="min-w-0 truncate">{apelido}</span>
+            <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-koda-fg/40" strokeWidth={1.8} />
           </span>
-          <span className="mt-1.5 text-[11.5px] text-koda-fg/40">Plano Free</span>
+          <span className="mt-1.5 max-w-full truncate text-[11.5px] text-koda-fg/40">
+            {contaKoda ? contaKoda.email : 'Plano Free'}
+          </span>
         </button>
-      </aside>      <div className="min-h-0 flex-1 overflow-y-auto px-8 py-7">
+      </aside>
+      {/*
+       * `min-w-0` no lugar do padrão (`min-width: auto`): o mapa do ano é uma grade que não
+       * encolhe, e sem isto a coluna inteira era empurrada para fora da janela — a seção
+       * Uso aparecia cortada na direita, com metade do mapa fora da tela.
+       */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Faixa da titlebar customizada: arraste + controles no canto direito. */}
+        <div data-tauri-drag-region className="flex h-9 shrink-0 items-center justify-end pr-3">
+          <WindowControls />
+        </div>
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 py-7">
         <div
           // `key` remonta a coluna a cada troca de seção, e o `stagger` reaproveita
           // isso para a entrada em cascata acontecer de novo.
@@ -734,10 +1097,10 @@ export function SettingsScreen({
             >
               <div className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
                 <Switch
-                  label="Mostrar tempo de processamento"
-                  description="Exibe a linha “Processed” acima de cada resposta."
-                  checked={showProcessed}
-                  onChange={onToggleProcessed}
+                  label="Mostrar uso e tempo das respostas"
+                  description="Exibe o uso de tokens, a duração e a hora no rodapé de cada resposta."
+                  checked={mostrarRodape}
+                  onChange={onToggleRodape}
                 />
 
                 <div className="flex items-center justify-between gap-4 px-5 py-4">
@@ -773,9 +1136,9 @@ export function SettingsScreen({
                     </span>
                   </span>
                   <Menu
-                    options={PROJECTS}
-                    value={project}
-                    onSelect={onProjectChange}
+                    options={projectOptions}
+                    value={projectId ?? 'sem-projeto'}
+                    onSelect={handleProjectSelect}
                     align="end"
                     direction="down"
                     label="Escolher projeto padrão"
@@ -787,6 +1150,10 @@ export function SettingsScreen({
                 </div>
               </div>
             </Card>
+          ) : null}
+
+          {section === 'nuvem' ? (
+            <Atualizacoes cloud={cloud} version={backend.version} />
           ) : null}
 
           {section === 'aparencia' ? (
@@ -858,13 +1225,7 @@ export function SettingsScreen({
           ) : null}
 
           {section === 'conta' ? (
-            <AccountSection
-              account={account}
-              onLinkPhone={onLinkPhone}
-              onUnlinkPhone={onUnlinkPhone}
-              onToggleGoogle={onToggleGoogle}
-              onSignOut={onSignOut}
-            />
+            <AccountSection contaKoda={contaKoda} onSignOut={onSignOut} />
           ) : null}
 
           {section === 'uso' ? (
@@ -899,9 +1260,9 @@ export function SettingsScreen({
 
               <Card
                 title="Atividade"
-                description="Últimos 365 dias, no fuso local. Hoje usa a atividade real desta sessão; o histórico é ilustrativo."
+                description="Últimos 365 dias, no fuso local. Cada quadrado é o que o Koda registrou naquele dia nesta conta."
               >
-                <ActivityHeatmap todayMessages={usage.todayMessages} />
+                <ActivityHeatmap dias={usage.dias} />
               </Card>
 
               <div className="flex flex-col gap-3">
@@ -939,18 +1300,23 @@ export function SettingsScreen({
             </>
           ) : null}
 
+          {section === 'sobre' ? <DiagnosticoLocal /> : null}
+
           {section === 'sobre' ? (
             <Card title="Sobre" description="Informações desta build.">
               <dl className="border-t border-koda-fg/8 text-[13px]">
                 {[
                   ['Aplicação', 'Koda — shell de interface de chat'],
+                  ['Versão', backend.version ? `v${backend.version}` : '—'],
                   ['Stack', 'React 19 · Vite · Tailwind 4 · lucide-react'],
                   ['Backend', backend.url],
                   [
                     'Status',
-                    backend.provider
-                      ? `Online · provider ${backend.provider}${backend.ready ? '' : ' (sem API key: responde offline)'}`
-                      : 'Fora do ar — as respostas são simuladas no navegador',
+                    backend.provider === 'local'
+                      ? 'Servidor local — sem os modelos da conta (entre de novo)'
+                      : backend.provider
+                        ? `Online · ${backend.provider}${backend.ready ? '' : ' (ainda acordando)'}`
+                        : 'Fora do ar — as respostas são simuladas no navegador',
                   ],
                   [
                     'Dados',
@@ -968,6 +1334,12 @@ export function SettingsScreen({
                     'Pasta de trabalho',
                     backend.workspace ?? '— (as ferramentas rodam nesta pasta)',
                   ],
+                  [
+                    'Contexto',
+                    backend.contextoTokens > 0
+                      ? `Resume sozinho depois de ${(backend.contextoTokens / 1000).toLocaleString('pt-BR')} mil tokens`
+                      : 'Sem teto — o histórico vai inteiro ao modelo',
+                  ],
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -980,6 +1352,103 @@ export function SettingsScreen({
               </dl>
             </Card>
           ) : null}
+
+          {section === 'skills' ? (
+            <Card
+              title="Skills instaladas"
+              description="Pacotes de instruções e ferramentas que entram no chat sob demanda."
+            >
+              {skills.length > 0 ? (
+                <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
+                  {skills.map((skill) => (
+                    <li key={`${skill.scope}-${skill.name}`} className="px-5 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <Puzzle className="h-4 w-4 shrink-0 text-koda-fg/45" strokeWidth={1.7} />
+                        <span className="min-w-0 truncate text-[13.5px] font-medium text-koda-fg/90">
+                          {skill.name}
+                        </span>
+                        <span className="ml-auto shrink-0">
+                          <StatusBadge
+                            on={skill.enabled}
+                            ligado="Ativa"
+                            desligado="Desativada"
+                          />
+                        </span>
+                        <span className="shrink-0 rounded-full bg-koda-fg/6 px-2 py-0.5 text-[10.5px] font-semibold tracking-wider text-koda-fg/55 uppercase">
+                          {skill.scope === 'projeto' ? 'Projeto' : 'Global'}
+                        </span>
+                      </div>
+                      {skill.description ? (
+                        <p className="mt-1.5 text-[12.5px] leading-5 text-koda-fg/45">
+                          {skill.description}
+                        </p>
+                      ) : null}
+                      <p className="mt-1.5 truncate font-mono text-[11.5px] text-koda-fg/35">
+                        {skill.path}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
+                  <Puzzle className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
+                  <p className="text-[13.5px] font-medium text-koda-fg/80">
+                    Nenhuma skill instalada
+                  </p>
+                  <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
+                    Quando uma skill estiver disponível, ela aparece aqui e o agente usa
+                    automaticamente se a conversa pedir.
+                  </p>
+                </div>
+              )}
+            </Card>
+          ) : null}
+
+          {section === 'mcps' ? (
+            <Card
+              title="Servidores MCP"
+              description="Ferramentas externas que o agente usa pelo Model Context Protocol."
+            >
+              {mcps.length > 0 ? (
+                <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
+                  {mcps.map((mcp) => (
+                    <li key={mcp.name} className="px-5 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <Cable className="h-4 w-4 shrink-0 text-koda-fg/45" strokeWidth={1.7} />
+                        <span className="min-w-0 truncate text-[13.5px] font-medium text-koda-fg/90">
+                          {mcp.name}
+                        </span>
+                        <span className="ml-auto shrink-0">
+                          <StatusBadge
+                            on={mcp.enabled}
+                            ligado="Ativo"
+                            desligado="Desativado"
+                          />
+                        </span>
+                      </div>
+                      {mcp.description ? (
+                        <p className="mt-1.5 text-[12.5px] leading-5 text-koda-fg/45">
+                          {mcp.description}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
+                  <Cable className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
+                  <p className="text-[13.5px] font-medium text-koda-fg/80">
+                    Nenhum servidor conectado
+                  </p>
+                  <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
+                    Conecte um servidor MCP para o agente ganhar novas ferramentas sem sair
+                    do chat.
+                  </p>
+                </div>
+              )}
+            </Card>
+          ) : null}
+          </div>
         </div>
       </div>
     </div>

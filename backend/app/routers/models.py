@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter, Request
 
 from ..deps import provider
-from ..providers import GeminiProxyProvider
+from ..providers import HostProvider
 from ..schemas import ModelInfo
 
 router = APIRouter(tags=["models"])
@@ -26,7 +26,7 @@ router = APIRouter(tags=["models"])
 #: Sufixos que não servem para conversa (geração de imagem, áudio).
 FORA_DO_CHAT = ("-image", "-tts", "embedding")
 
-#: Nome legível de "gemini-3.5-flash-lite" -> "Gemini 3.5 Flash Lite".
+#: Nome legível de "liz-3.5-flash-lite" -> "Liz 3.5 Flash Lite".
 BONITO = {
     "flash": "Flash",
     "pro": "Pro",
@@ -71,7 +71,7 @@ def peso(identificador: str) -> tuple[int, float]:
     return (tier, geracao)
 
 
-def catalogo(dados: dict) -> list[ModelInfo]:
+def catalogo(dados: dict, janela: int | None = None) -> list[ModelInfo]:
     """Traduz a resposta `/models` do host para o que o seletor usa.
 
     O host já manda o nome de exibição em `name` ("Liz Nano", "Koda 1"), então ele manda:
@@ -88,28 +88,40 @@ def catalogo(dados: dict) -> list[ModelInfo]:
             ModelInfo(
                 value=identificador,
                 label=nome or rotulo(identificador),
+                janela=janela,
             )
         )
     itens.sort(key=lambda item: peso(item.value), reverse=True)
     return itens
 
 
-async def _do_proxy(engine: GeminiProxyProvider) -> list[ModelInfo]:
+async def _do_host(engine: HostProvider, janela: int | None = None) -> list[ModelInfo]:
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
-            resposta = await client.get(f"{engine.base_url}/models")
+            # A chave do host vai também aqui: sem ela o catálogo volta 401 e o seletor
+            # aparece vazio, mesmo com o host no ar.
+            resposta = await client.get(f"{engine.base_url}/models", headers=engine.headers())
             resposta.raise_for_status()
             dados = resposta.json()
     except (httpx.HTTPError, ValueError):
         return []
-    return catalogo(dados if isinstance(dados, dict) else {})
+    return catalogo(dados if isinstance(dados, dict) else {}, janela)
 
 
 @router.get("/models", response_model=list[ModelInfo])
 async def models(request: Request) -> list[ModelInfo]:
-    """Lista vazia quando o provedor é o local (que não é um modelo)."""
+    """O catálogo é o **do host**, e nada mais.
+
+    Antes, com outro provedor no ar (uma chave de OpenAI no `.env`, por exemplo), o modelo
+    configurado naquela máquina aparecia no seletor como "Outros → qwen/3.7-plus · provedor
+    atual" — e a lista ficava diferente em cada PC. O dono foi explícito: o seletor mostra
+    **sempre** o que o c-host publica, nunca o que existe na máquina de quem instalou.
+
+    Lista vazia não deixa o seletor vazio: a interface cai na lista da casa (Liz, Koda,
+    Layze), que é a mesma em qualquer PC.
+    """
     engine = provider(request)
-    if isinstance(engine, GeminiProxyProvider):
-        return await _do_proxy(engine)
-    nome = getattr(engine, "model", None)
-    return [ModelInfo(value=nome, label=nome, hint="provedor atual")] if nome else []
+    janela = request.app.state.settings.contexto_tokens or None
+    if not isinstance(engine, HostProvider):
+        return []
+    return await _do_host(engine, janela)

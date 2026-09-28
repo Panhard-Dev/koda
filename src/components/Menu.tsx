@@ -4,11 +4,16 @@ import { Check, ChevronLeft, ChevronRight } from 'lucide-react'
 
 export type MenuOption = {
   value: string
-  label: string
+  /** Pode ser JSX: itens informativos usam cores próprias (ex.: contadores de status). */
+  label: ReactNode
   hint?: string
   icon?: ReactNode
+  /** Controle à direita do rótulo (ex.: interruptor de ligar/desligar). */
+  trailing?: ReactNode
   /** Item apenas informativo: aparece apagado e não seleciona nada. */
   disabled?: boolean
+  /** Seleciona sem fechar o menu — para alternar estado (ex.: ligar/desligar uma skill). */
+  keepOpen?: boolean
   /** Quando presente, o item não seleciona nada: abre um submenu com estas opções. */
   options?: MenuOption[]
 }
@@ -29,8 +34,9 @@ type MenuProps = {
 }
 
 type Level = {
-  title: string | null
-  items: MenuOption[]
+  title: ReactNode
+  /** Item pai no nível de cima — de onde os itens do submenu são lidos a cada render. */
+  parentValue: string
 }
 
 /**
@@ -59,7 +65,12 @@ export function Menu({
   const panelRef = useRef<HTMLDivElement>(null)
   const menuId = useId()
 
-  const items = level?.items ?? options
+  // O submenu é lido das opções atuais a cada render — e não de um snapshot guardado
+  // na hora da abertura. É o que faz os itens reagirem a mudanças de estado enquanto
+  // o menu fica aberto (ex.: a bolinha de uma skill que acabou de ser alternada).
+  const items = level
+    ? (options.find((option) => option.value === level.parentValue)?.options ?? [])
+    : options
 
   useEffect(() => {
     if (!open) return
@@ -89,7 +100,7 @@ export function Menu({
 
   const openSubmenu = (option: MenuOption, itemIndex: number) => {
     if (!option.options) return
-    setLevel({ title: option.label, items: option.options })
+    setLevel({ title: option.label, parentValue: option.value })
     setActiveIndex(indexOfValue(option.options))
     setParentIndex(itemIndex)
   }
@@ -113,7 +124,7 @@ export function Menu({
       return
     }
     onSelect(option.value)
-    close()
+    if (!option.keepOpen) close()
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -202,7 +213,7 @@ export function Menu({
             <button
               type="button"
               role="menuitem"
-              aria-label={`Voltar para ${level.title}`}
+              aria-label="Voltar ao menu anterior"
               onClick={goBack}
               className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase transition-colors duration-100 hover:bg-koda-fg/6 hover:text-koda-fg/70 focus:outline-none"
             >
@@ -248,6 +259,11 @@ export function Menu({
                     </span>
                   ) : null}
                 </span>
+                {option.trailing ? (
+                  <span className="flex shrink-0 items-center self-center">
+                    {option.trailing}
+                  </span>
+                ) : null}
                 {!isCategory && selected ? (
                   <Check className="mt-0.5 h-4 w-4 shrink-0 text-koda-accent" strokeWidth={2} />
                 ) : null}

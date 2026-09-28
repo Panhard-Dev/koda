@@ -14,6 +14,13 @@ export type RemoteModel = {
   value: string
   label: string
   hint?: string | null
+  /**
+   * Teto de contexto do modelo, em tokens — o denominador do medidor de contexto.
+   *
+   * Vem do backend, que usa o teto que ele mesmo aplica à conversa: o host não publica a
+   * janela de cada modelo.
+   */
+  janela?: number | null
 }
 
 const model = (value: string, label: string): MenuOption => ({
@@ -59,12 +66,13 @@ export const MODEL_MENU: MenuOption[] = [
 ]
 
 /** Modelo usado quando a interface ainda não recebeu o catálogo do backend. */
-export const MODELO_PADRAO = 'liz-nano'
+export const MODELO_PADRAO = 'liz-4'
 
 export const ALL_MODELS = MODEL_MENU.flatMap((category) => category.options ?? [])
 
 export const MODEL_LABELS: Record<string, string> = Object.fromEntries(
-  ALL_MODELS.map((option) => [option.value, option.label]),
+  // `label` de um MenuOption aceita JSX; aqui os rótulos são todos strings fixas.
+  ALL_MODELS.map((option) => [option.value, option.label as string]),
 )
 
 /** Prefixos de id que viram uma categoria no seletor (liz-nano → Liz). */
@@ -126,14 +134,4 @@ export function findModel(value: string, items: RemoteModel[] = []): MenuOption 
 }
 
 
-/** Projetos oferecidos no seletor do composer e no menu do header. */
-export const PROJECTS: MenuOption[] = [
-  { value: 'sem-projeto', label: 'Nenhum projeto', hint: 'Conversa solta, sem contexto de código' },
-  { value: 'koda-site', label: 'koda-site', hint: 'Interface web do Koda' },
-  { value: 'api-proxy', label: 'api-proxy', hint: 'Serviço de roteamento de modelos' },
-  { value: 'landing-page', label: 'landing-page', hint: 'Página de apresentação' },
-]
 
-/** Projetos que podem ir no payload de envio (`sem-projeto` significa nenhum). */
-export const projectName = (value: string) =>
-  value === 'sem-projeto' ? null : value

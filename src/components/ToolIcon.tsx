@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Wrench } from 'lucide-react'
+import { ferramentaCanonica } from '../tools'
 
 /**
  * Ícones das ferramentas: um desenho por ação, no mesmo traço do resto da interface
@@ -121,6 +122,40 @@ const GLYPHS: Record<string, ReactNode> = {
       <circle cx="12" cy="12" r="3.4" />
     </>
   ),
+  enviar: (
+    <>
+      <path d="M12 19.4V5.6" />
+      <path d="M6.4 11.2L12 5.6l5.6 5.6" />
+      <path d="M4.8 19.4h14.4" />
+    </>
+  ),
+  baixar: (
+    <>
+      <path d="M12 4.6v13.8" />
+      <path d="M6.4 12.8L12 18.4l5.6-5.6" />
+      <path d="M4.8 19.4h14.4" />
+    </>
+  ),
+  pacote: (
+    <>
+      <path d="M12 3.6l7.6 4.2v8.4L12 20.4l-7.6-4.2V7.8z" />
+      <path d="M4.4 7.8L12 12l7.6-4.2M12 12v8.4" />
+    </>
+  ),
+  plano: (
+    <>
+      <path d="M4.6 6.4l1.5 1.5 2.6-2.8" />
+      <path d="M4.6 12.6l1.5 1.5 2.6-2.8" />
+      <path d="M4.6 18.8l1.5 1.5 2.6-2.8" />
+      <path d="M11.6 6.9h7.8M11.6 13.1h7.8M11.6 19.3h5.4" />
+    </>
+  ),
+  retalho: (
+    <>
+      <rect x="4.4" y="4.4" width="15.2" height="15.2" rx="2.6" />
+      <path d="M9.2 9.4h6M9.2 12.2h3.4M9.2 15h6M14.6 12.2h.6" />
+    </>
+  ),
 }
 
 /** Ferramenta do backend -> desenho (os aliases apontam para o mesmo ícone). */
@@ -134,6 +169,21 @@ const POR_NOME: Record<string, string> = {
   str_replace_editor: 'lapis',
   list_dir: 'pasta',
   delete_file: 'lixeira',
+  create_directory: 'pasta',
+  delete_directory: 'lixeira',
+  move_file: 'arquivo',
+  copy_file: 'arquivoNovo',
+  rename_file: 'lapis',
+  get_environment: 'escudo',
+  search_files: 'lupa',
+  update_todos: 'plano',
+  apply_patch: 'retalho',
+  download_file: 'baixar',
+  upload_file: 'enviar',
+  install_package: 'pacote',
+  uninstall_package: 'pacote',
+  git_push: 'enviar',
+  git_pull: 'baixar',
   search_codebase: 'lupa',
   vector_search: 'lupa',
   grep: 'regex',
@@ -156,7 +206,7 @@ export function ToolIcon({
   name: string
   className?: string
 }) {
-  const desenho = GLYPHS[POR_NOME[name] ?? '']
+  const desenho = GLYPHS[POR_NOME[ferramentaCanonica(name)] ?? '']
 
   if (!desenho) {
     return <Wrench className={className} strokeWidth={1.7} aria-hidden="true" />

@@ -44,10 +44,31 @@ ferramentas incluídas.
 
 ## Destaques
 
-**Ele executa, não improvisa.** Ler, criar e editar arquivos, rodar comandos e Python,
-procurar no código com busca textual ou regex, ler páginas e pesquisar na web, e trabalhar
-com git — inclusive commitar. O modelo recebe o resultado real de cada ferramenta antes de
-responder, em vez de imaginar o que tem na pasta.
+**Ele executa, não improvisa.** 37 ferramentas: ler, criar, editar, mover, copiar, renomear
+e apagar arquivos e pastas, aplicar um diff inteiro de uma vez, rodar comandos, rodar um
+trecho de código (Python ou JavaScript, com `linguagem: node`) e verificar problema de
+sintaxe, procurar arquivo por nome ou trecho de código, ler páginas e pesquisar na web,
+instalar dependência e trabalhar com git — inclusive commitar, enviar e baixar. O modelo
+recebe o resultado real de cada ferramenta antes de responder, em vez de imaginar o que tem
+na pasta.
+
+**Tarefa grande vira plano, e o plano aparece.** Quando o pedido tem várias partes, o Koda
+divide em itens **antes** de mexer em qualquer coisa e mostra a lista na conversa — com o
+que já foi feito riscado, o que está rodando girando e o quanto falta no cabeçalho.
+
+**Ele não para no meio do caminho.** Quatro portões de parada seguram a conversa antes de
+ela fechar: lista com item em aberto, código mudado sem nada ter sido executado depois,
+fechamento que **promete** o próximo passo ("vou deletar o bench…") e tarefa de ação em que
+nenhuma ferramenta funcionou. Cada um cobra a execução uma vez e, se ainda assim a tarefa
+parar, o Koda diz o que faltou — citando o anúncio que ficou sem execução — em vez de
+esconder que parou.
+
+**Conversa longa e projeto grande não estouram o contexto.** O histórico inteiro é
+reenviado a cada passo, então o Koda compacta em vez de estourar: saídas antigas das
+ferramentas viram uma linha, o miolo resolvido dá lugar a um resumo do que já foi feito e a
+janela recente encolhe — sem nunca quebrar a conversa. O teto é configurável
+(`KODA_CONTEXTO_TOKENS`, **1 milhão** por padrão — a janela dos modelos) e sobe para o
+que o modelo aguenta.
 
 **Você acompanha o trabalho, não o silêncio.** Enquanto o Koda pensa, a coroa da marca
 atravessa a tela com um brilho; cada ferramenta vira uma linha com o seu próprio desenho,
@@ -69,8 +90,9 @@ ainda traz a **conta**, o **uso** — com os limites diário, semanal e mensal e
 atividade do ano — e um **Sobre** que diz onde tudo é guardado.
 
 **Feito em português.** A interface, as respostas e os rótulos das ferramentas (`Listar
-pasta`, `Rodar Python`, `Escrever arquivo`) são em `pt-BR`, com o nome técnico à mão para
-quem quiser conferir a API.
+pasta`, `Rodar Python`, `Escrever arquivo`) são em `pt-BR` — e o agente também entende os
+nomes que outros agentes usam (`run_command`, `list_directory`, `apply_patch`), porque
+quem escreve o nome é o modelo, não a interface.
 
 **Acessível e navegável pelo teclado.** Todos os menus respondem a `↑` `↓` `Enter` `→` `←`
 `Esc`, com `aria-expanded`, `aria-pressed` e `role="menu"` onde precisa.
@@ -87,6 +109,30 @@ npm run lint     # checagem estática
 O Koda conversa com o **serviço de modelos do projeto**, que é próprio e distribuído à
 parte — os modelos não são públicos. Sem ele o app continua de pé, respondendo de forma
 offline e explícita, em vez de fingir que está pensando.
+
+## App desktop (Tauri)
+
+A mesma interface empacotada como aplicativo nativo (Tauri 2 + WebView2), com ícone e
+janela próprios. No Windows:
+
+```bash
+npm run app          # janela em modo dev (usa o Vite com HMR)
+npm run app:build    # gera o instalador NSIS e o exe em src-tauri/target
+```
+
+Ao abrir, o app sobe as duas peças da conversa, nesta ordem, e **encerra as duas quando
+fecha**:
+
+1. o **host** (`host/c-host.exe`), que é o serviço dos modelos oficiais — ele vai **dentro
+do instalador** (recurso `host/` do bundle) e o app o encontra ao lado do próprio exe;
+2. o **backend** (`uvicorn` na porta 8787), procurado como
+`backend/.venv/Scripts/python.exe` na árvore do projeto.
+
+O que já estiver no ar é reutilizado em vez de subir de novo, e nada é encerrado à força
+sem ter sido iniciado pelo app. Sem o backend a interface entra no modo offline dela — é o
+que acontece com o app **instalado**, porque o pacote leva só o host (o backend é Python e
+vem do projeto). O ícone é a coroa da marca sobre o fundo escuro do app (`assets/icon.png`,
+gerado por `scripts/gerar-icone.mjs`).
 
 ## Licença e autorização de uso
 

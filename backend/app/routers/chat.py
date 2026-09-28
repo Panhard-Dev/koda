@@ -12,10 +12,13 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pathlib import Path
 
+from .. import approvals, contexto, host_auth, projects
 from ..config import Settings
 from ..db import Database
 from ..deps import call, database, provider
@@ -24,9 +27,10 @@ from ..identidade import remover_intro
 from ..providers import ChatOptions, ChatTurn, ProviderError
 from ..repository import append_message, ensure_conversation, get_conversation, new_id
 from ..repository import usage as usage_for
-from ..schemas import ChatRequest, Message, ToolStepOut, sse
+from ..schemas import ApprovalDecision, ChatRequest, Message, TodoItem, ToolStepOut, sse
+from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
-from ..tools.loop import Resultado
+from ..tools.loop import Emit, Resultado
 
 router = APIRouter(tags=["chat"])
 
@@ -41,6 +45,23 @@ SSE_HEADERS = {
 def now_ms() -> int:
     """Epoch em milissegundos — mesma unidade que o front usa para `at`."""
     return int(time.time() * 1000)
+
+
+@router.post("/chat/approval", tags=["chat"])
+async def approval(payload: ApprovalDecision, request: Request) -> dict[str, object]:
+    """Resposta do cartão de permissão.
+
+    O passo que pediu está parado esperando exatamente este `id` — a decisão destrava o
+    loop que está no meio do stream daquela mensagem.
+    """
+    pendentes: dict[str, asyncio.Future[str]] = getattr(request.app.state, "aprovacoes", {})
+    futuro = pendentes.get(payload.id)
+    if futuro is None or futuro.done():
+        raise HTTPException(
+            status_code=404, detail="essa permissão não está mais esperando resposta"
+        )
+    futuro.set_result(payload.decisao)
+    return {"ok": True, "decisao": payload.decisao}
 
 
 # `response_model=None`: a anotação de retorno é um Response, e o FastAPI a usaria
@@ -73,8 +94,8 @@ async def _texto(
             "error",
             {
                 "message": (
-                    f"O provider '{engine.name}' não sabe chamar ferramentas. Use o proxy "
-                    "Gemini (KODA_PROVIDER=gemini) ou um provedor OpenAI-compatível com tools."
+                    f"O provider '{engine.name}' não sabe chamar ferramentas. Suba o host "
+                    "(KODA_PROVIDER=host) ou use um provedor OpenAI-compatível com tools."
                 )
             },
         )
@@ -82,7 +103,18 @@ async def _texto(
 
     started = time.perf_counter()
     conversation_id, turns = await call(_prepare, db, payload, now_ms())
+    resumo, turns, compactados = contexto.compactar_turnos(
+        turns, request.app.state.settings.contexto_tokens
+    )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": False})
+    if compactados:
+        yield sse(
+            "delta",
+            {
+                "text": f"_(histórico compactado: {compactados} mensagens antigas viraram "
+                "resumo, para a conversa caber no contexto)_\n\n"
+            },
+        )
 
     if not engine.ready:
         yield sse(
@@ -96,12 +128,18 @@ async def _texto(
         )
         return
 
-    options = _options(payload, request.app.state.settings.assistente)
+    options = _options(payload, request.app.state.settings.assistente, resumo)
     # Com qual modelo o provedor realmente responde (o seletor manda o nome da interface).
     modelo = engine.resolve_model(payload.model) if hasattr(engine, "resolve_model") else options.model
 
     pieces: list[str] = []
     stored = False
+    if compactados:
+        # A nota entra no texto gravado junto com a resposta: quem relê a conversa depois
+        # precisa saber que parte do histórico virou resumo (e não que sumiu).
+        nota = _nota_de_compactacao(compactados)
+        pieces.append(nota)
+        yield sse("delta", {"text": nota})
     try:
         async for piece in engine.stream(turns, options):
             if piece.reasoning:
@@ -123,6 +161,7 @@ async def _texto(
                 "message_id": message.id,
                 "elapsed_ms": elapsed_ms,
                 "steps": 0,
+                "tokens": message.tokens,
                 "usage": await call(_usage, db, payload.tz_offset_minutes),
             },
         )
@@ -148,23 +187,42 @@ async def _agente(
 
     started = time.perf_counter()
     conversation_id, turns = await call(_prepare, db, payload, now_ms())
+    # Conversa longa: o que é antigo vira resumo no prompt de sistema, em vez de sair do
+    # pedido inteiro. Sem isso, uma conversa de projeto grande estoura o contexto e a
+    # tarefa morre no meio, com erro do provedor que nem parece ter a ver com o trabalho.
+    resumo, turns, compactados = contexto.compactar_turnos(
+        turns, settings.contexto_tokens
+    )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": True})
 
-    workspace = settings.workspace_path
+    # A pasta de trabalho é a do projeto escolhido no prompt box; sem projeto, a Área de
+    # Trabalho do usuário (ou o que a configuração mandar).
+    workspace = await call(_workspace, db, payload.project_path, settings.workspace_path)
     negadas = settings.tools_negadas
     limite = settings.tool_output_limit
+    # Skills ligadas do projeto entram no prompt: o agente fica sabendo que elas
+    # existem e lê o SKILL.md com read_file quando a tarefa combina.
+    skills_prompt = indice_para_agente(settings)
     mensagens: list[dict[str, object]] = [
         {
             "role": "system",
             "content": (
                 f"{PROMPT_FERRAMENTAS}\n{regras_identidade(settings.assistente)}\n"
                 f"Pasta de trabalho atual: {workspace}"
+                + (f"\n\n{resumo}" if resumo else "")
+                + (f"\n\n{skills_prompt}" if skills_prompt else "")
             ),
         }
     ]
     mensagens += [{"role": turn.role, "content": turn.text} for turn in turns]
 
     pedacos: list[str] = []
+    #: Última lista de tarefas que o agente registrou — vai gravada na mensagem.
+    plano: list[dict[str, object]] = []
+    if compactados:
+        # Mesma nota do modo texto, e pelo mesmo motivo: ela fica no que está gravado.
+        nota = _nota_de_compactacao(compactados)
+        pedacos.append(nota)
     passos: list[ToolStepOut] = []
     resultado = Resultado(texto="", passos=[], completou=False, uso={})
     stored = False
@@ -174,7 +232,16 @@ async def _agente(
         if evento == "tool_result":
             # O que fica gravado é o que aparece na tela: saída limitada.
             dados = {**dados, "output": str(dados.get("output", ""))[:limite]}
+        if evento == "todos":
+            # A lista da última vez é a que fica: é o estado do plano no fim da resposta.
+            plano.clear()
+            plano.extend(dados.get("todos") or [])  # type: ignore[arg-type]
         await fim.put((evento, dados))
+
+    modo_permissao = await call(_modo_de_permissao, db)
+
+    async def aprovar(acao: dict[str, object]) -> str:
+        return await _pedir_permissao(request, db, modo_permissao, emit, acao)
 
     async def rodar() -> Resultado:
         try:
@@ -189,9 +256,17 @@ async def _agente(
                 timeout_s=settings.tool_timeout_s or None,
                 tentativas=settings.retry_attempts,
                 espera_final=float(settings.retry_final_wait_s),
-                acesso_livre=settings.acesso_livre,
+                # "Tudo automático" é isso: sem cartão **e** sem trava de pasta. Antes o
+                # modo só calava o cartão — a ferramenta de arquivo continuava recusando
+                # o que estivesse fora da pasta e mandava o modelo **pedir autorização na
+                # conversa**, que é o oposto do que a pessoa escolheu.
+                acesso_livre=settings.acesso_livre or modo_permissao == "auto",
                 reasoning=payload.reasoning,
                 effort=_effort(payload),
+                aprovar=None if modo_permissao == "auto" else aprovar,
+                # Teto de contexto da tarefa: passando dele, o histórico do loop compacta
+                # em vez de estourar o que o provedor aceita.
+                orcamento=settings.contexto_tokens,
             )
         finally:
             await fim.put(None)
@@ -199,6 +274,8 @@ async def _agente(
     loop_task: asyncio.Task[Resultado] | None = None
 
     try:
+        if compactados:
+            yield sse("delta", {"text": _nota_de_compactacao(compactados)})
         loop_task = asyncio.create_task(rodar())
 
         # O loop roda como tarefa e narra cada passo: a fila entrega na ordem, sem
@@ -213,6 +290,19 @@ async def _agente(
             yield sse(evento, dados)
 
         resultado = await loop_task
+
+        # Fechou sem terminar (orçamento de passos, tempo esgotado): o texto que o loop
+        # monta nesse caso não passou por nenhum `delta`, então era gravado e a tela ficava
+        # muda. Quem estava olhando via as ferramentas rodarem e depois nada — o agente
+        # "parava do nada", sem dizer que parou.
+        if not resultado.completou and resultado.texto.strip():
+            if resultado.texto.strip() not in "".join(pedacos):
+                # O fechamento honesto entra na **lista de pedaços**, e não só na tela: sem
+                # isto ele era mostrado e não ficava gravado, então reabrir a conversa
+                # mostrava a tarefa sem a frase que diz o que ficou faltando.
+                pedaco = f"\n\n{resultado.texto.strip()}"
+                pedacos.append(pedaco)
+                yield sse("delta", {"text": pedaco})
 
         passos = [
             ToolStepOut(
@@ -232,7 +322,16 @@ async def _agente(
         # O provedor é quem sabe com qual modelo está falando.
         modelo = engine.resolve_model(payload.model)
         message = await call(
-            _store, db, conversation_id, texto, modelo, elapsed_ms, passos
+            _store,
+            db,
+            conversation_id,
+            texto,
+            modelo,
+            elapsed_ms,
+            passos,
+            _tokens(resultado.uso),
+            resultado.todos or plano,
+            resultado.contexto or None,
         )
         stored = True
         yield sse(
@@ -243,6 +342,9 @@ async def _agente(
                 "elapsed_ms": elapsed_ms,
                 "steps": len(passos),
                 "completed": resultado.completou,
+                "tokens": message.tokens,
+                # O medidor de contexto ao lado do modelo lê daqui, sem recarregar nada.
+                "contexto": resultado.contexto or None,
                 "usage": await call(_usage, db, payload.tz_offset_minutes),
             },
         )
@@ -261,21 +363,103 @@ async def _agente(
         # Parou no meio ou caiu a conexão: guarda o que já saiu, sem perder a tarefa.
         if not stored:
             texto = ("".join(pedacos) or resultado.texto).strip()
-            if texto:
-                _store(db, conversation_id, texto, None, None, passos)
+            if texto or plano:
+                _store(
+                    db,
+                    conversation_id,
+                    texto,
+                    None,
+                    None,
+                    passos,
+                    None,
+                    resultado.todos or plano,
+                    resultado.contexto or None,
+                )
+
+
+def _nota_de_compactacao(compactados: int) -> str:
+    """O aviso, em uma linha, de que parte do histórico virou resumo."""
+    return (
+        f"_(histórico compactado: {compactados} mensagens antigas viraram resumo, para a "
+        "conversa caber no contexto)_\n\n"
+    )
+
+
+def _modo_de_permissao(db: Database) -> str:
+    with db.connect() as conn:
+        return approvals.modo(conn)
+
+
+def _resolver_permissao(db: Database, acao: dict[str, object], modo_atual: str) -> str:
+    with db.connect() as conn:
+        return approvals.resolver(conn, acao, modo_atual)
+
+
+def _lembrar_permissao(db: Database, acao: dict[str, object], decisao: str) -> None:
+    with db.connect() as conn:
+        approvals.lembrar_tudo(conn, acao, decisao)
+
+
+async def _pedir_permissao(
+    request: Request,
+    db: Database,
+    modo_atual: str,
+    emit: Emit,
+    acao: dict[str, object],
+) -> str:
+    """Decide o que já foi respondido antes; o resto vai para a tela e espera.
+
+    Um «nunca permitir» (ou «sempre permitir») lembrado não passa pela tela de novo; a
+    pergunta só aparece no que ainda não tem resposta. Sem resposta em
+    `approvals.ESPERA_MAXIMA_S`, a ação é negada — melhor parar do que fazer sozinho.
+    """
+    politica = await call(_resolver_permissao, db, acao, modo_atual)
+    if politica == "sempre":
+        return "sempre"
+    if politica == "nunca":
+        return "nunca"
+    if politica == "seguir":
+        return "sim"
+
+    pendentes: dict[str, asyncio.Future[str]] = request.app.state.aprovacoes
+    identificador = new_id()
+    futuro: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    pendentes[identificador] = futuro
+    await emit("approval_request", {"id": identificador, **acao})
+    try:
+        decisao = await asyncio.wait_for(futuro, timeout=approvals.ESPERA_MAXIMA_S)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        decisao = "nao"
+    finally:
+        pendentes.pop(identificador, None)
+
+    if decisao in ("sempre", "nunca"):
+        await call(_lembrar_permissao, db, acao, decisao)
+    return decisao
+
+
+def _workspace(db: Database, caminho: str | None, padrao: Path) -> Path:
+    """Pasta escolhida na tela, senão a do projeto aberto, senão o padrão do sistema."""
+    with db.connect() as conn:
+        escolhida = projects.pasta_de_trabalho(conn, caminho)
+    return escolhida or padrao
 
 
 # --- funções que tocam o SQLite, sempre chamadas via `call` (thread) --------
 
 
-def _options(payload: ChatRequest, assistente: str) -> ChatOptions:
+def _options(payload: ChatRequest, assistente: str, resumo: str = "") -> ChatOptions:
     return ChatOptions(
         model=payload.model,
+        resumo=resumo,
         reasoning=payload.reasoning,
         web=payload.web,
         project=payload.project or None,
         attachments=payload.attachments,
         assistente=assistente,
+        # Quem está logado, quando a tela já informou a sessão. Vem da memória do processo
+        # (nenhuma conta é gravada), e some ao sair.
+        conta=host_auth.rotulo_da_conta(),
         effort=_effort(payload),
     )
 
@@ -325,6 +509,11 @@ def _turns(mensagens: list[Message]) -> list[ChatTurn]:
     return turns
 
 
+def _tokens(uso: dict[str, Any]) -> int | None:
+    """Tokens que um passo custou — `None` quando o provedor não conta."""
+    return int(uso.get("total_tokens") or 0) or None
+
+
 def _store(
     db: Database,
     conversation_id: str,
@@ -332,6 +521,9 @@ def _store(
     model: str | None,
     elapsed_ms: int | None,
     steps: list[ToolStepOut],
+    tokens: int | None = None,
+    todos: list[dict[str, object]] | None = None,
+    contexto: int | None = None,
 ) -> Message:
     message = Message(
         id=new_id(),
@@ -339,8 +531,11 @@ def _store(
         text=text,
         model=model,
         elapsed_ms=elapsed_ms,
+        tokens=tokens,
+        contexto=contexto,
         at=now_ms(),
         steps=steps,
+        todos=[TodoItem.model_validate(item) for item in (todos or [])],
     )
     with db.connect() as conn:
         append_message(conn, conversation_id, message)
