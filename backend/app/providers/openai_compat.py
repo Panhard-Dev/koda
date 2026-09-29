@@ -56,6 +56,21 @@ TIME_STREAM = httpx.Timeout(TEMPO_DE_LEITURA, connect=10.0)
 MAX_TOKENS_SAIDA = 8192
 
 
+def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
+    """Explica a falha sem expor URL, credenciais ou texto da requisicao."""
+    nome = type(error).__name__
+    if isinstance(error, httpx.ReadTimeout):
+        return f"o provedor ficou {TIME_STREAM.read:g}s sem enviar dados ({nome})"
+    if isinstance(error, httpx.ConnectTimeout):
+        return f"a conexao com o provedor excedeu {TIME_STREAM.connect:g}s ({nome})"
+    if isinstance(error, httpx.TimeoutException):
+        return f"tempo de espera esgotado ({nome})"
+    if isinstance(error, httpx.ConnectError):
+        return f"nao foi possivel conectar ao servico do provedor ({nome})"
+    if isinstance(error, httpx.ProtocolError):
+        return f"a comunicacao HTTP com o provedor foi interrompida ({nome})"
+    return f"erro de comunicacao com o provedor ({nome})"
+
 
 def _texto_do_usuario(turno: Any) -> str:
     """O conteúdo do usuário, que chega ora como `ChatTurn`, ora como mensagem crua."""
@@ -245,7 +260,7 @@ class OpenAICompatibleProvider:
                         if limpo:
                             yield Piece(limpo)
         except httpx.HTTPError as error:  # rede, DNS, timeout
-            raise TransientProviderError(f"Não consegui falar com o provedor: {error}") from error
+            raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
         # O que ficou preso na cabeça sai agora; se era só apresentação, sai a resposta
         # padrão — nunca uma resposta vazia.
@@ -298,15 +313,8 @@ class OpenAICompatibleProvider:
                 headers=self.headers(),
                 json=payload,
             )
-        except httpx.TimeoutException as error:
-            # Demorou demais **sem mandar nada**: não é queda de conexão, é espera. Dizer
-            # "falha ao falar" aqui manda o dono procurar problema de rede onde não tem.
-            raise TransientProviderError(
-                f"o serviço de modelos ficou {TEMPO_DE_LEITURA:.0f}s sem responder nada "
-                f"({type(error).__name__}) — modelo grande, caminho lento, ou serviço travado"
-            ) from error
         except httpx.HTTPError as error:
-            raise TransientProviderError(f"falha ao falar com o provedor: {error}") from error
+            raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
         if response.status_code >= 400:
             raise self._erro(response.status_code, response.text[:300])
@@ -432,15 +440,8 @@ class OpenAICompatibleProvider:
                             atual["name"] = str(funcao["name"])
                         if funcao.get("arguments"):
                             atual["args"] += str(funcao["arguments"])
-        except httpx.TimeoutException as error:
-            # Demorou demais **sem mandar nada**: não é queda de conexão, é espera. Dizer
-            # "falha ao falar" aqui manda o dono procurar problema de rede onde não tem.
-            raise TransientProviderError(
-                f"o serviço de modelos ficou {TEMPO_DE_LEITURA:.0f}s sem responder nada "
-                f"({type(error).__name__}) — modelo grande, caminho lento, ou serviço travado"
-            ) from error
         except httpx.HTTPError as error:
-            raise TransientProviderError(f"falha ao falar com o provedor: {error}") from error
+            raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
         # O que estava preso na cabeça entra no texto do passo — e na tela — antes de o
         # passo terminar, senão o que a tela mostrava e o que ficava gravado divergiam.

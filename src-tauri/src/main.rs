@@ -364,7 +364,9 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
     let mut comando = Command::new(&backend.python);
     comando
         .args(["-m", "uvicorn", "app.main:app", "--port", &porta.to_string()])
-        .current_dir(&backend.pasta);
+        .current_dir(&backend.pasta)
+        // Define so o padrao: KODA_PROVIDER explicito no ambiente ou .env prevalece.
+        .env("KODA_BACKEND_PACKAGED", if backend.empacotado { "1" } else { "0" });
 
     // A saída do backend vai para o arquivo (ver `log_do_backend`): é por onde se descobre,
     // na máquina de quem instalou, por que ele não subiu.
