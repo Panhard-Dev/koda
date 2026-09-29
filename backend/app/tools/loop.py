@@ -307,13 +307,13 @@ FUTURO = re.compile(
 #: português é futuro disfarçado, e é assim que um fechamento aparece sem nenhum "vou".
 INFINITIVO_NO_FIM = re.compile(r"^\s*\w{4,}(?:ar|er|ir)\b", re.IGNORECASE)
 
-# Fechamento textual com confirmacao explicita, sem promessas de outra acao.
+# So a clausula final pode encerrar: uma acao posterior continua sendo anuncio.
 FECHAMENTO_CONFIRMADO = re.compile(
     r"(?:^|[;.!?]\s*)(?:o\s+)?pr[óo]ximo passo\s+[ée]\s+"
     r"(?:apenas\s+)?(?:encerrar|finalizar)\s+(?:o teste|esta resposta|a resposta|a conversa)"
     r",\s*(?:pois|porque)\s+(?:o valor|o resultado|a leitura|a verifica[çc][ãa]o)\s+"
     r"j[áa]\s+(?:foi|est[áa])\s+(?:confirmad[oa]|verificad[oa]|conclu[íi]d[oa])"
-    r"(?=\s*(?:[.!?]|$))",
+    r"(?=\s*[.!?]?\s*$)",
     re.IGNORECASE,
 )
 
