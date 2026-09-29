@@ -7,6 +7,7 @@ o provider local responde e o banco nasce em `data/koda.db`.
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,12 @@ from .projects import area_de_trabalho
 ProviderName = Literal["auto", "local", "openai", "host"]
 
 
+def _provider_padrao() -> ProviderName:
+    # O launcher marca apenas o processo filho. Configuracao explicita (inclusive
+    # no .env) continua vencendo; OPENAI_* de outros apps nao escolhe o instalado.
+    return "host" if os.environ.get("KODA_BACKEND_PACKAGED") == "1" else "auto"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env",),
@@ -32,7 +39,7 @@ class Settings(BaseSettings):
         validate_by_name=True,
     )
 
-    provider: ProviderName = "auto"
+    provider: ProviderName = Field(default_factory=_provider_padrao)
     database_path: Path = Path("data/koda.db")
     # `http://tauri.localhost` é a origem que o app desktop (Tauri/WebView2) usa
     # quando roda empacotado; no dev a interface vem do Vite, nas portas 5173.

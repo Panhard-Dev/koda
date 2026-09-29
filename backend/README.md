@@ -13,6 +13,13 @@ uv run uvicorn app.main:app --reload --port 8787
 
 Documentação interativa em `http://localhost:8787/docs`.
 
+No app instalado, o launcher marca o backend com `KODA_BACKEND_PACKAGED=1` e o
+provedor padrão é `host`. Assim, variáveis `OPENAI_*` de outros programas não
+redirecionam a conversa por acidente. `KODA_PROVIDER` definido explicitamente no
+ambiente ou no `.env` continua prevalecendo, inclusive `auto`. No desenvolvimento,
+o padrão continua sendo `auto`; o marcador é interno ao launcher, não precisa
+ser configurado pelo usuário.
+
 ## Rotas
 
 | Método | Rota | O que faz |

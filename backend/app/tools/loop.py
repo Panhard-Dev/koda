@@ -242,12 +242,12 @@ MAX_SILENCIO = 1
 MAX_NARRACOES = 6
 
 NARRAR = (
-    "PARE. Você rodou ferramentas em sequência sem escrever nada para a pessoa, e a conversa "
-    "parece travada. Responda agora com UMA linha curta do que descobriu e do próximo passo, "
-    "**e chame a ferramenta desse próximo passo na mesma resposta**. Exemplo do formato: "
+    "Você rodou ferramentas sem escrever nada para a pessoa. Informe o que descobriu. "
+    "Se o pedido já foi atendido, entregue o resultado final e encerre sem chamar outra "
+    "ferramenta. Se ainda há trabalho pendente, escreva uma linha curta do próximo passo "
+    "e chame a ferramenta necessária na mesma resposta. Exemplo para trabalho pendente: "
     '"Vi que o projeto tem js/ e css/; vou ler o js/main.js para achar o ponto de entrada." '
-    "Uma linha sozinha, sem ferramenta, não conta como trabalho: nada mudou no disco. Não "
-    "responda só com a ferramenta de novo."
+    "Não repita ferramentas cujo resultado já é suficiente para responder ao pedido."
 )
 
 #: Quantas vezes o loop troca uma **leitura** feita em código pela ferramenta certa. Uma
@@ -307,6 +307,16 @@ FUTURO = re.compile(
 #: português é futuro disfarçado, e é assim que um fechamento aparece sem nenhum "vou".
 INFINITIVO_NO_FIM = re.compile(r"^\s*\w{4,}(?:ar|er|ir)\b", re.IGNORECASE)
 
+# So a clausula final pode encerrar: uma acao posterior continua sendo anuncio.
+FECHAMENTO_CONFIRMADO = re.compile(
+    r"(?:^|[;.!?]\s*)(?:o\s+)?pr[óo]ximo passo\s+[ée]\s+"
+    r"(?:apenas\s+)?(?:encerrar|finalizar)\s+(?:o teste|esta resposta|a resposta|a conversa)"
+    r",\s*(?:pois|porque)\s+(?:o valor|o resultado|a leitura|a verifica[çc][ãa]o)\s+"
+    r"j[áa]\s+(?:foi|est[áa])\s+(?:confirmad[oa]|verificad[oa]|conclu[íi]d[oa])"
+    r"(?=\s*[.!?]?\s*$)",
+    re.IGNORECASE,
+)
+
 
 def _frases(texto: str) -> list[str]:
     return [
@@ -329,7 +339,7 @@ def anunciou(texto: str) -> bool:
     O vocabulário sozinho não bastava — sempre falta um verbo —, e é por isso que os
     outros dois olham a **forma** da frase, e não a palavra exata.
     """
-    fim = _fim_do_texto(texto)
+    fim = FECHAMENTO_CONFIRMADO.sub("", _fim_do_texto(texto))
     if not fim.strip():
         return False
     return bool(ANUNCIO.search(fim) or FUTURO.search(fim) or INFINITIVO_NO_FIM.search(fim))
