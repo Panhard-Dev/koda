@@ -236,6 +236,19 @@ class CloudEstado(BaseModel):
     servico: str | None = None
 
 
+class HealthMinimo(BaseModel):
+    """O que `/api/health` responde **sem token**.
+
+    É de propósito que caiba em duas linhas: o launcher e a interface só precisam saber que
+    existe alguém atendendo e de que versão. Workspace, caminho do banco e a lista de
+    ferramentas do agente descrevem a máquina de quem instalou — isso fica no
+    `/api/health/detalhado`, que exige o token da execução.
+    """
+
+    status: Literal["ok"] = "ok"
+    version: str
+
+
 class Health(BaseModel):
     status: Literal["ok"] = "ok"
     provider: str
@@ -258,7 +271,7 @@ class Health(BaseModel):
 Permissao = Literal["sim", "sempre", "nao", "nunca"]
 """As quatro respostas do cartão de permissão (Sim, Sempre permitir, Não, Nunca permitir)."""
 
-ModoPermissao = Literal["manual", "default", "auto"]
+ModoPermissao = Literal["manual", "default", "auto", "livre"]
 
 
 class ApprovalDecision(BaseModel):
@@ -300,7 +313,7 @@ class ProjectsEstado(BaseModel):
     projetos: list[Project] = Field(default_factory=list)
     ativo_id: str | None = None
     padrao: str = ""
-    """Modo de permissão em vigor (manual / default / auto)."""
+    """Modo de permissão em vigor (manual / default / auto / livre)."""
     permissao: ModoPermissao = "default"
 
 

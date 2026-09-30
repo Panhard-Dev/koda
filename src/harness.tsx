@@ -67,7 +67,7 @@ function ComposerHarness() {
 
   return (
     <div className="bg-koda-bg">
-      {(['manual', 'default', 'auto'] as ModoPermissao[]).map((modo) => (
+      {(['manual', 'default', 'auto', 'livre'] as ModoPermissao[]).map((modo) => (
         <div key={modo} className="border-b border-koda-fg/5 pb-10">
           <p className="mb-2 px-5 text-[11px] tracking-wider text-koda-fg/35 uppercase">
             permissão: {modo}
@@ -94,9 +94,10 @@ function ComposerHarness() {
  */
 function IconesHarness() {
   const linhas: { rotulo: string; icone: ReactNode }[] = [
-    { rotulo: 'Aprovação manual', icone: ICONE_DO_MODO.manual },
+    { rotulo: 'Perguntar sempre', icone: ICONE_DO_MODO.manual },
     { rotulo: 'Padrão', icone: ICONE_DO_MODO.default },
-    { rotulo: 'Tudo automático', icone: ICONE_DO_MODO.auto },
+    { rotulo: 'Auto', icone: ICONE_DO_MODO.auto },
+    { rotulo: 'Livre — arquivos no computador inteiro', icone: ICONE_DO_MODO.livre },
   ]
   return (
     <div className="bg-koda-bg p-5">

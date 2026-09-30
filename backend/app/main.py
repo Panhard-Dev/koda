@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import __version__
+from . import __version__, seguranca
 from .config import Settings, get_settings
 from .db import Database
 from .instalador import Baixador
@@ -32,7 +32,7 @@ from .routers import (
     skills,
     usage,
 )
-from .schemas import CloudEstado, Health
+from .schemas import CloudEstado, Health, HealthMinimo
 from .tools import ferramentas
 
 #: Hosts aceitos no cabeçalho `Host`. O app desktop (Tauri/WebView2) usa `tauri.localhost`;
@@ -56,6 +56,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # O token desta execução, antes de qualquer rota atender: do stdin (o launcher o
+        # escreve ali), de `KODA_API_TOKEN` em dev, ou sorteado. Sem ele não existe rota
+        # protegida que valha.
+        seguranca.preparar()
         database = Database(config.database_path)
         database.initialize()
         app.state.settings = config
@@ -95,11 +99,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with suppress(asyncio.CancelledError):
                     await tarefa
 
+    # No app empacotado a documentação sai do ar: `/docs`, `/redoc` e `/openapi.json`
+    # descrevem a API inteira — inclusive as rotas de permissão que o agente não deve nem
+    # saber que existem — e não servem a ninguém na máquina do cliente. Em dev continuam,
+    # que é onde elas ajudam.
+    empacotado = seguranca.empacotado()
     app = FastAPI(
         title="Koda API",
         version=__version__,
         summary="Chat com streaming, histórico e uso em SQLite",
         lifespan=lifespan,
+        docs_url=None if empacotado else "/docs",
+        redoc_url=None if empacotado else "/redoc",
+        openapi_url=None if empacotado else "/openapi.json",
     )
 
     app.add_middleware(
@@ -128,6 +140,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await call_next(request)
 
+    @app.middleware("http")
+    async def _exigir_token(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Exige o token da execução em tudo que é `/api` — **deny-by-default**.
+
+        A checagem é por prefixo, e não por lista de rotas protegidas: rota nova nasce
+        protegida, sem ninguém precisar lembrar de incluí-la aqui. As exceções estão em
+        `seguranca.ROTAS_ABERTAS` e cada uma tem motivo escrito lá.
+
+        O `OPTIONS` sai antes de tudo porque é o *preflight* do CORS: o navegador não manda
+        `Authorization` nesse pedido, e recusá-lo derruba toda chamada do app — inclusive
+        as legítimas.
+        """
+        if request.method != "OPTIONS" and not seguranca.liberada(request.url.path):
+            if not seguranca.confere(request.headers.get("authorization")):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "token da execução ausente ou inválido"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
+
     app.include_router(chat.router, prefix="/api")
     app.include_router(models.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
@@ -139,9 +172,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects.router, prefix="/api")
     app.include_router(host.router, prefix="/api")
 
-    @app.get("/api/health", response_model=Health, tags=["system"])
-    async def health() -> Health:
-        """O front chama isso ao carregar para saber se há backend de pé."""
+    @app.get("/api/handshake", tags=["system"])
+    async def handshake(nonce: str = "") -> dict[str, str]:
+        """Desafio do launcher: prove que este processo conhece o token, sem dizê-lo.
+
+        Quem pergunta manda um nonce e confere o HMAC do lado de lá. Um backend de execução
+        anterior não tem o token desta e não acerta — que é exatamente o que o launcher
+        precisa saber para não adotar serviço alheio.
+        """
+        return {"hmac": seguranca.hmac_do_nonce(nonce)}
+
+    @app.get("/api/health", response_model=HealthMinimo, tags=["system"])
+    async def health() -> HealthMinimo:
+        """Resposta mínima, **aberta**: existe alguém atendendo aqui?
+
+        É o que o launcher bate para saber se o serviço subiu e o que a interface pergunta
+        ao carregar. Nada de workspace, caminho de banco ou lista de ferramentas: quem quer
+        o retrato completo pede `/api/health/detalhado`, que exige o token.
+        """
+        return HealthMinimo(version=__version__)
+
+    @app.get("/api/health/detalhado", response_model=Health, tags=["system"])
+    async def health_detalhado() -> Health:
+        """O retrato completo do backend — só com o token da execução."""
         engine = app.state.provider
         return Health(
             provider=engine.name,
@@ -157,36 +210,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cloud=_cloud(app),
         )
 
-    @app.get("/", include_in_schema=False)
-    async def index() -> dict[str, object]:
-        return {
-            "app": "Koda API",
-            "version": __version__,
-            "docs": "/docs",
-            "routes": [
-                "GET    /api/health",
-                "GET    /api/models",
-                "POST   /api/chat            (text/event-stream)",
-                "GET    /api/conversations",
-                "POST   /api/conversations",
-                "GET    /api/conversations/{id}",
-                "DELETE /api/conversations/{id}",
-                "GET    /api/usage?tz_offset_minutes=",
-                "GET    /api/account",
-                "PATCH  /api/account",
-                "POST   /api/account/sign-out",
-                "GET    /api/skills",
-                "POST   /api/skills/{name}/toggle",
-                "GET    /api/mcps",
-                "POST   /api/mcps/{name}/toggle",
-                "GET    /api/cloud/update",
-                "GET    /api/cloud/changelog",
-                "GET    /api/cloud/download",
-                "POST   /api/cloud/download",
-                "POST   /api/host/sessao",
-                "DELETE /api/host/sessao",
-            ],
-        }
+    if not empacotado:
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> dict[str, object]:
+            return {
+                "app": "Koda API",
+                "version": __version__,
+                "docs": "/docs",
+                "routes": [
+                    "GET    /api/health",
+                    "GET    /api/health/detalhado",
+                    "GET    /api/models",
+                    "POST   /api/chat            (text/event-stream)",
+                    "GET    /api/conversations",
+                    "POST   /api/conversations",
+                    "GET    /api/conversations/{id}",
+                    "DELETE /api/conversations/{id}",
+                    "GET    /api/usage?tz_offset_minutes=",
+                    "GET    /api/account",
+                    "PATCH  /api/account",
+                    "POST   /api/account/sign-out",
+                    "GET    /api/skills",
+                    "POST   /api/skills/{name}/toggle",
+                    "GET    /api/mcps",
+                    "POST   /api/mcps/{name}/toggle",
+                    "GET    /api/cloud/update",
+                    "GET    /api/cloud/changelog",
+                    "GET    /api/cloud/download",
+                    "POST   /api/cloud/download",
+                    "POST   /api/host/sessao",
+                    "DELETE /api/host/sessao",
+                ],
+            }
 
     return app
 

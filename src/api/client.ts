@@ -5,8 +5,68 @@
  * simulada local. Por isso tudo aqui lança em caso de falha e quem chama decide.
  */
 
+import { invoke } from '@tauri-apps/api/core'
+
 const rawBase = import.meta.env.VITE_API_URL as string | undefined
-export const apiUrl = (rawBase ?? 'http://localhost:8787').replace(/\/+$/, '')
+
+/** Endereço de reserva: o do navegador, onde não existe launcher para dizer a porta. */
+const BASE_FIXA = (rawBase ?? 'http://localhost:8787').replace(/\/+$/, '')
+
+/**
+ * Onde a API local está atendendo **nesta execução**.
+ *
+ * Não é constante porque no app instalado a porta é efêmera: o launcher sorteia uma porta
+ * livre a cada execução e a repassa por `invoke` (ver `src-tauri/src/acesso.rs`). A
+ * ligação é viva — quem já importou este nome enxerga a troca.
+ */
+export let apiUrl = BASE_FIXA
+
+/**
+ * O token desta execução.
+ *
+ * O backend é **deny-by-default**: sem ele, toda rota `/api` devolve 401. No app desktop
+ * ele vem do launcher, que o sorteia por execução e o entrega por `invoke` — o processo do
+ * agente não tem como lê-lo (não está no ambiente dele, ver `_ambiente_do_comando`). No
+ * navegador (dev) vem de `VITE_API_TOKEN`, o mesmo valor que o backend imprime ao subir.
+ */
+let tokenDaExecucao: string | null = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? null
+
+/** O cabeçalho de acesso, ou nada quando ainda não há token (dev sem `VITE_API_TOKEN`). */
+export function cabecalhoDeAcesso(): Record<string, string> {
+  return tokenDaExecucao ? { authorization: `Bearer ${tokenDaExecucao}` } : {}
+}
+
+/** Estamos dentro do app desktop? Só lá existe `invoke`. */
+function noApp(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+let pronto: Promise<void> | null = null
+
+/**
+ * Pega com o launcher a porta e o token desta execução. Idempotente e barato: quem chama
+ * várias vezes espera a mesma promessa.
+ *
+ * Toda requisição passa por aqui antes de sair — é o que evita a corrida entre a tela
+ * carregar e o launcher ter as credenciais prontas.
+ */
+export function prepararAcesso(): Promise<void> {
+  pronto ??= carregarCredenciais()
+  return pronto
+}
+
+async function carregarCredenciais(): Promise<void> {
+  if (!noApp()) return
+  try {
+    const dados = await invoke<{ porta: number; token: string }>('acesso')
+    apiUrl = `http://127.0.0.1:${dados.porta}`
+    tokenDaExecucao = dados.token
+  } catch (erro) {
+    // Sem credenciais a conversa não anda, mas a tela continua de pé e diz o que houve —
+    // é melhor do que uma tela branca por causa do launcher.
+    console.warn('[koda] não consegui obter a porta e o token do launcher', erro)
+  }
+}
 
 export type Health = {
   status: 'ok'
@@ -302,6 +362,11 @@ async function motivoDaFalha(
 export function fraseDeFalha(erro: unknown): string {
   if (erro instanceof ApiError) {
     if (erro.motivo) return erro.motivo
+    if (erro.status === 401) {
+      // Não é senha errada de ninguém: é o token da execução. Ele vale só para a execução
+      // que o gerou — backend de uma execução anterior recusa o da atual, e vice-versa.
+      return 'O serviço local recusou a credencial desta execução (401). Feche e abra o Koda de novo.'
+    }
     if (erro.status === 422) {
       return 'O serviço local recusou o pedido: os dados não são os que ele espera (422).'
     }
@@ -317,9 +382,14 @@ export function fraseDeFalha(erro: unknown): string {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  await prepararAcesso()
   const response = await fetch(`${apiUrl}${path}`, {
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
     ...init,
+    headers: {
+      'content-type': 'application/json',
+      ...cabecalhoDeAcesso(),
+      ...(init.headers ?? {}),
+    },
   })
   if (!response.ok) {
     const { codigo, mensagem } = await motivoDaFalha(response)
@@ -333,7 +403,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const tzOffset = () => new Date().getTimezoneOffset()
 
 export const health = () =>
-  request<Health>('/api/health', { signal: AbortSignal.timeout(1500) })
+  // O detalhado, e não o `/api/health`: o mínimo é o que responde **sem** token (só `ok` e
+  // versão, ver `app/seguranca.py`). Este é o retrato que a tela precisa — e ele exige o
+  // token desta execução, que a requisição manda no cabeçalho.
+  request<Health>('/api/health/detalhado', { signal: AbortSignal.timeout(1500) })
 
 /**
  * Estado do download do instalador. Quem baixa é o backend local (ele escreve na pasta
@@ -431,7 +504,7 @@ export type ApiProject = {
   existe: boolean
 }
 
-export type ModoPermissao = 'manual' | 'default' | 'auto'
+export type ModoPermissao = 'manual' | 'default' | 'auto' | 'livre'
 
 export type ProjectsEstado = {
   projetos: ApiProject[]
@@ -600,9 +673,12 @@ export type StreamHandlers = {
  * Lança em falha de rede; o evento `error` do protocolo é entregue via `onError`.
  */
 export async function streamChat(payload: ChatPayload, handlers: StreamHandlers) {
+  await prepararAcesso()
   const response = await fetch(`${apiUrl}/api/chat`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // O token vai também aqui: o stream é a rota mais importante, e ela é protegida como
+    // todas as outras.
+    headers: { 'content-type': 'application/json', ...cabecalhoDeAcesso() },
     body: JSON.stringify(payload),
     signal: handlers.signal,
   })
@@ -688,9 +764,10 @@ export async function definirSessaoDoHost(
   token: string | null,
   conta?: { nome?: string | null; email?: string | null } | null,
 ): Promise<EstadoDoHost> {
+  await prepararAcesso()
   const response = await fetch(`${apiUrl}/api/host/sessao`, {
     method: token ? 'POST' : 'DELETE',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...cabecalhoDeAcesso() },
     ...(token
       ? { body: JSON.stringify({ token, nome: conta?.nome ?? null, email: conta?.email ?? null }) }
       : {}),

@@ -264,14 +264,13 @@ async def _agente(
                 timeout_s=settings.tool_timeout_s or None,
                 tentativas=settings.retry_attempts,
                 espera_final=float(settings.retry_final_wait_s),
-                # "Tudo automático" é isso: sem cartão **e** sem trava de pasta. Antes o
-                # modo só calava o cartão — a ferramenta de arquivo continuava recusando
-                # o que estivesse fora da pasta e mandava o modelo **pedir autorização na
-                # conversa**, que é o oposto do que a pessoa escolheu.
-                acesso_livre=settings.acesso_livre or modo_permissao == "auto",
+                # Auto dispensa cartões e mantém as ferramentas de arquivo no projeto.
+                # Livre também libera essas ferramentas fora do projeto. O shell roda
+                # comandos reais do sistema em ambos os modos.
+                acesso_livre=settings.acesso_livre or modo_permissao == "livre",
                 reasoning=payload.reasoning,
                 effort=_effort(payload),
-                aprovar=None if modo_permissao == "auto" else aprovar,
+                aprovar=None if modo_permissao in ("auto", "livre") else aprovar,
                 # Teto de contexto da tarefa: passando dele, o histórico do loop compacta
                 # em vez de estourar o que o provedor aceita.
                 orcamento=settings.contexto_tokens,

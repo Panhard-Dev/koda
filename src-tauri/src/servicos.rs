@@ -29,7 +29,9 @@ use crate::log;
 
 /// Porta do host (`c-host.exe`) — a mesma que o backend usa em `KODA_HOST_URL`.
 pub const PORTA_HOST: u16 = 21128;
-/// Porta da API FastAPI — a mesma que o frontend usa em `api/client.ts`.
+/// Porta da API FastAPI **em dev**. O app instalado não usa esta: ele sorteia uma porta
+/// efêmera a cada execução e a repassa à interface (ver `src/acesso.rs`). O dev fica nela
+/// porque é a que o Vite e o `npm run dev:api` esperam.
 pub const PORTA_API: u16 = 8787;
 
 /// Quantas vezes seguidas vale a pena reerguer um serviço que caiu.

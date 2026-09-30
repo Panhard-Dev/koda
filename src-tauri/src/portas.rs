@@ -1,8 +1,8 @@
 //! Quem está ocupando uma porta — e quando isso é sobra de uma execução que já morreu.
 //!
-//! O app abre as duas peças que a conversa usa (host em 21128, backend em 8787) e aceitava
-//! reutilizar qualquer coisa que já estivesse ouvindo nessas portas. Duas armadilhas moram
-//! aí, e as duas apareceram na prática:
+//! O app abre as duas peças que a conversa usa (host em 21128, backend numa porta que ele
+//! mesmo escolhe — ver `acesso`) e aceitava reutilizar qualquer coisa que já estivesse
+//! ouvindo nessas portas. Duas armadilhas moram aí, e as duas apareceram na prática:
 //!
 //! 1. **Host de uma versão anterior.** O desenho antigo levava a chave embutida e não
 //!    conhecia a autorização remota, então recusava a sessão da conta com 401 — e a
@@ -12,8 +12,9 @@
 //!    cache da nuvem que estavam na memória dele.
 //!
 //! Este módulo responde à pergunta que faltava: o que está na porta é **nosso** e é
-//! **sobra**? Só nesse caso ele deve sair da frente. Nada aqui aparece para o usuário —
-//! vira linha de log.
+//! **sobra**? Só nesse caso ele deve sair da frente. Quem decide se o serviço é desta
+//! execução é o handshake de `acesso` — aqui só se descobre o que é aquele processo. Nada
+//! aqui aparece para o usuário — vira linha de log.
 
 /// O que encontramos escutando na porta.
 #[derive(Debug, PartialEq, Eq)]

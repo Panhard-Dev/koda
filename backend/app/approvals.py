@@ -1,12 +1,17 @@
 """Permissão antes de mexer na máquina.
 
-São três modos, escolhidos no prompt box:
+São quatro modos, escolhidos no prompt box:
 
 - **manual** — pergunta antes de rodar comando, escrever/editar, apagar ou sair da pasta
   do projeto;
 - **default** — deixa passar o trabalho comum (escrever arquivo dentro da pasta) e
   pergunta no que é difícil de desfazer: comando, exclusão, mexer fora da pasta;
-- **auto** — não pergunta nada.
+- **auto** — não pergunta nada; as ferramentas de arquivo continuam no projeto;
+- **livre** — não pergunta nada e libera as ferramentas de arquivo fora do projeto.
+
+O shell executa comandos reais do usuário do sistema em todos os modos. Auto e Livre
+dispensam a aprovação desses comandos; escolher Livre também amplia o escopo das
+ferramentas de arquivo.
 
 Quem decide *o que* uma ferramenta é mora em `tools/ferramentas.py` (`classificar`): aqui
 fica só a política — o que o modo pergunta e o que a pessoa já respondeu para sempre.
@@ -19,7 +24,7 @@ import time
 
 from .repository import new_id
 
-MODOS = ("manual", "default", "auto")
+MODOS = ("manual", "default", "auto", "livre")
 
 #: Os tipos de ação que podem exigir permissão.
 KINDS = ("comando", "escrita", "exclusao", "fora_da_pasta")
@@ -29,6 +34,7 @@ PERGUNTA: dict[str, set[str]] = {
     "manual": {"comando", "escrita", "exclusao", "fora_da_pasta"},
     "default": {"comando", "exclusao", "fora_da_pasta"},
     "auto": set(),
+    "livre": set(),
 }
 
 #: Escopo genérico: vale para qualquer alvo daquele tipo de ação.

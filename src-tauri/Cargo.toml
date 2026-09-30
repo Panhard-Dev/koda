@@ -12,6 +12,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 # O diagnóstico da tela de Ajustes volta como JSON para a interface.
 serde = { version = "1", features = ["derive"] }
+# Ler a resposta do handshake (`{"hmac": "…"}`) sem parser de mentira.
+serde_json = "1"
+# O token da execução: `getrandom` para sorteá-lo e `sha2` para o HMAC do handshake (ver
+# `src/acesso.rs`). Os dois já vinham na árvore do Tauri como dependências transitivas.
+getrandom = "0.3"
+sha2 = "0.10"
 
 # A job object do Windows: `KILL_ON_JOB_CLOSE` é o que garante que o host e o backend
 # morram junto com o app, inclusive quando o app morre no tapa (ver `src/servicos.rs`).

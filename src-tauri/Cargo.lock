@@ -1675,7 +1675,10 @@ dependencies = [
 name = "koda"
 version = "0.3.10"
 dependencies = [
+ "getrandom 0.3.4",
  "serde",
+ "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "windows-sys 0.61.2",

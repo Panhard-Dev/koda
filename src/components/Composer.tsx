@@ -12,6 +12,7 @@ import {
   Globe,
   Hand,
   Image as ImageIcon,
+  Unlock,
   Mic,
   Paperclip,
   Plus,
@@ -33,17 +34,17 @@ import { MODOS_PERMISSAO, modoDe } from '../permissao'
 /**
  * Ícone de cada modo — fica aqui porque ícone é JSX, e o módulo de modos é TS puro.
  *
- * O automático usa **escudo com exclamação**, não raio: ele é o modo em que o agente não
- * pergunta nada, e o ícone tem de dizer isso — raio dizia "rápido", que não é o risco.
+ * Auto dispensa aprovações; Livre também libera ferramentas de arquivo fora do projeto.
  */
 export const ICONE_DO_MODO: Record<ModoPermissao, ReactNode> = {
   manual: <Hand className="h-3.5 w-3.5 text-emerald-400" strokeWidth={1.7} />,
   default: <ShieldCheck className="h-3.5 w-3.5 text-amber-300" strokeWidth={1.7} />,
   auto: <ShieldAlert className="h-3.5 w-3.5 text-red-400" strokeWidth={1.7} />,
+  livre: <Unlock className="h-3.5 w-3.5 text-red-500" strokeWidth={1.7} />,
 }
 
 /**
- * A cor de cada modo no gatilho: verde, amarelo, vermelho.
+ * A cor de cada modo no gatilho: verde, amarelo e tons de vermelho.
  *
  * É a única diferença entre os três — o contorno saiu. Quem olha de longe precisa ver a
  * cor, não decifrar um anel em volta do botão.
@@ -52,6 +53,7 @@ const COR_DO_MODO: Record<ModoPermissao, string> = {
   manual: 'text-emerald-400',
   default: 'text-amber-300',
   auto: 'text-red-400',
+  livre: 'text-red-500',
 }
 import type {
   ApiProject,
@@ -508,9 +510,8 @@ export function Composer({
               <Globe className="h-4 w-4" strokeWidth={1.7} />
             </TogglePill>
 
-            {/* Quanto o agente pode fazer sozinho. A cor é a mensagem: verde = pergunta
-                tudo, amarelo = o comum sozinho, vermelho = não pergunta nada. Sem
-                contorno e sem ícone — quem olha de longe precisa ver a cor. */}
+            {/* Quanto o agente pode fazer sozinho e se as ferramentas de arquivo podem
+                sair do projeto. A opção Livre descreve essa ampliação explicitamente. */}
             <Menu
               options={MODOS_PERMISSAO.map((item) => ({
                 value: item.id,

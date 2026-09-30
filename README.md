@@ -116,11 +116,18 @@ fecha**:
 
 1. o **host** (`host/c-host.exe`), o serviço dos modelos oficiais — ele vai **dentro do
    instalador** (recurso `host/` do bundle) e o app o encontra ao lado do próprio exe;
-2. o **backend** (`uvicorn` na porta 8787), procurado como
-   `backend/.venv/Scripts/python.exe` na árvore do projeto.
+2. o **backend** (`uvicorn`), procurado como `backend/.venv/Scripts/python.exe` na árvore do
+   projeto. A porta é escolhida na abertura — efêmera no app instalado, `8787` no dev — e vai
+   para a interface junto com o **token da execução**, os dois por `invoke`.
 
-O que já estiver no ar é reutilizado em vez de subir de novo, e nada é encerrado à força sem
-ter sido iniciado pelo app. Sem o backend a interface entra no modo offline dela.
+O backend só aceita quem apresenta esse token: é o que impede o código que o agente executa
+de chamar a própria API e se dar o modo `auto`. Se já houver algo na porta, o launcher faz um
+desafio (nonce + HMAC) antes de reutilizar — backend de uma execução anterior nunca prova
+conhecer o token novo, e sai da frente em vez de ser adotado. Sem o backend a interface entra
+no modo offline dela.
+
+Para usar a interface no **navegador** (sem o app desktop) contra um backend à mão, o
+backend imprime o token ao subir e a interface o recebe em `VITE_API_TOKEN`.
 
 ## Recursos
 
@@ -172,7 +179,7 @@ Três peças, todas na sua máquina:
 | Peça | O que é | Onde |
 | --- | --- | --- |
 | **Interface** | React 19 + Vite 8 + Tailwind 4 | `src/` |
-| **Backend** | FastAPI + SQLite: agente, ferramentas, histórico | `backend/`, porta `8787` |
+| **Backend** | FastAPI + SQLite: agente, ferramentas, histórico | `backend/`, porta efêmera (8787 em dev) |
 | **Host** | Serviço dos modelos (proprietário, à parte) | `host/c-host.exe`, porta `21128` |
 
 O backend é quem conversa com o modelo e executa as ferramentas; a interface só mostra o que
