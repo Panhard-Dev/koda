@@ -1,0 +1,18 @@
+# Dependências e artefatos locais
+node_modules/
+dist/
+coverage/
+
+# Segredos: nunca versionados
+.env
+.dev.vars
+.dev.vars.*
+.env.local
+.env.*.local
+
+# Estado local do wrangler (D1 local, cache, logs)
+.wrangler/
+worker-configuration.d.ts
+
+# Logs
+*.log

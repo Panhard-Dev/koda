@@ -174,7 +174,12 @@ function Codigo({ codigo, idioma, chave }: { codigo: string; idioma: string; cha
           {copiado ? 'copiado' : 'copiar'}
         </button>
       </div>
-      <pre className="overflow-x-auto rounded-xl bg-koda-fg/4 p-3 font-mono text-[12.5px] leading-5 ring-1 ring-koda-fg/8">
+      {/*
+        * `break-normal` cancela o `break-words` que o container do `RichText` herda: em
+        * código, quebrar a linha no meio é pior do que rolar de lado. O `overflow-x-auto`
+        * segura a linha comprida sem empurrar a resposta para fora da tela.
+        */}
+      <pre className="overflow-x-auto rounded-xl bg-koda-fg/4 p-3 font-mono text-[12.5px] leading-5 break-normal ring-1 ring-koda-fg/8">
         {codigo}
       </pre>
     </div>
@@ -236,7 +241,10 @@ function Tabela({
   chave: string
 }) {
   return (
-    <div className="overflow-x-auto rounded-xl ring-1 ring-koda-fg/8">
+    // `data-rolagem` diz à bancada visual que a rolagem lateral daqui é de propósito (uma
+    // tabela de dez colunas não pode esticar a resposta). Sem a marca, ela entra no relatório
+    // como se fosse defeito e a lista de problemas deixa de ser confiável.
+    <div data-rolagem="ok" className="overflow-x-auto rounded-xl ring-1 ring-koda-fg/8">
       <table className="w-full border-collapse text-[12.5px]">
         <thead>
           <tr className="bg-koda-fg/5">
@@ -535,7 +543,15 @@ function RichText({ text, className = '' }: { text: string; className?: string }
     return montado
   }, [text])
 
-  return <div className={`flex min-w-0 flex-col gap-2.5 ${className}`}>{conteudo}</div>
+  // `break-words` aqui, e não em cada parágrafo: `overflow-wrap` é herdado, então uma
+  // declaração só cobre título, lista, citação, tabela e texto solto. Sem ele, uma URL
+  // comprida ou um caminho de arquivo colado do log atravessava a resposta e saía da tela —
+  // era o jeito mais fácil de estourar o layout com uma resposta grande. Os blocos de
+  // código e as tabelas são a exceção consciente: rolam de lado, cada um no seu próprio
+  // `overflow-x-auto`, em vez de quebrar linha no meio do que precisa ficar alinhado.
+  return (
+    <div className={`flex min-w-0 flex-col gap-2.5 break-words ${className}`}>{conteudo}</div>
+  )
 }
 
 export default memo(RichText)

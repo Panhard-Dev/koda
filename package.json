@@ -9,6 +9,7 @@
     "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "verificar": "tsc -b --pretty false && oxlint && cd backend && .venv\\Scripts\\python.exe -m pytest tests/ -q",
     "preview": "vite preview",
     "tauri": "tauri",
     "app": "tauri dev",

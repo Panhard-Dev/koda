@@ -159,13 +159,30 @@ def _limite_seguro(historico: list[dict[str, Any]], corte: int) -> int:
 INTOCAVEIS = 3
 
 
+def indice_do_pedido(historico: list[dict[str, Any]]) -> int:
+    """Índice da **última** mensagem do usuário — o pedido atual.
+
+    É a mensagem que **nunca** pode ser cortada. A compactação antiga tratava `historico[1]`
+    como "a tarefa", e num histórico com vários turnos esse é o pedido mais **antigo** da
+    conversa: o pedido atual podia cair no miolo compactado (ou ser cortado no estágio 4) e
+    o agente perdia a instrução que estava executando.
+    """
+    for indice in range(len(historico) - 1, 0, -1):
+        if historico[indice].get("role") == "user":
+            return indice
+    return -1
+
+
 def _encolher(historico: list[dict[str, Any]], ate: int, limite: int = LIMITE_TRECHO) -> None:
     """Corta o **conteúdo** das mensagens de 1 até `ate`, sem mexer na estrutura.
 
     Só o `content` é tocado: `tool_calls` e `tool_call_id` continuam intactos, que é o que
-    o host exige para casar chamada e resultado.
+    o host exige para casar chamada e resultado. O pedido atual fica de fora do corte.
     """
+    protegido = indice_do_pedido(historico)
     for indice in range(1, min(ate, len(historico))):
+        if indice == protegido:
+            continue
         mensagem = historico[indice]
         papel = mensagem.get("role")
         atual = str(mensagem.get("content") or "")
@@ -217,6 +234,14 @@ def compactar_historico(
     if corte > 2:
         removidas = historico[1:corte]
         tarefa = historico[1]
+        # O **pedido atual** nunca se perde. `historico[1]` é o turno mais **antigo** da
+        # conversa, e tratá-lo como "a tarefa" apagava a instrução em execução quando a
+        # conversa tem vários turnos. Se o pedido caiu no miolo que sai, ele volta logo
+        # depois da tarefa — preservado inteiro.
+        pedido = indice_do_pedido(historico)
+        lembrado: list[dict[str, Any]] = (
+            [historico[pedido]] if 1 < pedido < corte else []
+        )
         resumo: list[str] = [
             "[contexto compactado] As mensagens do meio da tarefa saíram para o pedido "
             f"caber no contexto ({len(removidas)} mensagens). Não repita o que já foi feito."
@@ -234,6 +259,7 @@ def compactar_historico(
         historico[:] = [
             historico[0],
             tarefa,
+            *lembrado,
             {"role": "user", "content": texto},
             *historico[corte:],
         ]
@@ -249,7 +275,12 @@ def compactar_historico(
 
     # --- 4: nem a ponta cabe: corta no que resta do orçamento --------------------
     fatia = max(1_000, int(orcamento / 3 * CARACTERES_POR_TOKEN))
-    for mensagem in historico[1:]:
+    protegido = indice_do_pedido(historico)
+    for indice, mensagem in enumerate(historico[1:], 1):
+        if indice == protegido:
+            # O pedido atual fica **inteiro**: cortá-lo aqui era o que fazia o agente
+            # perder a especificação no meio da tarefa.
+            continue
         atual = str(mensagem.get("content") or "")
         if len(atual) > fatia:
             mensagem["content"] = _cortar(atual, fatia)
@@ -277,12 +308,16 @@ def compactar_turnos(
     teto_por_turno = max(2_000, int(orcamento * FRACAO_POR_TURNO * CARACTERES_POR_TOKEN))
     usados = 0
     mantidos: list[Any] = []
-    for turno in reversed(turnos):
+    for posicao, turno in enumerate(reversed(turnos)):
         texto = str(getattr(turno, "text", "") or "")
-        # Corta **antes** de medir: um turno gigante sozinho não pode custar todas as
-        # mensagens que vêm depois dele (era assim que uma colagem enorme empurrava a
-        # conversa inteira para fora do contexto).
-        if len(texto) > teto_por_turno:
+        # O **pedido atual** (último turno do usuário) não é cortado: ele é a instrução que
+        # o agente está executando, e cortá-lo fazia a especificação sumir no meio da
+        # tarefa. Histórico antigo é que encolhe.
+        eh_o_pedido_atual = posicao == 0 and getattr(turno, "role", "") == "user"
+        if len(texto) > teto_por_turno and not eh_o_pedido_atual:
+            # Corta **antes** de medir: um turno gigante sozinho não pode custar todas as
+            # mensagens que vêm depois dele (era assim que uma colagem enorme empurrava a
+            # conversa inteira para fora do contexto).
             texto = _cortar(texto, teto_por_turno)
             turno = _com_texto(turno, texto)
         custo = estimar_tokens(texto)

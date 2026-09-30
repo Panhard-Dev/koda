@@ -9,7 +9,10 @@ import LoginScreen from './components/LoginScreen'
 import SettingsScreen from './components/SettingsScreen'
 import MessageFooter from './components/MessageFooter'
 import Reasoning from './components/Reasoning'
-import RichText from './components/RichText'
+import BolhaUsuario from './components/BolhaUsuario'
+import FalaDoModelo from './components/FalaDoModelo'
+import { CLASSE_DA_JANELA } from './components/Janela'
+import TarefaIncompleta from './components/TarefaIncompleta'
 import ToDosMenu from './components/ToDos'
 import ToolSteps from './components/ToolSteps'
 import WorkingLine from './components/WorkingLine'
@@ -117,6 +120,19 @@ type Message = {
    * empurrava a narração para baixo de todas — o contrário do que aconteceu de verdade.
    */
   blocos?: Bloco[]
+  /**
+   * A rodada terminou **sem** concluir o que foi pedido (`completed: false` no `done`).
+   *
+   * O backend só marca assim depois de esgotar as tentativas dele: ele cobra a ferramenta,
+   * devolve o anúncio perdido ao histórico e retoma por conta própria antes de desistir. Se
+   * a marca chegou, é porque sobrou trabalho de verdade — e é isso que faz a faixa de
+   * "ainda falta terminar" aparecer no fim desta resposta, em vez de a pessoa ter que
+   * descobrir sozinha e digitar "continue".
+   *
+   * Só vale para a rodada viva: não há coluna para isso no banco, então reabrir a conversa
+   * depois não promete uma retomada que ninguém pode garantir.
+   */
+  incompleto?: boolean
 }
 
 /**
@@ -471,7 +487,7 @@ function AvisoDaSessao({
  */
 function Abertura() {
   return (
-    <div className="flex h-[calc(100vh/var(--koda-zoom))] w-[calc(100vw/var(--koda-zoom))] flex-col overflow-hidden bg-koda-bg">
+    <div className={CLASSE_DA_JANELA}>
       <div data-tauri-drag-region className="flex shrink-0 items-center p-5">
         <div className="-mr-2 ml-auto">
           <WindowControls />
@@ -1526,6 +1542,8 @@ function App() {
               elapsedMs: data.elapsed_ms,
               tokens: data.tokens ?? null,
               contexto: data.contexto ?? message.contexto ?? null,
+              // O backend é quem sabe: ele só diz `false` depois de insistir sozinho.
+              incompleto: data.completed === false,
               at: Date.now(),
             }))
             setBusy(false)
@@ -1594,6 +1612,29 @@ function App() {
     })
   }
 
+  /**
+   * Continua a tarefa que fechou no meio, sem a pessoa ter que escrever nada.
+   *
+   * O pedido vai como um turno normal e vira uma bolha na conversa ("continue"), de
+   * propósito: o backend guarda o turno, então escondê-lo aqui só faria o histórico ficar
+   * diferente do que a tela mostrou. Os ajustes são os da última rodada, iguais aos de
+   * "rodar de novo" — quem pediu para seguir não quer reconferir modelo e esforço.
+   */
+  const continuarTarefa = () => {
+    if (busy) return
+    const anterior = ultimoPayloadRef.current
+    void handleSend({
+      text: 'continue',
+      attachments: [],
+      model: anterior?.model ?? model,
+      reasoning: anterior?.reasoning ?? true,
+      web: anterior?.web ?? false,
+      effort: anterior?.effort ?? EFFORT_PADRAO,
+      project_path:
+        anterior?.project_path ?? projects.find((item) => item.id === projectId)?.caminho ?? null,
+    })
+  }
+
   // O portão. Enquanto a sessão está sendo conferida, uma abertura discreta; sem conta,
   // a tela de entrar — e nada do app atrás dela.
   if (sessao === 'checando') return <Abertura />
@@ -1611,7 +1652,7 @@ function App() {
   return (
     // `--koda-zoom` escala a interface inteira; dividir as medidas da viewport
     // por ele mantém o app exatamente do tamanho da janela em qualquer escala.
-    <div className="flex h-[calc(100vh/var(--koda-zoom))] w-[calc(100vw/var(--koda-zoom))] flex-col overflow-hidden bg-koda-bg">
+    <div className={CLASSE_DA_JANELA}>
       {/* A tela de configuração ocupa a janela inteira: sem header do chat. */}
       {view === 'chat' ? (
         <Header
@@ -1753,21 +1794,7 @@ function App() {
                     dimmed ? 'opacity-20' : 'opacity-100',
                   ].join(' ')}
                 >
-                  <div className="max-w-[80%] rounded-2xl rounded-tr-md bg-koda-input px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap text-koda-fg/90 ring-1 ring-koda-fg/5">
-                    {message.text}
-                    {message.attachments && message.attachments.length > 0 ? (
-                      <ul className="mt-2 flex flex-wrap gap-1.5">
-                        {message.attachments.map((name) => (
-                          <li
-                            key={name}
-                            className="rounded-md bg-koda-fg/8 px-2 py-0.5 text-[12px] text-koda-fg/70"
-                          >
-                            {name}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </div>
+                  <BolhaUsuario texto={message.text} anexos={message.attachments} />
                 </div>
               ) : (
                 <div
@@ -1809,29 +1836,11 @@ function App() {
                         )
                       }
                       return (
-                        <div key={`texto-${indice}`} className="flex items-start gap-3">
-                          <KodaLogo
-                            className="mt-1.5 h-3.5 w-auto shrink-0 text-koda-fg/70"
-                            color="currentColor"
-                          />
-                          <RichText
-                            text={bloco.texto}
-                            className="max-w-[85%] text-[15px] text-koda-fg/85"
-                          />
-                        </div>
+                        <FalaDoModelo key={`texto-${indice}`} texto={bloco.texto} />
                       )
                     })
                   ) : message.text ? (
-                    <div className="flex items-start gap-3">
-                      <KodaLogo
-                        className="mt-1.5 h-3.5 w-auto shrink-0 text-koda-fg/70"
-                        color="currentColor"
-                      />
-                      <RichText
-                        text={message.text}
-                        className="max-w-[85%] text-[15px] text-koda-fg/85"
-                      />
-                    </div>
+                    <FalaDoModelo texto={message.text} />
                   ) : null}
                   {/*
                    * O fim da resposta viva: enquanto o modelo trabalha, a última coisa
@@ -1853,6 +1862,13 @@ function App() {
                       ocupado={busy}
                       onRefazer={() => refazer(message.id)}
                     />
+                  ) : null}
+                  {/*
+                   * Só na última resposta: numa rodada antiga, "continuar" retomaria um
+                   * assunto que a conversa já deixou para trás.
+                   */}
+                  {message.incompleto && message.id === messages.at(-1)?.id ? (
+                    <TarefaIncompleta ocupado={busy} onContinuar={continuarTarefa} />
                   ) : null}
                 </div>
               )

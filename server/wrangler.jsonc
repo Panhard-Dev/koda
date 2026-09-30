@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "koda-cloud-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "koda-cloud",
+      "database_id": "3bb62bc0-1242-4ea0-9d8f-1cc0205c5f41",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "NODE_ENV": "production",
+    "ADMIN_EMAIL": "studios.ai.brasil@gmail.com",
+    "CORS_ORIGIN": "https://tauri.localhost,http://tauri.localhost",
+    "RATE_LIMIT_WINDOW_MS": "60000",
+    "RATE_LIMIT_MAX": "120",
+    "LOGIN_RATE_LIMIT_MAX": "10",
+    "LOGIN_LOCKOUT_THRESHOLD": "5",
+    "LOGIN_LOCKOUT_WINDOW_MS": "900000",
+    "LOGIN_LOCKOUT_DURATION_MS": "900000",
+    "ACCESS_TOKEN_TTL_S": "1200",
+    "REFRESH_TOKEN_TTL_S": "604800",
+    "HASH_ALGO": "bcrypt",
+    "BCRYPT_COST": "10",
+    "PBKDF2_ITERATIONS": "100000",
+    "UPLOAD_MAX_BYTES": "1048576",
+    "ALLOW_INSECURE_HTTP": "false",
+    "PANEL_ENABLED": "true",
+    "CADASTRO_ABERTO": "true"
+  }
+}

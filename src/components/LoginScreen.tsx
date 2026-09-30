@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Eye, EyeOff, Loader2 } from 'lucide-react'
 import KodaLogo from './KodaLogo'
+import { CLASSE_DA_JANELA } from './Janela'
 import { WindowControls } from './WindowControls'
 import { ErroDaConta, conferirSenha, entrar, registrar } from '../api/cloud'
 import type { Conta } from '../api/cloud'
@@ -107,7 +108,7 @@ export function LoginScreen({ onEntrou }: { onEntrou: (conta: Conta) => void }) 
 
   return (
     // Mesmas medidas do resto do app: `--koda-zoom` escala tudo, inclusive esta tela.
-    <div className="flex h-[calc(100vh/var(--koda-zoom))] w-[calc(100vw/var(--koda-zoom))] flex-col overflow-hidden bg-koda-bg">
+    <div className={CLASSE_DA_JANELA}>
       {/* Faixa de arrastar a janela (não tem titlebar nativa) + controles do Windows. */}
       <div data-tauri-drag-region className="flex shrink-0 items-center p-5">
         <div className="-mr-2 ml-auto">
