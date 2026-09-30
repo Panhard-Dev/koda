@@ -1,11 +1,12 @@
 import type { ModoPermissao } from './api/client'
 
 /**
- * Os três modos de permissão do agente, como aparecem no prompt box.
+ * Os modos de permissão do agente, como aparecem no prompt box.
  *
  * O texto é o que a pessoa lê antes de escolher — «pede antes» / «faz o comum sozinho» /
  * «faz tudo». Sem jargão: quem escolhe isso está decidindo o quanto confia no agente, e
- * uma frase errada aqui vira arquivo apagado.
+ * uma frase errada aqui vira arquivo apagado. Auto executa comandos shell com as
+ * permissões da conta; Livre também solta as ferramentas de arquivo do projeto.
  */
 export type ModoDePermissao = {
   id: ModoPermissao
@@ -18,21 +19,27 @@ export type ModoDePermissao = {
 export const MODOS_PERMISSAO: ModoDePermissao[] = [
   {
     id: 'manual',
-    label: 'Aprovação manual',
+    label: 'Perguntar sempre',
     hint: 'Pede antes de rodar comando, escrever, apagar ou sair da pasta',
     curto: 'Manual',
   },
   {
     id: 'default',
     label: 'Padrão',
-    hint: 'Faz o comum sozinho e pergunta nas decisões importantes',
+    hint: 'Trabalha no projeto e pede aprovação para comandos e ações importantes',
     curto: 'Padrão',
   },
   {
     id: 'auto',
-    label: 'Tudo automático',
-    hint: 'Faz tudo sem perguntar',
+    label: 'Auto',
+    hint: 'Executa sem pedir aprovação; o shell usa as permissões da sua conta e os arquivos ficam no projeto por padrão',
     curto: 'Automático',
+  },
+  {
+    id: 'livre',
+    label: 'Livre — arquivos no computador inteiro',
+    hint: 'Sem aprovações; escolha se confia ao Koda acesso a arquivos fora do projeto',
+    curto: 'Livre',
   },
 ]
 

@@ -13,6 +13,28 @@ uv run uvicorn app.main:app --reload --port 8787
 
 Documentação interativa em `http://localhost:8787/docs`.
 
+### O token da API local
+
+A API é **deny-by-default**: toda rota sob `/api` exige `Authorization: Bearer <token>`.
+Quem sorteia o token é o launcher do app desktop, **uma vez por execução**, e o entrega ao
+backend pelo `stdin` — nunca pelo ambiente, que é o que o código do agente lê. É o que
+impede o agente de chamar `PUT /api/permissions`, se dar o modo `auto` e passar a agir sem
+cartão (era o achado crítico da auditoria de segurança).
+
+Sem launcher (o `uv run uvicorn` acima) o backend **imprime** o token no terminal. Para
+fixá-lo, use `KODA_API_TOKEN` — variável que só vale fora do app empacotado:
+
+```bash
+KODA_API_TOKEN=dev uv run uvicorn app.main:app --reload --port 8787
+curl localhost:8787/api/models -H 'authorization: Bearer dev'
+```
+
+Três rotas escapam da exigência, e cada uma tem motivo: `OPTIONS` (o *preflight* do CORS
+não manda `Authorization`), `GET /api/health` (responde só `ok` e a versão, para o launcher
+saber que o serviço subiu) e `GET /api/handshake` (o desafio do launcher). O retrato
+completo do backend fica em `GET /api/health/detalhado`, que exige o token. No app
+empacotado `/docs`, `/redoc`, `/openapi.json` e `/` ficam desligados.
+
 No app instalado, o launcher marca o backend com `KODA_BACKEND_PACKAGED=1` e o
 provedor padrão é `host`. Assim, variáveis `OPENAI_*` de outros programas não
 redirecionam a conversa por acidente. `KODA_PROVIDER` definido explicitamente no
@@ -24,7 +46,9 @@ ser configurado pelo usuário.
 
 | Método | Rota | O que faz |
 | --- | --- | --- |
-| `GET` | `/api/health` | Estado do servidor, provider ativo, banco, pasta de trabalho e ferramentas |
+| `GET` | `/api/health` | Só `ok` e a versão. **Aberta** (sem token), é o que o launcher bate |
+| `GET` | `/api/health/detalhado` | Estado do servidor, provider ativo, banco, pasta de trabalho e ferramentas |
+| `GET` | `/api/handshake?nonce=` | Prova que este processo conhece o token da execução (HMAC) |
 | `POST` | `/api/chat` | Responde em `text/event-stream` e grava a conversa |
 | `GET` | `/api/conversations` | Histórico, mais recente primeiro |
 | `POST` | `/api/conversations` | Cria uma conversa vazia |
@@ -43,6 +67,7 @@ ser configurado pelo usuário.
 
 ```
 $ curl -N -X POST localhost:8787/api/chat -H 'content-type: application/json' \
+    -H 'authorization: Bearer dev' \
     -d '{"text":"oi","model":"liz-nano"}'
 
 event: start

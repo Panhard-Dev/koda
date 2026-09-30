@@ -6,8 +6,9 @@
 //! peças que a conversa precisa, nesta ordem:
 //!
 //! 1. **host** (`host/c-host.exe`, porta 21128) — o serviço de modelos oficial (Liz);
-//! 2. **backend** (`backend/python/python.exe`, porta 8787) — a API FastAPI que a
-//!    interface fala.
+//! 2. **backend** (`backend/python/python.exe`) — a API FastAPI que a interface fala. A
+//!    porta é escolhida na abertura (efêmera no app instalado, 8787 em dev) e o **token**
+//!    da execução vai junto: os dois são entregues à interface por `invoke` (ver `acesso`).
 //!
 //! Os dois vão **dentro do instalador** e o app os encontra ao lado do exe; no dev são os
 //! do projeto (`host/c-host.exe` e `backend/.venv`). O backend empacotado leva o próprio
@@ -38,10 +39,12 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, LogicalSize, Manager, RunEvent};
 
+mod acesso;
 mod diagnostico;
 mod portas;
 mod servicos;
 
+use acesso::Acesso;
 use portas::Ocupante;
 use servicos::{Papel, Servicos, PORTA_HOST};
 
@@ -81,16 +84,28 @@ pub(crate) fn porta_no_ar(porta: u16) -> bool {
     TcpStream::connect_timeout(&endereco, Duration::from_millis(300)).is_ok()
 }
 
+/// A porta em que um serviço está atendendo **nesta execução**.
+///
+/// O host tem porta fixa (21128) e é isso mesmo: ele é um serviço à parte, com endereço
+/// conhecido. A do backend é escolhida na abertura — efêmera no app instalado — e vive no
+/// estado `Acesso`, porque não dá para deduzi-la de `Papel`.
+fn porta_de(papel: Papel, acesso: &Acesso) -> u16 {
+    match papel {
+        Papel::Host => Papel::Host.porta(),
+        Papel::Backend => acesso.porta(),
+    }
+}
+
 /// O serviço **responde**, e não só aceita conexão.
 ///
 /// `porta_no_ar` abre um TCP e fecha: serviço pendurado (aceita conexão e não responde nada)
 /// passa como "no ar" e o vigia fica quieto. Era o pior cenário possível — a janela aberta, a
 /// conversa falhando em "não consegui falar com o provedor" e o vigia sem fazer nada, porque
 /// para ele o serviço estava vivo. Aqui vai um `GET` de verdade, com prazo curto: qualquer
-/// resposta HTTP serve (até 401, que é o host recusando sem chave) — o que interessa é que
-/// alguém do outro lado está processando pedido.
-fn servico_responde(papel: Papel) -> bool {
-    let porta = papel.porta();
+/// resposta HTTP serve (até 401, que é o backend recusando sem token — o que interessa é que
+/// alguém do outro lado está processando pedido).
+fn servico_responde(papel: Papel, acesso: &Acesso) -> bool {
+    let porta = porta_de(papel, acesso);
     let caminho = match papel {
         Papel::Host => "/v1/models",
         Papel::Backend => "/api/health",
@@ -333,17 +348,29 @@ const ASSINATURA_DO_BACKEND: &str = "app.main:app";
 
 /// Sobe o backend. `false` = a porta não respondeu (o vigia tenta de novo, no app instalado).
 fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
-    let porta = Papel::Backend.porta();
+    let acesso = app.state::<Acesso>();
+    let porta = acesso.porta();
+    let token = acesso.token().to_string();
     let backend = achar_backend(app);
 
-    // A sobra só sai da frente no app **instalado**: lá as portas são dele, e um backend
-    // de execução morta carrega memória velha (provedor escolhido, cache da nuvem) que
-    // faz a tela abrir dizendo "sem resposta" com tudo funcionando. No dev, quem subiu o
-    // backend foi o desenvolvedor — reutilizar é o que ele quer.
-    let nosso = backend.as_ref().is_some_and(|backend| backend.empacotado);
-    if porta_no_ar(porta) && !(nosso && liberar_porta(porta, "python.exe", Some(ASSINATURA_DO_BACKEND))) {
-        log(&format!("backend já está no ar em 127.0.0.1:{porta} — reutilizando"));
-        return true;
+    // Alguém já está nesta porta. A pergunta não é "é o Koda?", é "você conhece o token que
+    // eu acabei de sortear?" — e só o backend desta execução conhece.
+    if porta_no_ar(porta) {
+        if acesso::confere_handshake(porta, &token) {
+            log(&format!("backend desta execução já está no ar em 127.0.0.1:{porta} — reutilizando"));
+            servicos.cuidar_de(Papel::Backend);
+            return true;
+        }
+        // Não provou. Sendo sobra de uma execução que morreu — o app fechado no tapa deixa
+        // os filhos vivos, com o token velho na memória —, ele sai da frente. Era o defeito
+        // que o handshake fecha: antes, o app novo adotava esse resto e a tela abria com a
+        // memória do app anterior (provedor escolhido, cache da nuvem) achando que estava tudo bem.
+        if !liberar_porta(porta, "python.exe", Some(ASSINATURA_DO_BACKEND)) {
+            log(&format!(
+                "a porta {porta} está com quem não prova ser o backend desta execução — deixando quieto"
+            ));
+            return false;
+        }
     }
 
     let Some(backend) = backend else {
@@ -365,6 +392,11 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
     comando
         .args(["-m", "uvicorn", "app.main:app", "--port", &porta.to_string()])
         .current_dir(&backend.pasta)
+        // O token vai pelo **stdin**, e não pelo ambiente: o ambiente dos processos filhos
+        // é montado a partir de uma allowlist (ver `_ambiente_do_comando`) justamente para
+        // o código do agente não ler segredo nenhum. Aqui o canal é aberto só para isto, e
+        // o backend o lê antes de atender a primeira rota.
+        .stdin(Stdio::piped())
         // Define so o padrao: KODA_PROVIDER explicito no ambiente ou .env prevalece.
         .env("KODA_BACKEND_PACKAGED", if backend.empacotado { "1" } else { "0" });
 
@@ -403,8 +435,10 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
 
     let empacotado = backend.empacotado;
     match spawn_oculto(&mut comando) {
-        Ok(child) => {
+        Ok(mut child) => {
             let pid = child.id();
+            // O token, antes de qualquer coisa: o backend só sobe o serviço depois de lê-lo.
+            acesso::entregar_token(&mut child, &token);
             servicos.guardar(Papel::Backend, child);
             // Só o backend do instalador entra no vigia: no dev quem manda nele é o
             // desenvolvedor, e ressuscitar um por cima do dele seria brigar pela porta.
@@ -492,6 +526,7 @@ fn subir(servicos: &Servicos, app: &AppHandle, papel: Papel) -> bool {
 /// com espera crescente e limite (`pode_subir`). É isto que evita o pior cenário do
 /// cliente: a janela aberta, a conversa andando e um dos serviços morto sem ninguém notar.
 fn vigiar(app: &AppHandle, servicos: &Servicos) {
+    let acesso = app.state::<Acesso>();
     let mut primeira = true;
     loop {
         for papel in Papel::todas() {
@@ -503,7 +538,7 @@ fn vigiar(app: &AppHandle, servicos: &Servicos) {
                 subir(servicos, app, papel);
                 continue;
             }
-            if servico_responde(papel) {
+            if servico_responde(papel, &acesso) {
                 servicos.anotar_ok(papel);
                 continue;
             }
@@ -514,7 +549,7 @@ fn vigiar(app: &AppHandle, servicos: &Servicos) {
             log(&format!(
                 "{} (porta {}) não responde — {} nosso(s) vivo(s); subindo de novo",
                 papel.nome(),
-                papel.porta(),
+                porta_de(papel, &acesso),
                 servicos.quantos_vivos(papel)
             ));
             subir(servicos, app, papel);
@@ -589,8 +624,21 @@ fn encaixar_na_tela(app: &tauri::App) {
 fn main() {
     tauri::Builder::default()
         .manage(Servicos::novo())
-        .invoke_handler(tauri::generate_handler![diagnostico::diagnostico])
+        // As credenciais desta execução nascem antes da janela: a interface pergunta por
+        // elas por `invoke` assim que carrega, e no app instalado a porta não é a 8787.
+        .manage(Acesso::novo())
+        .invoke_handler(tauri::generate_handler![diagnostico::diagnostico, acesso::acesso])
         .setup(|app| {
+            // A porta é decidida antes de tudo: efêmera no instalado, a 8787 no dev. A
+            // partir daqui ela não muda — quem já pediu as credenciais continua certo.
+            let empacotado = achar_backend(app.handle()).is_some_and(|backend| backend.empacotado);
+            let porta = acesso::escolher_porta(empacotado);
+            app.state::<Acesso>().fixar_porta(porta);
+            log(&format!(
+                "backend desta execução vai atender em 127.0.0.1:{porta}{}",
+                if empacotado { " (instalado)" } else { " (dev)" }
+            ));
+
             encaixar_na_tela(app);
             let handle: AppHandle = app.handle().clone();
             // Fora do caminho da janela: o app abre sem esperar os serviços, e a

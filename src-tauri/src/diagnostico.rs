@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
+use tauri::Manager;
 
+use crate::acesso::Acesso;
 use crate::servicos::Papel;
 use crate::{achar_backend, log, log_do_backend, pasta_de_dados, porta_no_ar};
 
@@ -54,13 +56,13 @@ pub struct Diagnostico {
 
 impl Diagnostico {
     /// Usado quando nem a checagem foi possível.
-    fn vazio(versao: String) -> Self {
+    fn vazio(versao: String, backend_porta: u16) -> Self {
         Diagnostico {
             versao,
             empacotado: false,
             host_porta: Papel::Host.porta(),
             host_no_ar: false,
-            backend_porta: Papel::Backend.porta(),
+            backend_porta,
             backend_no_ar: false,
             python: None,
             python_existe: false,
@@ -109,6 +111,9 @@ fn rodar(python: &Path, argumentos: &[&str]) -> Option<String> {
 pub fn coletar(versao: String, app: &tauri::AppHandle) -> Diagnostico {
     let backend = achar_backend(app);
     let caminho_python = backend.as_ref().map(|backend| backend.python.clone());
+    // A porta do backend é a **desta execução** (efêmera no app instalado): perguntar à
+    // 8787 aqui daria "não responde" num serviço que está no ar.
+    let backend_porta = app.state::<Acesso>().porta();
 
     let (python_versao, python_modulos) = match caminho_python.as_deref() {
         Some(python) if python.is_file() => {
@@ -124,8 +129,8 @@ pub fn coletar(versao: String, app: &tauri::AppHandle) -> Diagnostico {
         empacotado: backend.as_ref().is_some_and(|backend| backend.empacotado),
         host_porta: Papel::Host.porta(),
         host_no_ar: porta_no_ar(Papel::Host.porta()),
-        backend_porta: Papel::Backend.porta(),
-        backend_no_ar: porta_no_ar(Papel::Backend.porta()),
+        backend_porta,
+        backend_no_ar: porta_no_ar(backend_porta),
         python: caminho_python.map(|caminho| caminho.display().to_string()),
         python_existe: false,
         python_versao,
@@ -162,7 +167,8 @@ pub async fn diagnostico(app: tauri::AppHandle) -> Diagnostico {
         }
         Err(erro) => {
             log(&format!("diagnóstico falhou: {erro}"));
-            Diagnostico::vazio(app.package_info().version.to_string())
+            let porta = app.state::<Acesso>().porta();
+            Diagnostico::vazio(app.package_info().version.to_string(), porta)
         }
     }
 }
