@@ -11,6 +11,7 @@ Sem chave, sem dependência nova e sem serviço no meio — ver `_busca_bing`.
 from __future__ import annotations
 
 import html
+import fnmatch
 import ipaddress
 import json
 import os
@@ -105,6 +106,25 @@ def definir_limites(
         INTERVALO_DE_OLHADA = int(olhada)
 
 
+def _reservar_processo() -> bool:
+    """Reserva uma vaga sem bloquear as outras requisições do backend."""
+    global _PROCESSOS_ATIVOS
+    for rodando in list(_RODANDO.values()):
+        if rodando.terminou():
+            rodando.liberar_vaga()
+    with _TRAVA_PROCESSOS:
+        if _PROCESSOS_ATIVOS >= LIMITE_PROCESSOS_CONCORRENTES:
+            return False
+        _PROCESSOS_ATIVOS += 1
+        return True
+
+
+def _liberar_processo() -> None:
+    global _PROCESSOS_ATIVOS
+    with _TRAVA_PROCESSOS:
+        _PROCESSOS_ATIVOS = max(0, _PROCESSOS_ATIVOS - 1)
+
+
 def encerrar_tudo() -> int:
     """Mata **todos** os comandos que ficaram rodando. Devolve quantos foram derrubados.
 
@@ -151,6 +171,14 @@ def encerrar_do_dono(dono: str) -> int:
 LIMITE_REDE = 100_000_000
 #: Tetos do `search_files`: quantidade de caminhos e profundidade de varredura.
 LIMITE_ARQUIVOS_BUSCA = 200
+#: Orçamento de trabalho por busca, independente da quantidade de resultados.
+LIMITE_ITENS_VARREDURA = 20_000
+LIMITE_BYTES_VARREDURA = 128_000_000
+LIMITE_TEMPO_VARREDURA_S = 5.0
+#: Limite global de subprocessos concorrentes deste backend.
+LIMITE_PROCESSOS_CONCORRENTES = 4
+_TRAVA_PROCESSOS = threading.Lock()
+_PROCESSOS_ATIVOS = 0
 
 #: Quantas entradas o `list_dir` mostra de uma pasta. Alto de propósito: pasta de projeto
 #: tem centenas de arquivos, e cortar calado faz o modelo trabalhar com meia lista na
@@ -253,6 +281,7 @@ EXTENSOES_IGNORADAS = {
 #: Quem precisa procurar dentro delas tem o `shell`.
 PASTAS_IGNORADAS = {
     ".git",
+    ".tmp-recuperado",
     "__pycache__",
     ".venv",
     "venv",
@@ -995,6 +1024,56 @@ def _limitar(texto: str) -> str:
     return texto
 
 
+def _percorrer_pasta(base: Path, visitar: Any) -> tuple[int, str | None]:
+    """Percorre a árvore sob orçamento sem materializar listas de diretório inteiras.
+
+    `visitar(caminho, eh_pasta)` devolve True para encerrar cedo. Pastas ignoradas e links
+    para diretórios não são seguidos.
+    """
+    inicio = time.monotonic()
+    pilha = [base]
+    visitados = 0
+    while pilha:
+        pasta = pilha.pop()
+        try:
+            with os.scandir(pasta) as entradas:
+                for entrada in entradas:
+                    visitados += 1
+                    if visitados > LIMITE_ITENS_VARREDURA:
+                        return visitados - 1, "itens"
+                    if time.monotonic() - inicio > LIMITE_TEMPO_VARREDURA_S:
+                        return visitados, "tempo"
+                    if entrada.name in PASTAS_IGNORADAS:
+                        continue
+                    try:
+                        eh_pasta = entrada.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    caminho = Path(entrada.path)
+                    if visitar(caminho, eh_pasta):
+                        return visitados, "resultados"
+                    if eh_pasta:
+                        pilha.append(caminho)
+        except OSError:
+            continue
+    return visitados, None
+
+
+def _corresponde_glob(caminho: Path, base: Path, padrao: str) -> bool:
+    relativo = caminho.relative_to(base).as_posix()
+    if "/" not in padrao and "\\" not in padrao:
+        return fnmatch.fnmatchcase(caminho.name, padrao)
+    if fnmatch.fnmatchcase(relativo, padrao):
+        return True
+    # Em glob do pathlib, **/ também corresponde a zero diretórios.
+    alternativo = padrao
+    while alternativo.startswith("**/"):
+        alternativo = alternativo[3:]
+        if fnmatch.fnmatchcase(relativo, alternativo):
+            return True
+    return False
+
+
 def _ler_trecho(
     rota: Path, inicio: int, limite: int, recorte: bool
 ) -> tuple[list[str], int, bool]:
@@ -1313,6 +1392,11 @@ def _rodar_lista(
     (`GIT_TERMINAL_PROMPT=0`) — sem isso um `git push` num remoto que pede credencial ficava
     parado até o teto, sem nada na tela.
     """
+    if not _reservar_processo():
+        return (
+            f"ERRO: já há {LIMITE_PROCESSOS_CONCORRENTES} comandos em execução. "
+            "Aguarde um terminar ou encerre um comando que ficou rodando."
+        )
     try:
         proc = subprocess.Popen(
             argv,
@@ -1328,13 +1412,18 @@ def _rodar_lista(
             **_kwargs_de_processo(shell=False, workspace=workspace, env=env),
         )
     except FileNotFoundError:
+        _liberar_processo()
         return f"ERRO: executável não encontrado: {argv[0]}"
     except OSError as exc:
+        _liberar_processo()
         return f"ERRO ao rodar {argv[0]!r}: {exc}"
 
-    rodando = ComandoRodando(uuid.uuid4().hex[:8], " ".join(argv), proc)
+    rodando = ComandoRodando(
+        uuid.uuid4().hex[:8], " ".join(argv), proc, vaga_reservada=True
+    )
     if rodando.esperar(float(tempo)):
         rodando.fechar_leitores()
+        rodando.liberar_vaga()
         return _formatar(
             subprocess.CompletedProcess(
                 args=argv, returncode=proc.returncode or 0, stdout=rodando.texto(), stderr=""
@@ -1342,6 +1431,7 @@ def _rodar_lista(
         )
     rodando.matar()
     rodando.fechar_leitores()
+    rodando.liberar_vaga()
     return (
         f"ERRO: comando excedeu {tempo}s e foi interrompido\n"
         f"--- saída até a interrupção ---\n{rodando.texto()}"
@@ -1369,6 +1459,7 @@ class ComandoRodando:
         dono: str = "",
         workspace: Path | None = None,
         deadline: float | None = None,
+        vaga_reservada: bool = False,
     ) -> None:
         self.id = identificador
         self.comando = comando
@@ -1380,6 +1471,7 @@ class ComandoRodando:
         #: `tempo_limite` só limitava cada olhada, e o comando podia viver para sempre com
         #: o modelo dizendo "continuar".
         self.deadline = deadline
+        self.vaga_reservada = vaga_reservada
         self.dono = dono
         self.workspace = workspace
         #: Quantos caracteres o comando já escreveu (contador, e não `len()` da lista: a
@@ -1478,13 +1570,32 @@ class ComandoRodando:
     def matar(self) -> None:
         """Mata o processo **e a árvore dele**. Não mexe na saída já guardada."""
         if self.terminou():
+            self.liberar_vaga()
             return
         _matar_arvore(self.proc.pid)
-        self.esperar(5)
+        if not self.esperar(2):
+            # `taskkill /T` pode não ter permissão para encerrar a árvore em ambientes
+            # restritos. Ainda assim, o processo que o Koda iniciou não pode ficar vivo
+            # fora do registro: encerra o pai como fallback e espera o estado final.
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            self.esperar(5)
+        if self.terminou():
+            self.liberar_vaga()
+
+    def liberar_vaga(self) -> None:
+        global _PROCESSOS_ATIVOS
+        with _TRAVA_PROCESSOS:
+            if self.vaga_reservada:
+                self.vaga_reservada = False
+                _PROCESSOS_ATIVOS = max(0, _PROCESSOS_ATIVOS - 1)
 
     def parar(self) -> str:
         """Interrompe o comando e a árvore dele, e devolve o que já tinha saído."""
         if self.terminou():
+            self.liberar_vaga()
             self.fechar_leitores()
             return _formatar(
                 subprocess.CompletedProcess(
@@ -1633,17 +1744,25 @@ def _comecar(
     O `deadline` é calculado **aqui**, uma vez: é o teto absoluto do processo, e não muda
     por `continuar` (o modelo não estica o prazo do backend).
     """
-    proc = subprocess.Popen(
-        _argv_shell(comando),
-        stdout=subprocess.PIPE,
-        # Mesmo cano para stdout e stderr: preserva a **ordem** das linhas (ver `_rodar_lista`).
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        **_kwargs_de_processo(shell=True, workspace=workspace),
-    )
+    if not _reservar_processo():
+        raise RuntimeError(
+            f"limite global de {LIMITE_PROCESSOS_CONCORRENTES} comandos concorrentes atingido"
+        )
+    try:
+        proc = subprocess.Popen(
+            _argv_shell(comando),
+            stdout=subprocess.PIPE,
+            # Mesmo cano para stdout e stderr: preserva a ordem das linhas.
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            **_kwargs_de_processo(shell=True, workspace=workspace),
+        )
+    except BaseException:
+        _liberar_processo()
+        raise
     identificador = uuid.uuid4().hex[:8]
     prazo = time.monotonic() + tempo if tempo and tempo > 0 else None
     rodando = ComandoRodando(
@@ -1653,6 +1772,7 @@ def _comecar(
         dono=dono,
         workspace=workspace,
         deadline=prazo,
+        vaga_reservada=True,
     )
     _RODANDO[identificador] = rodando
     return rodando
@@ -1674,6 +1794,7 @@ def _acompanhar(identificador: str, tempo: int) -> str:
     if rodando.esperar(min(tempo, restante)):
         _RODANDO.pop(identificador, None)
         rodando.fechar_leitores()
+        rodando.liberar_vaga()
         return _formatar(
             subprocess.CompletedProcess(
                 args=rodando.comando,
@@ -1710,6 +1831,8 @@ def _rodar(
         rodando = _comecar(comando, workspace, tempo=tempo, dono=dono)
     except FileNotFoundError:
         return f"ERRO: comando não encontrado: {comando.split()[0]}"
+    except RuntimeError as exc:
+        return f"ERRO: {exc}"
     except OSError as exc:
         return f"ERRO ao rodar {comando!r}: {exc}"
 
@@ -1717,6 +1840,7 @@ def _rodar(
     if rodando.esperar(limite):
         _RODANDO.pop(rodando.id, None)
         rodando.fechar_leitores()
+        rodando.liberar_vaga()
         return _formatar(
             subprocess.CompletedProcess(
                 args=comando,
@@ -3006,49 +3130,41 @@ def executar(
         padrao = str(argumentos.get("padrao") or argumentos.get("termo") or "").strip()
         if not padrao:
             return "ERRO: informe o padrão (ex.: **/*.py ou *.json)"
-        # Padrão com `..` escapa da pasta de trabalho sem passar por `_resolver`:
-        # `../../**/*` listava o disco inteiro a partir do workspace. A varredura é travada
-        # na pasta — quem precisa procurar fora pede autorização com `acesso_livre`.
         if ".." in Path(padrao).parts:
-            return "ERRO: o padrão não pode sair da pasta de trabalho (`..` recusado)"
+            return "ERRO: o padrão não pode sair da pasta de trabalho (.. recusado)"
         base = _resolver(workspace, str(argumentos.get("caminho") or "."))
         if not base.exists():
             return f"ERRO: pasta não existe: {base}"
         if not base.is_dir():
             return f"ERRO: {base} é um arquivo — use read_file"
-        # A base também não pode ter escapado (caminho absoluto para fora do workspace).
         if not _dentro_do_workspace(workspace, base):
             return (
                 f"ERRO: {base} está fora da pasta de trabalho ({workspace}) — peça "
                 "autorização para trabalhar fora da pasta."
             )
-        try:
-            encontrados = sorted(base.glob(padrao))
-        except (OSError, ValueError, NotImplementedError) as exc:
-            return f"ERRO: padrão inválido ({padrao}): {exc}"
         linhas: list[str] = []
-        for item in encontrados:
-            if any(parte in PASTAS_IGNORADAS for parte in item.parts):
-                continue
-            if item.is_file() and item.suffix.lower() in EXTENSOES_IGNORADAS:
-                continue
-            # Cinto e suspensório: mesmo com o padrão validado, o que a varredura devolve
-            # tem de estar dentro da pasta (symlink apontando para fora cai aqui).
+
+        def visitar(item: Path, eh_pasta: bool) -> bool:
+            if not _corresponde_glob(item, base, padrao):
+                return False
+            if not eh_pasta and item.suffix.lower() in EXTENSOES_IGNORADAS:
+                return False
             if not _dentro_do_workspace(workspace, item):
-                continue
+                return False
             try:
-                # Barras normais: é o separador que o modelo usa para escrever os
-                # caminhos de volta nas ferramentas, e funciona no Windows também.
                 linhas.append(item.relative_to(workspace).as_posix())
             except ValueError:
                 linhas.append(item.as_posix())
-            if len(linhas) >= LIMITE_ARQUIVOS_BUSCA:
-                break
+            return len(linhas) >= LIMITE_ARQUIVOS_BUSCA
+
+        visitados, parada = _percorrer_pasta(base, visitar)
         corpo = "\n".join(linhas) or "(nenhum arquivo com esse padrão)"
-        if len(encontrados) > len(linhas):
+        if parada == "resultados":
+            corpo += f"\n...(limite de {LIMITE_ARQUIVOS_BUSCA} resultados)"
+        elif parada in ("itens", "tempo"):
             corpo += (
-                f"\n...(mostrando {len(linhas)} de {len(encontrados)} arquivos; estreite o "
-                "padrão para ver o resto)"
+                f"\n...(busca limitada: {visitados} itens examinados; refine o padrão "
+                "ou indique uma subpasta)"
             )
         return _limitar(corpo)
 
@@ -3208,37 +3324,58 @@ def executar(
         if not termo:
             return "ERRO: termo de busca vazio"
         usar_regex = nome in ("grep", "regex_search") or bool(argumentos.get("regex"))
+        if len(termo) > 500:
+            return "ERRO: termo de busca longo demais (máximo 500 caracteres)"
         try:
             padrao = re.compile(termo if usar_regex else re.escape(termo), re.I)
         except re.error as exc:
             return f"ERRO: regex inválida: {exc}"
         achados: list[str] = []
-        # Poda **na descida**: `rglob("*")` atravessava `node_modules` e `.git` inteiros para
-        # depois descartar arquivo por arquivo — num monorepo é disco e tempo gastos para
-        # não achar nada. `os.walk` deixa cortar as pastas antes de entrar nelas.
-        for raiz, pastas, arquivos in os.walk(workspace):
-            pastas[:] = [nome for nome in pastas if nome not in PASTAS_IGNORADAS]
-            for nome_arquivo in sorted(arquivos):
-                caminho = Path(raiz) / nome_arquivo
-                if caminho.suffix.lower() in EXTENSOES_IGNORADAS:
-                    continue
-                try:
-                    if caminho.stat().st_size > 2_000_000:
-                        continue
-                    conteudo = caminho.read_text(encoding="utf-8", errors="replace")
-                except (OSError, ValueError):
-                    continue
-                for num, linha in enumerate(conteudo.splitlines(), 1):
-                    if padrao.search(linha):
-                        rel = caminho.relative_to(workspace).as_posix()
-                        achados.append(f"{rel}:{num}: {linha.strip()[:160]}")
-                        if len(achados) >= 80:
-                            break
-                if len(achados) >= 80:
-                    break
-            if len(achados) >= 80:
-                break
-        return _limitar("\n".join(achados) or "(nenhuma ocorrência)")
+        inicio = time.monotonic()
+        estado: dict[str, Any] = {"arquivos": 0, "bytes": 0, "motivo": ""}
+
+        def visitar(caminho: Path, eh_pasta: bool) -> bool:
+            if eh_pasta or caminho.suffix.lower() in EXTENSOES_IGNORADAS:
+                return False
+            estado["arquivos"] += 1
+            if estado["arquivos"] > 5_000:
+                estado["motivo"] = "5.000 arquivos"
+                return True
+            try:
+                tamanho = caminho.stat().st_size
+                if tamanho > 2_000_000:
+                    return False
+                if estado["bytes"] + tamanho > LIMITE_BYTES_VARREDURA:
+                    estado["motivo"] = f"{LIMITE_BYTES_VARREDURA // 1_000_000} MB lidos"
+                    return True
+                estado["bytes"] += tamanho
+                with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
+                    for num, linha in enumerate(arquivo, 1):
+                        if time.monotonic() - inicio > LIMITE_TEMPO_VARREDURA_S:
+                            estado["motivo"] = f"{LIMITE_TEMPO_VARREDURA_S:g} s de busca"
+                            return True
+                        if padrao.search(linha[:2_000]):
+                            rel = caminho.relative_to(workspace).as_posix()
+                            achados.append(f"{rel}:{num}: {linha.strip()[:160]}")
+                            if len(achados) >= 80:
+                                estado["motivo"] = "80 resultados"
+                                return True
+            except (OSError, ValueError):
+                return False
+            return False
+
+        visitados, parada = _percorrer_pasta(workspace, visitar)
+        if parada in ("itens", "tempo") and not estado["motivo"]:
+            estado["motivo"] = (
+                f"{visitados} itens examinados" if parada == "itens" else "tempo de busca"
+            )
+        corpo = "\n".join(achados) or "(nenhuma ocorrência)"
+        if estado["motivo"]:
+            corpo += (
+                f"\n...(busca limitada por {estado['motivo']}; refine o termo "
+                "ou indique uma subpasta)"
+            )
+        return _limitar(corpo)
 
     if nome in ("get_problems", "linter"):
         rota = _resolver(workspace, str(argumentos.get("caminho", "")))

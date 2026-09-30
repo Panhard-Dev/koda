@@ -30,6 +30,7 @@ host/*.exe*
 .mimosa/
 backend/.mimosa/
 .tmp-agente/
+.tmp-recuperado/
 backend/.tmp-cmd/
 backend/.tmp-debug/
 
@@ -40,6 +41,7 @@ backend/probe_*.py
 
 # Sandbox do pytest (symlinks e projetos temporários) — não é código
 backend/.pytest-local/
+backend/.tmp-pytest-*/
 
 # Backups locais de binários (o host .exe é grande e não vai para o repositório)
 backups/
