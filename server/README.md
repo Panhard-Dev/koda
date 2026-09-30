@@ -4,13 +4,6 @@ Backend de nuvem do Koda: autenticação de administrador, gestão de contas, ca
 modelos, releases/atualização e auditoria imutável. Roda no **Cloudflare Workers** com
 banco **D1** (SQLite na borda) — sem servidor para manter, com HTTPS e domínio prontos.
 
-```
-                 ┌──────────────────────── Cloudflare ───────────────────────┐
-   app Koda ────▶│  Worker koda-cloud-api  ──▶  D1 (SQLite)  ──▶  assets BLOB  │
-   painel   ────▶│  /admin/* (painel + API administrativa)                   │
-                 └───────────────────────────────────────────────────────────┘
-```
-
 ## Por que Worker + D1 (e não Express + Postgres)
 
 A entrega pedida era "backend completo funcionando de verdade, publicado". O ambiente
