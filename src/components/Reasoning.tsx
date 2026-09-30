@@ -46,7 +46,7 @@ export default function Reasoning({ texto, ativo }: { texto: string; ativo: bool
       <div className="mt-0.5 mb-2 ml-[3px] border-l border-koda-fg/10 pl-3">
         <div
           ref={caixa}
-          className="max-h-56 overflow-y-auto text-[12.5px] leading-5 whitespace-pre-wrap text-koda-fg/50"
+          className="max-h-56 overflow-y-auto text-[12.5px] leading-5 break-words whitespace-pre-wrap text-koda-fg/50"
         >
           {texto}
         </div>

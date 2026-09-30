@@ -8,6 +8,7 @@ modelos oficial do projeto (o host em `host/c-host.exe`), que fala o mesmo proto
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
@@ -29,9 +30,17 @@ from .base import (
 #: HTTP que vale a pena tentar de novo (cota, indisponibilidade temporária).
 TRANSITORIOS = {408, 409, 425, 429, 500, 502, 503, 504}
 
-#: O upstream do host devolve 404 no meio da conversa e o próximo passo costuma
-#: funcionar — no projeto TOOLS original o 404 também entra na lista de retentativas.
-TRANSITORIOS_PROXY = TRANSITORIOS | {404}
+#: O 404 **não** entra mais aqui. Antes ele era repetido porque o upstream do host devolvia
+#: 404 no meio da conversa e o passo seguinte costumava funcionar — mas o efeito colateral
+#: era caro: um id de modelo errado ou uma `OPENAI_BASE_URL` errada (erros que **não** têm
+#: conserto por retentativa) ficavam martelando com backoff por dezenas de segundos antes de
+#: desistir. Falha de configuração tem de falhar rápido e dizer o que está errado.
+TRANSITORIOS_PROXY = TRANSITORIOS
+
+#: Por quanto tempo o catálogo de esforços do host fica em memória, em segundos. Sem
+#: expiração, um catálogo lido quando o host ainda não tinha subido ficava `{}` **para
+#: sempre**, e todo modelo caía no esforço padrão pelo resto da sessão.
+CATALOGO_TTL_S = 300.0
 
 #: Prazo de **leitura** de uma chamada de modelo: dez minutos.
 #:
@@ -52,15 +61,23 @@ TIME_STREAM = httpx.Timeout(TEMPO_DE_LEITURA, connect=10.0)
 #: Existe por causa dos modelos de raciocínio: medido, o `liz-4` devolve **texto vazio** com
 #: `max_tokens` 80 e 400 — o orçamento inteiro vai para o pensamento — e só fala a partir de
 #: ~1000. Sem o campo, vale o padrão do gateway, e era isso que deixava `liz-4` e `layze-2`
-#: calados a tarefa inteira. Oito mil é teto, não meta.
-MAX_TOKENS_SAIDA = 8192
+#: calados a tarefa inteira.
+#:
+#: Era 8192 e passou para **131072** a pedido do dono (respostas longas de código não podem
+#: ser cortadas no meio). É teto, não meta: quem responde curto continua respondendo curto.
+#: Atenção: alguns provedores recusam `max_tokens` maior que a janela de saída do modelo
+#: (400), e o valor **não** é reduzido automaticamente — se isso acontecer, baixe daqui.
+MAX_TOKENS_SAIDA = 131_072
 
 
 def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
     """Explica a falha sem expor URL, credenciais ou texto da requisicao."""
     nome = type(error).__name__
     if isinstance(error, httpx.ReadTimeout):
-        return f"o provedor ficou {TIME_STREAM.read:g}s sem enviar dados ({nome})"
+        return (
+            f"o provedor ficou {TIME_STREAM.read:g}s sem responder nada "
+            f"(ReadTimeout)"
+        )
     if isinstance(error, httpx.ConnectTimeout):
         return f"a conexao com o provedor excedeu {TIME_STREAM.connect:g}s ({nome})"
     if isinstance(error, httpx.TimeoutException):
@@ -145,6 +162,10 @@ class OpenAICompatibleProvider:
     #: Manda `reasoning_effort` no corpo? Só o host entende o campo — OpenAI, Groq e o
     #: Ollama podem recusar campo desconhecido, então fica desligado por padrão.
     manda_esforco = False
+    #: Pede o bloco de `usage` no fim do stream (`stream_options.include_usage`). Sem ele o
+    #: caminho de streaming — que é o que o agente usa de verdade — **nunca** reportava
+    #: tokens: o medidor de contexto e o controle de custo ficavam cegos.
+    manda_usage = True
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -212,6 +233,8 @@ class OpenAICompatibleProvider:
             "messages": self._messages(turns, options),
             "stream": True,
         }
+        if self.manda_usage:
+            payload["stream_options"] = {"include_usage": True}
         if self.manda_esforco:
             payload["reasoning_effort"] = await self.esforco(
                 options.reasoning, modelo, options.effort
@@ -349,6 +372,7 @@ class OpenAICompatibleProvider:
                 "completion_tokens": int(uso.get("completion_tokens", 0) or 0),
                 "total_tokens": int(uso.get("total_tokens", 0) or 0),
             },
+            truncado=str(choices[0].get("finish_reason") or "") == "length",
         )
 
     async def step_streaming(
@@ -377,7 +401,13 @@ class OpenAICompatibleProvider:
             "model": modelo,
             "stream": True,
             "messages": messages,
+            # O teto de tokens de saída **faltava** aqui — e este é o caminho que o agente
+            # usa de verdade. O `step()` (não-streaming) mandava `MAX_TOKENS_SAIDA`, então a
+            # proteção contra resposta gigante não valia para a execução real.
+            "max_tokens": MAX_TOKENS_SAIDA,
         }
+        if self.manda_usage:
+            payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
             if escolha_ferramenta:
@@ -388,6 +418,7 @@ class OpenAICompatibleProvider:
         texto: list[str] = []
         parciais: dict[int, dict[str, str]] = {}
         uso: dict[str, Any] = {}
+        motivo_de_fim = ""
         filtro = FiltroIdentidade(self.settings.assistente, _identidade_pedida(messages))
 
         try:
@@ -418,7 +449,10 @@ class OpenAICompatibleProvider:
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
-                    delta = choices[0].get("delta") or {}
+                    escolha = choices[0]
+                    if escolha.get("finish_reason"):
+                        motivo_de_fim = str(escolha["finish_reason"])
+                    delta = escolha.get("delta") or {}
 
                     razao = delta.get("reasoning_content")
                     if razao:
@@ -431,10 +465,19 @@ class OpenAICompatibleProvider:
                             yield Piece(limpo)
 
                     for bruto in delta.get("tool_calls") or []:
-                        indice = int(bruto.get("index") or 0)
+                        indice_bruto = bruto.get("index")
+                        novo_id = str(bruto.get("id") or "")
+                        if indice_bruto is None:
+                            # Nem todo OpenAI-compatible manda `index`. Sem ele, uma chamada
+                            # **nova** se anuncia pelo `id` novo; sem id, o pedaço é
+                            # continuação da última — assumir "sempre 0" misturava chamadas
+                            # paralelas num argumento só.
+                            indice = len(parciais) if (novo_id or not parciais) else max(parciais)
+                        else:
+                            indice = int(indice_bruto)
                         atual = parciais.setdefault(indice, {"id": "", "name": "", "args": ""})
-                        if bruto.get("id"):
-                            atual["id"] = str(bruto["id"])
+                        if novo_id:
+                            atual["id"] = novo_id
                         funcao = bruto.get("function") or {}
                         if funcao.get("name"):
                             atual["name"] = str(funcao["name"])
@@ -454,18 +497,22 @@ class OpenAICompatibleProvider:
             text="".join(texto),
             calls=[
                 ToolCall(
-                    id=parcial["id"],
+                    # Id vazio quebra o casamento `tool_call_id` ↔ `tool_calls` do host (e o
+                    # eco da assinatura). Se o provedor não mandou id, um estável é melhor do
+                    # que string vazia.
+                    id=parcial["id"] or f"call_{posicao}",
                     name=parcial["name"],
                     arguments=_json_ou_vazio(parcial["args"]),
                     raw_arguments=parcial["args"] or "{}",
                 )
-                for _, parcial in sorted(parciais.items())
+                for posicao, (_, parcial) in enumerate(sorted(parciais.items()))
             ],
             usage={
                 "prompt_tokens": int(uso.get("prompt_tokens", 0) or 0),
                 "completion_tokens": int(uso.get("completion_tokens", 0) or 0),
                 "total_tokens": int(uso.get("total_tokens", 0) or 0),
             },
+            truncado=motivo_de_fim == "length",
         )
 
 
@@ -521,7 +568,7 @@ class HostProvider(OpenAICompatibleProvider):
         Lido uma vez e guardado — o catálogo não muda em execução. Catálogo fora do ar
         devolve `{}`, e aí todo mundo cai no valor seguro.
         """
-        if self._esforcos is not None:
+        if self._esforcos is not None and time.monotonic() - self._esforcos_em < CATALOGO_TTL_S:
             return self._esforcos
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
@@ -533,8 +580,10 @@ class HostProvider(OpenAICompatibleProvider):
             dados = None
         itens = dados.get("data") if isinstance(dados, dict) else None
         if not isinstance(itens, list):
-            self._esforcos = {}
-            return self._esforcos
+            # Catálogo fora do ar **não** fica gravado: antes, um host que ainda não tinha
+            # subido deixava `{}` preso para sempre, e todo modelo caía no esforço padrão
+            # pelo resto da sessão. Sem cache, a próxima chamada tenta de novo.
+            return {}
 
         suportados: dict[str, frozenset[str]] = {}
         for item in itens:
@@ -559,6 +608,7 @@ class HostProvider(OpenAICompatibleProvider):
             niveis.discard(ESFORCO_DESLIGADO)
             suportados[identificador] = frozenset(niveis)
         self._esforcos = suportados
+        self._esforcos_em = time.monotonic()
         return suportados
 
     async def esforco(self, reasoning: bool, modelo: str, escolha: str | None = None) -> str:

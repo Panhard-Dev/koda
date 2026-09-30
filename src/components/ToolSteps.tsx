@@ -56,7 +56,13 @@ export default function ToolSteps({ steps }: { steps: ToolStep[] }) {
               <p className="font-mono text-[10px] tracking-wider text-koda-fg/25 uppercase">
                 {step.name}
               </p>
-              <pre className="mt-1 max-h-64 overflow-auto font-mono text-[11.5px] leading-5 whitespace-pre-wrap text-koda-fg/50">
+              {/*
+                * `break-words` para a saída não virar rolagem lateral: um JSON numa linha,
+                * um base64 ou uma URL de download são o caso comum aqui, e rolar de lado
+                * dentro de um bloco de saída esconde justamente o fim da linha, que é onde
+                * costuma estar o erro. O `overflow-auto` continua no lugar para altura.
+                */}
+              <pre className="mt-1 max-h-64 overflow-auto font-mono text-[11.5px] leading-5 break-words whitespace-pre-wrap text-koda-fg/50">
                 {step.output || 'sem saída'}
               </pre>
             </div>

@@ -86,6 +86,34 @@ class Settings(BaseSettings):
     é o botão de parar, o contador de respostas vazias e o de provedor fora do ar.
     """
     tool_output_limit: int = 4000
+
+    # --- Tetos do `shell` (processo), separados de propósito -------------------------
+    # Antes os três prazos estavam amarrados: `tempo_limite` limitava só cada **olhada**, o
+    # travamento era "três olhadas" (doze minutos com o polling de 240 s) e não havia teto
+    # absoluto de verdade. Aqui cada um é o seu.
+    comando_timeout_s: int = 600
+    """Teto **total** de um comando, em segundos (0 = sem teto).
+
+    É o prazo do processo, e não muda por `continuar`: o backend é a autoridade do
+    lifecycle. Passou dele, o comando é morto e o resultado volta.
+    """
+    comando_inatividade_s: int = 300
+    """Quanto tempo **sem escrever nada** já caracteriza travamento, em segundos.
+
+    Medido em segundos, não em olhadas: comando vivo mas mudo por cinco minutos está
+    esperando entrada, em laço mudo, ou morto por dentro. Antes eram "três olhadas", o que
+    com polling de 240 s dava doze minutos.
+    """
+    comando_olhada_s: int = 240
+    """De quanto em quanto tempo um comando longo devolve a palavra ao modelo."""
+
+    max_tool_calls: int = 400
+    """Teto de **chamadas de ferramenta** numa tarefa (0 = sem teto).
+
+    Rede de segurança contra o modelo em laço: `max_steps` é 0 por decisão do projeto
+    (tarefa grande não cabe em número fixo de passos), mas uma tarefa que chama quatrocentas
+    ferramentas já não está progredindo — está girando.
+    """
     contexto_tokens: int = 1_000_000
     """Quanto a conversa pode ocupar, em tokens, antes de ser compactada em resumo.
 

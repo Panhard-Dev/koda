@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -30,6 +29,7 @@ from ..repository import usage as usage_for
 from ..schemas import ApprovalDecision, ChatRequest, Message, TodoItem, ToolStepOut, sse
 from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
+from ..tools import ferramentas
 from ..tools.loop import Emit, Resultado
 
 router = APIRouter(tags=["chat"])
@@ -40,6 +40,11 @@ SSE_HEADERS = {
     # Sem isso um proxy pode segurar o stream até o fim da resposta.
     "X-Accel-Buffering": "no",
 }
+
+#: Quanto o fechamento do stream espera o loop morrer depois de cancelado. O Parar não pode
+#: depender de uma ferramenta que já está em execução (ela roda em thread e não dá para
+#: cortar no meio): passado o teto, a resposta fecha e o processo já foi derrubado.
+CANCELAMENTO_MAX_S = 5.0
 
 
 def now_ms() -> int:
@@ -227,6 +232,9 @@ async def _agente(
     resultado = Resultado(texto="", passos=[], completou=False, uso={})
     stored = False
     fim: asyncio.Queue[tuple[str, dict[str, object]] | None] = asyncio.Queue()
+    #: Id desta tarefa. Vai junto de cada processo que ela começar, para o Parar derrubar
+    #: só os processos **dela** (ver `ferramentas.encerrar_do_dono`).
+    dono_da_tarefa = new_id()
 
     async def emit(evento: str, dados: dict[str, object]) -> None:
         if evento == "tool_result":
@@ -267,6 +275,8 @@ async def _agente(
                 # Teto de contexto da tarefa: passando dele, o histórico do loop compacta
                 # em vez de estourar o que o provedor aceita.
                 orcamento=settings.contexto_tokens,
+                dono=dono_da_tarefa,
+                max_tool_calls=settings.max_tool_calls,
             )
         finally:
             await fim.put(None)
@@ -351,14 +361,20 @@ async def _agente(
     except ProviderError as error:
         yield sse("error", {"message": str(error)})
     finally:
-        # O cliente abortou (botão parar, aba fechada): sem cancelar, a tarefa continua
-        # rodando os passos restantes e enfileirando eventos que ninguém mais lê. Uma
-        # ferramenta já em execução termina — ela roda em thread e não dá para cortar no
-        # meio —, mas o loop não avança para o próximo passo.
+        # O cliente abortou (botão parar, aba fechada). Três coisas, nesta ordem:
+        # 1. cancelar o loop — para ele não avançar para o próximo passo;
+        # 2. **derrubar os processos** que esta tarefa deixou rodando: cancelar a coroutine
+        #    não mata o subprocesso, e um `npm install`/build continuava vivo depois de o
+        #    usuário mandar parar (era a inconsistência mais irritante do botão);
+        # 3. esperar o loop terminar **com teto**: sem o teto, uma ferramenta já em execução
+        #    (roda em thread, não dá para cortar no meio) segurava o stream até acabar.
         if loop_task is not None:
             loop_task.cancel()  # no-op quando a tarefa já terminou
-            with suppress(asyncio.CancelledError, ProviderError):
-                await loop_task
+            ferramentas.encerrar_do_dono(dono_da_tarefa)
+            try:
+                await asyncio.wait_for(loop_task, timeout=CANCELAMENTO_MAX_S)
+            except (asyncio.CancelledError, asyncio.TimeoutError, ProviderError):
+                pass
 
         # Parou no meio ou caiu a conexão: guarda o que já saiu, sem perder a tarefa.
         if not stored:
@@ -428,9 +444,13 @@ async def _pedir_permissao(
     await emit("approval_request", {"id": identificador, **acao})
     try:
         decisao = await asyncio.wait_for(futuro, timeout=approvals.ESPERA_MAXIMA_S)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except asyncio.TimeoutError:
         decisao = "nao"
     finally:
+        # **Sem** `CancelledError` na lista. Engolir o cancelamento aqui era metade do bug
+        # do botão Parar: com um cartão aberto, o cancelamento virava "não" e o loop seguia
+        # chamando o modelo — o usuário apertava Parar e o agente continuava trabalhando.
+        # Cancelar tem de propagar; o `finally` só limpa o registro.
         pendentes.pop(identificador, None)
 
     if decisao in ("sempre", "nunca"):

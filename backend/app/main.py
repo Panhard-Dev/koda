@@ -10,8 +10,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import __version__
 from .config import Settings, get_settings
@@ -34,6 +35,21 @@ from .routers import (
 from .schemas import CloudEstado, Health
 from .tools import ferramentas
 
+#: Hosts aceitos no cabeçalho `Host`. O app desktop (Tauri/WebView2) usa `tauri.localhost`;
+#: o dev usa `localhost`/`127.0.0.1`; o IPv6 de loopback entra pela forma `[::1]`; e o
+#: cliente de teste do FastAPI se apresenta como `testserver`.
+HOSTS_LOCAIS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "tauri.localhost",
+        "0.0.0.0",
+        "testserver",
+    }
+)
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or get_settings()
@@ -48,6 +64,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Permissões esperando resposta da tela, por id. Vive no processo: é o mesmo
         # processo que está rodando o loop da mensagem que pediu.
         app.state.aprovacoes = {}
+        # Tetos do `shell`, separados como manda a configuração: teto total do processo,
+        # tempo sem saída que caracteriza travamento, e intervalo de acompanhamento.
+        ferramentas.definir_limites(
+            timeout=config.comando_timeout_s,
+            inatividade=config.comando_inatividade_s,
+            olhada=config.comando_olhada_s,
+        )
         # A nuvem nunca segura a subida: a consulta é opcional e roda fora do caminho
         # crítico, num task que morre junto com o app.
         servico = ServicoNuvem(config)
@@ -63,6 +86,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             maquina.cancelar()
+            # Derruba **todo** processo que ficou rodando. Sem isto um `npm run dev` (ou
+            # qualquer filho) sobrevivia ao fechamento do Koda, segurando porta e CPU, e
+            # ninguém mais tinha como achá-lo — o registro era só um dict no processo.
+            ferramentas.encerrar_tudo()
             if tarefa is not None:
                 tarefa.cancel()
                 with suppress(asyncio.CancelledError):
@@ -82,6 +109,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _so_host_local(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Recusa pedido cujo `Host` não é local.
+
+        O backend escuta em localhost e **não** tem autenticação — quem alcança a porta
+        alcança o `/api/chat`, e por ele o `shell`. O CORS já barra o navegador, mas ele não
+        cobre cliente que não manda `Origin` nem o ataque de **DNS rebinding**: uma página
+        maliciosa que resolve `evil.com` para `127.0.0.1` chega com `Host: evil.com`. Exigir
+        que o `Host` seja local fecha essa porta sem mexer em quem usa o app de verdade.
+        """
+        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+        if host and host not in HOSTS_LOCAIS:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "o backend do Koda só aceita conexões locais"},
+            )
+        return await call_next(request)
 
     app.include_router(chat.router, prefix="/api")
     app.include_router(models.router, prefix="/api")

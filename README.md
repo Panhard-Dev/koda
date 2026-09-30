@@ -136,8 +136,16 @@ ter sido iniciado pelo app. Sem o backend a interface entra no modo offline dela
 - **Ele não para no meio do caminho.** Quatro portões de parada seguram a conversa antes de
   ela fechar: lista com item em aberto, código mudado sem nada ter sido executado depois,
   fechamento que **promete** o próximo passo (*"vou deletar o bench…"*) e tarefa de ação em
-  que nenhuma ferramenta funcionou. Se ainda assim parar, o Koda diz o que faltou em vez de
-  esconder que parou.
+  que nenhuma ferramenta funcionou.
+- **Prometer não é fazer — e o Koda cobra.** Quando o modelo escreve "Vou confirmar que está
+  respondendo:" e encerra sem chamar nada, a frase é lida como anúncio de qual ferramenta
+  faltou ("confirmar" virou `shell`, "abrir" virou o comando do sistema) e o Koda **executa**
+  o passo prometido em vez de aceitar a promessa. Se o modelo insistir no texto, ele recebe a
+  cobrança com a ferramenta nomeada dentro do próprio histórico e **reengaja**; só depois
+  disso, esgotadas as tentativas, a conversa fecha — sempre dizendo o que faltou, se algo já
+  foi para o disco e oferecendo "continue", com um botão **Continuar** na faixa da resposta.
+  Nenhuma parede sem saída: o caminho de "me diga continue" virou a última instância, não a
+  primeira.
 - **Permissão antes de mexer na máquina.** Três modos no campo de mensagem: `Manual`
   (pergunta antes de comando, escrita, exclusão e saída da pasta), `Default` (pergunta só no
   que é difícil de desfazer) e `Auto` (não pergunta). Dá para aprovar uma vez ou para sempre.
@@ -170,6 +178,38 @@ Três peças, todas na sua máquina:
 O backend é quem conversa com o modelo e executa as ferramentas; a interface só mostra o que
 ele manda. O app desktop é a mesma interface dentro de uma janela Tauri, com o app subindo e
 encerrando o host e o backend junto de si.
+
+## Como saber que está tudo de pé
+
+Um comando roda os três portões de verdade — tipos, lint e a suíte do backend:
+
+```bash
+npm run verificar
+```
+
+A interface não tem suíte de testes: o que se pode quebrar nela é layout, e layout se confere
+**olhando**. Em vez de um framework, existe uma bancada visual em duas páginas:
+
+| Página | O que faz |
+| --- | --- |
+| `chat.html` | Monta a conversa com conteúdo hostil de propósito — o prompt gigante, um BLOB em base64 sem uma única quebra, caminho do Windows, URL comprida, linha de código de 900 caracteres, tabela larga, anexos de nome enorme, emoji, CJK e acentos. Sem parâmetro, roda os quatro cenários em fila; `chat.html?cenario=misto` prende a tela em um só (o último da fila é o controle `regressao`, e olhar para ele achando que é o app é um jeito fácil de se enganar). |
+| `bench.html` | Repete a conversa na matriz toda: **15 larguras × 2 alturas × 3 escalas = 90 quadros**, quatro de cada vez, e escreve o veredicto em `window.__bench`. |
+
+Com o `npm run dev` no ar, abra `http://localhost:5173/bench.html` e espere a frase *medição
+concluída*. O que se cobra é `casosFalhos: 0`, `controleDetectou: 90` e `inconclusivos: 0`.
+
+O detector ([`harnessChat.tsx`](src/harnessChat.tsx)) trata os dois eixos de forma diferente,
+porque valem coisas diferentes: **na largura** qualquer transbordo é suspeito — rolar de lado
+é o sintoma, cortar de lado é o sintoma escondido —, enquanto **na altura** rolar é o desenho
+(a coluna da conversa, o `<textarea>`, a caixa de raciocínio) e o que não pode é *cortar*.
+Três coisas contam como desenho e não como defeito, cada uma com o seu porquê no código: o
+`sr-only` de acessibilidade, o `truncate` que guarda o valor inteiro no `title` e o bloco de
+código e a tabela que rolam por decisão de projeto.
+
+A bancada tem um **controle de regressão**: um cenário monta a bolha e a fala do modelo com
+as classes antigas, sem `min-w-0` e sem `break-words`. Se ele passar, o detector está cego e o
+resto do resultado não vale nada. Foi assim que esta bancada se provou: ela reprovou o
+controle em 90 de 90 quadros.
 
 ## Comunidade
 
