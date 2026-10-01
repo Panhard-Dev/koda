@@ -186,6 +186,7 @@ export function Composer({
   model = MODELO_PADRAO,
   onModelChange,
   remoteModels = [],
+  modelosBloqueados = [],
   contextoPorModelo = {},
   contextoJanela = null,
 }: {
@@ -213,6 +214,11 @@ export function Composer({
   onModelChange?: (value: string) => void
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[]
+  /**
+   * Modelos que o painel tirou desta conta (desativados, ou desligados por exceção).
+   * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
+   */
+  modelosBloqueados?: readonly string[]
   /**
    * Contexto já usado, por modelo, em tokens de entrada (o `prompt_tokens` do último
    * passo da última resposta daquele modelo). Vazio = nada medido ainda.
@@ -540,7 +546,7 @@ export function Composer({
 
           <div className="flex items-center gap-1">
             <Menu
-              options={comMedidor(modelMenu(remoteModels))}
+              options={comMedidor(modelMenu(remoteModels, modelosBloqueados))}
               value={model}
               onSelect={(value) => onModelChange?.(value)}
               align="end"

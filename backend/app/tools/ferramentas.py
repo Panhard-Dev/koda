@@ -4,8 +4,8 @@ Portado do projeto `TOOLS` do usuário (agente CLI em Python): o catálogo e as 
 de erro são os mesmos, só trocando `requests` por `httpx` para o backend não ganhar uma
 dependência nova. Tudo executa na máquina local, sempre com `cwd` na pasta de trabalho.
 
-A busca na web usa **só o Bing**: um GET na página de resultados e as tags lidas na mão.
-Sem chave, sem dependência nova e sem serviço no meio — ver `_busca_bing`.
+A busca na web consulta o Bing com exclusões e várias formulações do tema, sem chave nem
+dependência nova. Wikipedia/Wikimedia também são bloqueadas na leitura e no download.
 """
 
 from __future__ import annotations
@@ -179,6 +179,27 @@ LIMITE_TEMPO_VARREDURA_S = 5.0
 LIMITE_PROCESSOS_CONCORRENTES = 4
 _TRAVA_PROCESSOS = threading.Lock()
 _PROCESSOS_ATIVOS = 0
+
+#: Ferramentas de acesso web, disponíveis somente quando a pessoa liga o botão Web.
+FERRAMENTAS_WEB = frozenset({"web_search", "url_reader", "browser", "download_file"})
+
+#: Projetos Wikipedia/Wikimedia bloqueados nas buscas e em qualquer URL aberta pelo agente.
+DOMINIOS_WIKI = frozenset(
+    {
+        "wikipedia.org",
+        "wikimedia.org",
+        "wikimediafoundation.org",
+        "mediawiki.org",
+        "wikidata.org",
+        "wiktionary.org",
+        "wikibooks.org",
+        "wikinews.org",
+        "wikiquote.org",
+        "wikisource.org",
+        "wikiversity.org",
+        "wikivoyage.org",
+    }
+)
 
 #: Quantas entradas o `list_dir` mostra de uma pasta. Alto de propósito: pasta de projeto
 #: tem centenas de arquivos, e cortar calado faz o modelo trabalhar com meia lista na
@@ -707,7 +728,7 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def("linter", "Alias de get_problems.", {"caminho": {"type": "string"}}, ["caminho"]),
     # ---- web ----
-    _def("web_search", "Pesquisa na web e devolve título, URL e resumo dos resultados.", {"consulta": {"type": "string"}}, ["consulta"]),
+    _def("web_search", "Pesquisa no Bing e devolve vários resultados; em pesquisa ampla, use consultas diferentes para achar fontes em mais domínios.", {"consulta": {"type": "string"}}, ["consulta"]),
     _def("url_reader", "Baixa uma URL pública (http/https) e devolve o texto da página.", {"url": {"type": "string"}}, ["url"]),
     _def("browser", "Alias de url_reader: abre uma URL e devolve o texto.", {"url": {"type": "string"}}, ["url"]),
     # ---- git ----
@@ -1895,6 +1916,8 @@ def _url_de_rede(url: str) -> str | None:
     `169.254.169.254` de metadata da nuvem) e de exfiltração (mandar arquivo da máquina
     para onde o modelo escolher). A checagem é no host **resolvido**, não no texto da URL.
     """
+    if _url_wiki(url):
+        return "ERRO: acesso à Wikipedia/Wikimedia está bloqueado no Koda"
     if not url.lower().startswith(("http://", "https://")):
         return "ERRO: informe uma URL http(s)"
     if not host_publico(url):
@@ -1903,6 +1926,16 @@ def _url_de_rede(url: str) -> str | None:
             "(localhost, rede privada e metadata de nuvem ficam bloqueados)"
         )
     return None
+
+
+def _url_wiki(url: str) -> bool:
+    """True para Wikipedia, Wikimedia e domínios dos projetos irmãos, inclusive subdomínios."""
+    try:
+        host = urllib.parse.urlsplit(html.unescape(url.strip())).hostname or ""
+    except ValueError:
+        return False
+    host = host.rstrip(".").lower()
+    return any(host == dominio or host.endswith("." + dominio) for dominio in DOMINIOS_WIKI)
 
 
 def _seguir_redirects(cliente: httpx.Client, url: str) -> httpx.Response | str:
@@ -1920,6 +1953,8 @@ def _seguir_redirects(cliente: httpx.Client, url: str) -> httpx.Response | str:
         if not resp.is_redirect or not destino:
             return resp
         proximo = str(httpx.URL(atual).join(destino))
+        if _url_wiki(proximo):
+            return f"ERRO: redirecionamento para Wikipedia/Wikimedia bloqueado: {proximo}"
         if not host_publico(proximo):
             return (
                 f"ERRO: {atual} redireciona para {proximo}, que não é um host público. "
@@ -1986,6 +2021,12 @@ def _cliente_das_buscas() -> httpx.Client:
     return _cliente_web
 
 
+def _consulta_sem_wiki(consulta: str) -> str:
+    """Pede ao Bing para excluir os domínios Wikipedia/Wikimedia."""
+    exclusoes = " ".join(f"-site:{dominio}" for dominio in sorted(DOMINIOS_WIKI))
+    return f"{consulta.strip()} {exclusoes}"
+
+
 def _enxugar(consulta: str) -> str:
     """A consulta sem as palavras de pergunta: as que sobram são as que buscam."""
     palavras = [p for p in re.findall(r"[\wÀ-ÿ]+", consulta) if p.lower() not in VAZIAS]
@@ -2017,36 +2058,84 @@ def _busca_bing(consulta: str) -> str:
     mesmo Bing, a mesma consulta e a mesma ordem — em XML, sem o anti-robô no caminho:
     **10 de 10 relevantes** nas mesmas consultas.
 
-    O Bing continua sendo a única fonte: não há plano B, nem serviço no meio, nem chave.
+    Quando a pergunta tem palavras dispensáveis, a versão enxuta também é consultada para
+    trazer páginas adicionais. Exclusões no Bing e filtro local evitam resultados wiki.
     """
     def uma_rodada(termo: str) -> str:
         resp = _cliente_das_buscas().get(
-            "https://www.bing.com/search", params={"q": termo, "format": "rss"}
+            "https://www.bing.com/search",
+            params={"q": _consulta_sem_wiki(termo), "format": "rss"},
         )
         linhas = []
-        for i, item in enumerate(re.findall(r"<item>(.*?)</item>", resp.text, re.S)[:8], 1):
+        for item in re.findall(r"<item>(.*?)</item>", resp.text, re.S)[:12]:
             titulo = _texto_do_item(item, "title")
             url = _texto_do_item(item, "link")
             if not (titulo or url):
                 continue
+            if _url_wiki(url):
+                continue
             resumo = _texto_do_item(item, "description")[:220]
             linhas.append(
-                f"{i}. {titulo or url}\n   {url}" + (f"\n   {resumo}" if resumo else "")
+                f"{len(linhas) + 1}. {titulo or url}\n   {url}"
+                + (f"\n   {resumo}" if resumo else "")
             )
         return "\n".join(linhas)
 
-    primeira = uma_rodada(consulta)
-    if _tem_a_ver(primeira, consulta):
-        return primeira
-
-    # A página degradada veio: tenta de novo com a consulta enxuta (sem as palavras de
-    # pergunta). O que salvou os casos medidos foi justamente isto.
+    # O Bing costuma repetir os mesmos domínios quando a consulta vem em forma de pergunta.
+    # Pesquisar também a versão enxuta traz resultados adicionais sem depender de outro
+    # buscador que não responde bem nesta rede.
+    consultas = [consulta]
     enxuta = _enxugar(consulta)
     if enxuta and enxuta.lower() != consulta.strip().lower():
-        segunda = uma_rodada(enxuta)
-        if _tem_a_ver(segunda, consulta) or not primeira:
-            return segunda
-    return primeira
+        consultas.append(enxuta)
+
+    resultados: list[str] = []
+    irrelevante = ""
+    vistos: set[str] = set()
+    for termo in consultas:
+        rodada = uma_rodada(termo)
+        if not rodada:
+            continue
+        if not _tem_a_ver(rodada, consulta):
+            irrelevante = irrelevante or rodada
+            continue
+        blocos = re.split(r"(?m)(?=^\d+\.\s)", rodada.strip())
+        for bloco in blocos:
+            linhas = [linha.strip() for linha in bloco.splitlines() if linha.strip()]
+            if len(linhas) < 2:
+                continue
+            url = linhas[1]
+            chave = urllib.parse.urldefrag(url).url.rstrip("/").lower()
+            if _url_wiki(url) or chave in vistos:
+                continue
+            vistos.add(chave)
+            titulo = re.sub(r"^\d+\.\s*", "", linhas[0])
+            resultados.append(
+                f"{len(resultados) + 1}. {titulo}\n   {url}"
+                + (f"\n   {' '.join(linhas[2:])}" if len(linhas) > 2 else "")
+            )
+            if len(resultados) >= 20:
+                break
+        if len(resultados) >= 20:
+            break
+    return "\n".join(resultados) if resultados else irrelevante
+
+
+def _filtrar_resultados_wiki(texto: str) -> str:
+    """Última barreira para não repassar resultado Wikipedia/Wikimedia ao modelo."""
+    seguros: list[str] = []
+    blocos = re.split(r"(?m)(?=^\d+\.\s)", texto.strip())
+    for bloco in blocos:
+        linhas = [linha.strip() for linha in bloco.splitlines() if linha.strip()]
+        if len(linhas) < 2 or _url_wiki(linhas[1]):
+            continue
+        titulo = re.sub(r"^\d+\.\s*", "", linhas[0])
+        url = html.unescape(linhas[1])
+        seguros.append(
+            f"{len(seguros) + 1}. {titulo}\n   {url}"
+            + (f"\n   {' '.join(linhas[2:])}" if len(linhas) > 2 else "")
+        )
+    return "\n".join(seguros)
 
 
 #: Moldura do que vem da internet. O conteúdo externo entra no contexto como **dado**, não
@@ -2067,28 +2156,19 @@ def _cercar(texto: str) -> str:
 
 
 def _web_buscar(consulta: str) -> str:
-    """Busca na web — só o Bing, e só ele.
-
-    Sem SearXNG, sem DuckDuckGo e sem corrida entre fontes: uma requisição, um resultado.
-    Se o Bing devolver uma página de bloqueio ou nada que dê para ler, o retorno é
-    "(sem resultados)" — não existe plano B.
-    """
+    """Busca no Bing e remove qualquer resultado Wikipedia/Wikimedia antes de retornar."""
     if not consulta.strip():
         return "ERRO: consulta vazia"
     try:
-        achados = _busca_bing(consulta)
+        achados = _filtrar_resultados_wiki(_busca_bing(consulta))
     except httpx.HTTPError as exc:
         return f"ERRO: o Bing não respondeu ({exc})"
     if not achados:
         return "(sem resultados)"
     if not _tem_a_ver(achados, consulta):
-        # Dizer isto é o que evita o modelo concluir bobagem a partir de resultado que não
-        # tem nada a ver: sem o aviso, ele lia "Gmail" e respondia como se fosse a resposta.
-        # O aviso é **nosso** (vem primeiro, sem rótulo); o resultado do Bing vai rotulado.
         return _limitar(
-            "AVISO: o Bing devolveu resultados que **não têm relação** com a consulta "
-            "(proteção anti-robô dele). Não use isto como resposta — tente outra consulta, "
-            "com menos palavras e sem forma de pergunta.\n\n" + _cercar(achados)
+            "AVISO: o Bing devolveu resultados que não têm relação com a consulta. Não use esses "
+            "resultados como resposta; tente outra consulta.\n\n" + _cercar(achados)
         )
     return _cercar(_limitar(achados))
 
@@ -2106,8 +2186,9 @@ def _ler_pagina(url: str) -> str:
     isso com todas as letras — antes o modelo recebia o menu de navegação como se fosse
     conteúdo e concluía bobagem a partir dele.
     """
-    if not host_publico(url):
-        return "ERRO: apenas URLs http/https PÚBLICAS são permitidas (localhost/rede privada bloqueados)"
+    recusa = _url_de_rede(url)
+    if recusa:
+        return recusa
 
     try:
         with httpx.Client(headers=CABECALHOS_WEB, timeout=25) as cliente:
@@ -3258,6 +3339,11 @@ def executar(
                         break
                     proximo = str(httpx.URL(atual).join(destino_do_salto))
                     resposta.close()
+                    if _url_wiki(proximo):
+                        return (
+                            "ERRO: redirecionamento para Wikipedia/Wikimedia bloqueado: "
+                            f"{proximo}"
+                        )
                     if not host_publico(proximo):
                         return (
                             f"ERRO: {atual} redireciona para {proximo}, que não é um host "

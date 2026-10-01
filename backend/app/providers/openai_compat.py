@@ -42,18 +42,10 @@ TRANSITORIOS_PROXY = TRANSITORIOS
 #: sempre**, e todo modelo caía no esforço padrão pelo resto da sessão.
 CATALOGO_TTL_S = 300.0
 
-#: Prazo de **leitura** de uma chamada de modelo: dez minutos.
-#:
-#: Generoso de propósito. Com `stream: false` — e com o host repassando o que vem do serviço
-#: — **não chega byte nenhum** enquanto o modelo não começa a responder. Um modelo de
-#: raciocínio, com prompt grande e caminho lento até o serviço, ficava mais de 120 s calado, e
-#: a chamada morria por timeout. Medido no print do dono, no outro PC: cinco tentativas
-#: estourando o teto antigo de 120 s davam **508 s** até desistir — o print dizia **513 s**.
-#: Não era queda de conexão: era o app cortando um modelo que ainda estava pensando.
-#:
-#: O `connect` continua curto: **não conseguir conectar** é outra coisa, e aí esperar dez
-#: minutos não ajuda ninguém.
-TEMPO_DE_LEITURA = 600.0
+#: Não impõe prazo de leitura: um modelo pode passar bastante tempo raciocinando antes
+#: do primeiro byte. A chamada termina por resposta, erro de transporte ou cancelamento
+#: explícito do usuário; não por um relógio local. O prazo de conexão continua curto.
+TEMPO_DE_LEITURA: float | None = None
 TIME_STREAM = httpx.Timeout(TEMPO_DE_LEITURA, connect=10.0)
 
 #: Teto de tokens **de saída** em cada passo, mandado explícito no pedido.
@@ -74,10 +66,7 @@ def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
     """Explica a falha sem expor URL, credenciais ou texto da requisicao."""
     nome = type(error).__name__
     if isinstance(error, httpx.ReadTimeout):
-        return (
-            f"o provedor ficou {TIME_STREAM.read:g}s sem responder nada "
-            f"(ReadTimeout)"
-        )
+        return "o provedor parou de enviar dados (ReadTimeout)"
     if isinstance(error, httpx.ConnectTimeout):
         return f"a conexao com o provedor excedeu {TIME_STREAM.connect:g}s ({nome})"
     if isinstance(error, httpx.TimeoutException):
@@ -232,6 +221,9 @@ class OpenAICompatibleProvider:
             "model": modelo,
             "messages": self._messages(turns, options),
             "stream": True,
+            # O stream também precisa do teto amplo usado pelo modo agente. Sem o campo,
+            # o gateway aplicava o limite padrão e encerrava respostas longas cedo.
+            "max_tokens": MAX_TOKENS_SAIDA,
         }
         if self.manda_usage:
             payload["stream_options"] = {"include_usage": True}
@@ -243,6 +235,7 @@ class OpenAICompatibleProvider:
         # A apresentação que o host injeta é tirada aqui, antes do primeiro pedaço chegar
         # à tela (ver `app/identidade.py`).
         filtro = FiltroIdentidade(options.assistente, _identidade_pedida(turns))
+        motivo_de_fim = ""
 
         try:
             async with self._cliente().stream(
@@ -270,7 +263,10 @@ class OpenAICompatibleProvider:
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
-                    delta = choices[0].get("delta") or {}
+                    escolha = choices[0]
+                    if escolha.get("finish_reason"):
+                        motivo_de_fim = str(escolha["finish_reason"])
+                    delta = escolha.get("delta") or {}
                     # O raciocínio vem antes do texto e pode durar minutos. Ele não é a
                     # resposta, mas vai para a tela: sem isso o usuário encara uma tela
                     # parada e a resposta parece aparecer de uma vez no fim.
@@ -290,6 +286,8 @@ class OpenAICompatibleProvider:
         resto = filtro.fechar()
         if resto:
             yield Piece(resto)
+        if motivo_de_fim == "length":
+            yield Piece("", truncated=True)
 
     # ------------------------------------------------------------ ferramentas
 

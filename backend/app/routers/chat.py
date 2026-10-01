@@ -23,14 +23,14 @@ from ..db import Database
 from ..deps import call, database, provider
 from ..identidade import regras as regras_identidade
 from ..identidade import remover_intro
-from ..providers import ChatOptions, ChatTurn, ProviderError
+from ..providers import ChatOptions, ChatTurn, ProviderError, system_prompt
 from ..repository import append_message, ensure_conversation, get_conversation, new_id
 from ..repository import usage as usage_for
 from ..schemas import ApprovalDecision, ChatRequest, Message, TodoItem, ToolStepOut, sse
 from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas
-from ..tools.loop import Emit, Resultado
+from ..tools.loop import CONTINUAR_TRUNCADA, Emit, Resultado
 
 router = APIRouter(tags=["chat"])
 
@@ -146,14 +146,27 @@ async def _texto(
         pieces.append(nota)
         yield sse("delta", {"text": nota})
     try:
-        async for piece in engine.stream(turns, options):
-            if piece.reasoning:
-                # Raciocínio não é a resposta: vai para a tela para o usuário acompanhar o
-                # modelo pensando, mas não entra no texto gravado da mensagem.
-                yield sse("reasoning", {"text": piece.text})
-                continue
-            pieces.append(piece.text)
-            yield sse("delta", {"text": piece.text})
+        while True:
+            trecho: list[str] = []
+            truncado = False
+            async for piece in engine.stream(turns, options):
+                if piece.truncated:
+                    truncado = True
+                    continue
+                if piece.reasoning:
+                    # O raciocínio não é a resposta: vai para a tela para o usuário acompanhar o
+                    # modelo pensando, mas não entra no texto gravado da mensagem.
+                    yield sse("reasoning", {"text": piece.text})
+                    continue
+                trecho.append(piece.text)
+                pieces.append(piece.text)
+                yield sse("delta", {"text": piece.text})
+            if not truncado:
+                break
+            texto_parcial = "".join(trecho)
+            if texto_parcial:
+                turns.append(ChatTurn(role="assistant", text=texto_parcial))
+            turns.append(ChatTurn(role="user", text=CONTINUAR_TRUNCADA))
 
         text = "".join(pieces).strip()
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -203,18 +216,21 @@ async def _agente(
     # A pasta de trabalho é a do projeto escolhido no prompt box; sem projeto, a Área de
     # Trabalho do usuário (ou o que a configuração mandar).
     workspace = await call(_workspace, db, payload.project_path, settings.workspace_path)
-    negadas = settings.tools_negadas
+    negadas = set(settings.tools_negadas)
+    if not payload.web:
+        negadas.update(ferramentas.FERRAMENTAS_WEB)
     limite = settings.tool_output_limit
     # Skills ligadas do projeto entram no prompt: o agente fica sabendo que elas
     # existem e lê o SKILL.md com read_file quando a tarefa combina.
     skills_prompt = indice_para_agente(settings)
+    instrucoes_base = _options(payload, settings.assistente, resumo)
     mensagens: list[dict[str, object]] = [
         {
             "role": "system",
             "content": (
-                f"{PROMPT_FERRAMENTAS}\n{regras_identidade(settings.assistente)}\n"
+                f"{PROMPT_FERRAMENTAS}\n{system_prompt(instrucoes_base)}\n"
+                f"{regras_identidade(settings.assistente)}\n"
                 f"Pasta de trabalho atual: {workspace}"
-                + (f"\n\n{resumo}" if resumo else "")
                 + (f"\n\n{skills_prompt}" if skills_prompt else "")
             ),
         }

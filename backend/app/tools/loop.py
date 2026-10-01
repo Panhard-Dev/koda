@@ -162,15 +162,22 @@ MAX_FORCADAS = 3
 #: Esgotadas as forçadas, quantas vezes o anúncio insistente é retomado por mensagem
 #: **interna** antes de o loop aceitar que o modelo não vai agir. A diferença para a
 #: forçada: a cobrança entra no histórico (o modelo lê o que deixou pendente, com a
-#: ferramenta nomeada) e a escolha vai direto para a ferramenta do anúncio — sem pasar
-#: pelo `required`, que o `koda-1` (medido) ignorou três vezes seguidas. O teto existe
-#: para tarefa teimosa não girar para sempre queimando cota: esgotado, o fechamento
-#: honesto assume e a pessoa decide se manda continuar.
-MAX_RETOMADAS_ANUNCIO = 2
+#: ferramenta nomeada) e a escolha vai direto para a ferramenta do anúncio — sem passar
+#: pelo `required`, que o `koda-1` (medido) ignorou três vezes seguidas.
+#:
+#: **Este teto não é opcional.** O laço que ele limita tem `comando_rodando` na condição:
+#: com um comando vivo e o modelo respondendo só texto, a condição é verdadeira para
+#: sempre — sem contador, o loop gira sem fim chamando o modelo e enchendo o histórico.
+#: Medido: o processo do teste chegou a **511 MB em 6 s** e a máquina trava em swap.
+#:
+#: O número é **generoso de propósito**, e o contador é renovado assim que o modelo volta a
+#: agir (`resultado.calls`): tarefa longa que trabalha nunca esbarra nele. Quem esbarra é o
+#: modelo que anuncia dez vezes seguidas **sem executar nada** — e aí desistir é o certo.
+MAX_RETOMADAS_ANUNCIO = 10
 
 RETOMAR_ANUNCIO = (
-    "Você anunciou o próximo passo e encerrou a resposta sem chamar ferramenta nenhuma — "
-    "isto já aconteceu mais de uma vez nesta tarefa. O anúncio não faz o trabalho: nada "
+    "Você anunciou o próximo passo e encerrou a resposta sem chamar ferramenta nenhuma. "
+    "O anúncio não faz o trabalho: nada "
     "mudou no disco. Agora, nesta resposta, chame a ferramenta que executa o que você "
     "anunciou (ler, listar, buscar, shell — a que for) e só escreva a explicação depois "
     "do resultado voltar. Se de fato não resta nada a fazer, diga o que foi concluído e "
@@ -188,12 +195,17 @@ CONSERTAR_FERRAMENTA = (
 )
 
 #: Quantas vezes o loop cobra execução antes de aceitar que o modelo só quis falar.
+#: Sem teto, a tarefa em que **nenhuma** ferramenta funciona (`ferramentas_ok == 0`) cobra
+#: para sempre: o `portao_de_parada` devolve a mesma cobrança a cada resposta de texto e o
+#: laço nunca fecha. Esgotado, o fechamento honesto assume e a pessoa decide.
 MAX_COBRANCAS = 2
 
 #: Quantas vezes o loop **retoma** uma tarefa que parou com itens do plano em aberto.
 #: Terminar pela metade e encerrar a resposta era o sintoma: o agente começava, narrava que
-#: ia continuar e parava ali.
-MAX_RETOMADAS = 3
+#: ia continuar e parava ali. O contador é renovado quando há trabalho novo desde a última
+#: retomada (`retomada_base`), para tarefa longa e legítima não morrer no teto. Generoso de
+#: propósito — o teto existe para o laço não ser infinito, não para cortar trabalho.
+MAX_RETOMADAS = 10
 
 
 def retomar_tarefa(pendentes: list[dict[str, Any]]) -> str:
@@ -262,6 +274,13 @@ CONTINUAR = (
     "(sua mensagem anterior veio vazia ou falhou) Continue a tarefa usando as ferramentas "
     "e, quando terminar, responda em texto. Narre junto: a linha curta e a chamada da "
     "ferramenta vão na mesma resposta — uma linha sozinha não faz nada."
+)
+
+CONTINUAR_TRUNCADA = (
+    "A resposta anterior atingiu o limite de saída do provedor e foi interrompida. "
+    "Continue exatamente do ponto em que parou; não repita ações que já foram executadas. "
+    "Se algum pedido de ferramenta veio incompleto, envie novamente essa chamada com os "
+    "argumentos completos. Não encerre a tarefa até concluir o pedido original."
 )
 
 #: Quantos passos seguidos de ferramenta, **sem uma palavra**, antes de o loop cobrar
@@ -600,8 +619,7 @@ def portao_de_parada(
     trabalhando. Aviso na tela é ruído; o que importa é o trabalho acontecer.
     """
     if plano_aberto:
-        # O plano é tratado antes (o orçamento de retomadas renova com progresso), e uma
-        # lista em aberto nunca permite fechar: o fechamento honesto diz o que falta.
+        # O plano é tratado antes, e uma lista em aberto nunca permite fechar.
         return None
     if not ferramentas_ok and de_acao and not bloqueios and cobrancas < MAX_COBRANCAS:
         return CONSERTAR_FERRAMENTA
@@ -715,8 +733,8 @@ def precisa_cobrar(
       pessoa negou a ação — aí explicar é a resposta certa, e não insistir.
 
     Só quem pode **chamar** a cobrança usa esta função (o `portao_de_parada`, antes da
-    resposta virar fechamento); o fechamento do loop olha `anunciou` direto, porque à
-    altura dele as retomadas já gastaram — recobrar aqui duplicaria a frase de erro.
+    resposta virar fechamento); o fechamento do loop olha `anunciou` diretamente para não
+    duplicar a cobrança.
     """
     limpo = (texto or "").strip()
     if not limpo:
@@ -868,8 +886,10 @@ ESPERA_BASE = 3.0
 #: Respostas vazias seguidas antes de desistir. Alto de propósito: o teto existe só para
 #: provedor quebrado não girar para sempre queimando cota — desistir cedo era o defeito, e
 #: resposta vazia acontece de verdade quando o modelo é cortado no meio de um contexto
-#: gigante. Cada vazio empurra a continuação, calado.
-MAX_VAZIAS = 20
+#: gigante. Cada vazio empurra a continuação, calado. Com a espera progressiva abaixo, este
+#: teto também cobre o caso sem `timeout_s` na configuração: sem ele, o laço de resposta
+#: vazia não termina nunca. Trinta seguidas já não é modelo cortado — é provedor quebrado.
+MAX_VAZIAS = 30
 
 
 @dataclass(slots=True)
@@ -1065,17 +1085,16 @@ async def executar(
     #: Ferramentas que rodaram **de verdade** nesta tarefa (as que falharam não contam) e
     #: quantas vezes o loop já cobrou a execução de um anúncio sem ação.
     ferramentas_ok = 0
-    #: Quantas chamadas de ferramenta já foram executadas. É o teto de segurança contra o
-    #: modelo em laço: `max_steps` é 0 por decisão do projeto, mas uma tarefa que passa de
-    #: centenas de chamadas já não está progredindo.
+    #: Quantas chamadas de ferramenta já foram executadas. Só limita a tarefa quando a
+    #: instalação configurou explicitamente `max_tool_calls`; por padrão não há teto.
     chamadas_feitas = 0
     cobrancas = 0
     #: Quantas vezes um passo que terminou em anúncio foi refeito com a ferramenta
     #: obrigatória (`tool_choice: "required"`) — ver o laço logo abaixo.
     forcadas = 0
     #: Quantas vezes o anúncio insistente foi retomado por mensagem interna (a cobrança
-    #: com a ferramenta nomeada). É da **tarefa**, não do passo: uma tarefa longa não pode
-    #: gastar o fôlego inteiro no primeiro passo teimoso.
+    #: com a ferramenta nomeada). É da **tarefa**, não do passo — ver
+    #: `MAX_RETOMADAS_ANUNCIO`.
     retomadas_anuncio = 0
     #: O que a pessoa (ou a configuração) bloqueou: ação negada no cartão de permissão ou
     #: ferramenta desligada. Bloqueio não é erro de argumento — o certo ali é explicar e
@@ -1117,8 +1136,8 @@ async def executar(
     # `max_steps` zero ou negativo é **sem teto de passos**. Tarefa grande de verdade não
     # cabe em número fixo: montar um projeto, refatorar um módulo ou rodar uma bateria de
     # testes passa de qualquer teto pequeno no meio de trabalho legítimo. Quem impede um
-    # loop infinito aqui é o tempo (`timeout_s`), o contador de respostas vazias e o botão
-    # de parar — não um número de passos.
+    # loop infinito aqui é um limite explicitamente configurado ou o botão de parar — não
+    # um número de passos.
     teto = max_steps if max_steps and max_steps > 0 else None
     numeros = count(1) if teto is None else range(1, teto + 1)
 
@@ -1221,16 +1240,26 @@ async def executar(
             )
 
         if not resultado.calls and not resultado.text.strip():
-            # Resposta vazia: empurra a continuação e segue — **sem** avisar na conversa.
-            # O teto continua existindo só para provedor quebrado não girar para sempre
-            # queimando cota; ele é alto de propósito, porque desistir cedo era o defeito.
+            if resultado.truncado:
+                # Alguns modelos gastam o orçamento pensando e devolvem conteúdo vazio com
+                # finish_reason=length. Isso não é uma conclusão: pede continuação sem
+                # consumir o limite de respostas vazias.
+                historico.append({"role": "user", "content": CONTINUAR_TRUNCADA})
+                continue
+            # Resposta vazia não é conclusão. Empurra a continuação e segue, com espera
+            # progressiva para um provedor que está devolvendo vazio não gerar chamadas
+            # rápidas em sequência. O usuário ainda pode cancelar a execução.
             vazias += 1
             if vazias >= MAX_VAZIAS:
                 motivo = f"o provedor respondeu vazio {vazias} vezes seguidas"
                 break
+            if not await _esperar(min(ESPERA_BASE * vazias, 30.0), limite):
+                motivo = "o tempo da tarefa acabou antes de terminar"
+                break
             historico.append({"role": "user", "content": CONTINUAR})
             continue
 
+        vazias = 0
         if resultado.text.strip():
             # Texto intermediário também aparece na tela; o respiro separa a narração
             # do que vem depois das ferramentas.
@@ -1242,6 +1271,10 @@ async def executar(
                     await emit("delta", {"text": sufixo})
             else:
                 await emit("delta", {"text": resultado.text + sufixo})
+
+        if resultado.truncado and not resultado.calls:
+            historico.append({"role": "user", "content": CONTINUAR_TRUNCADA})
+            continue
 
         if not resultado.calls:
             # Anúncio sem execução ("agora vou verificar…" e nenhuma ferramenta): o passo
@@ -1313,6 +1346,7 @@ async def executar(
             while (
                 (anunciou(resultado.text) or comando_rodando)
                 and (ferramentas_ok or de_acao)
+                and not bloqueios
                 and not resultado.calls
                 and retomadas_anuncio < MAX_RETOMADAS_ANUNCIO
             ):
@@ -1383,6 +1417,13 @@ async def executar(
                 forcadas = 0
                 retomadas_anuncio = 0
 
+            if resultado.truncado and not resultado.calls:
+                # Uma chamada forçada também pode ser cortada. Não deixe o caminho de
+                # anúncio tratá-la como resposta final só porque veio depois de uma
+                # tentativa anterior.
+                historico.append({"role": "user", "content": CONTINUAR_TRUNCADA})
+                continue
+
             if not resultado.calls:
                 # Resposta de texto: **candidata** a fechamento. Antes de aceitar, os portões
                 # (`portao_de_parada`) olham o **estado** da tarefa — lista em aberto, mudança
@@ -1391,13 +1432,14 @@ async def executar(
                 # guardado: nenhum portão custa a resposta.
                 pendentes = [item for item in todos if not item.get("feito")]
                 # Trabalho feito desde a última retomada devolve o fôlego: numa tarefa longa o
-                # agente narra e para várias vezes no caminho, e cada parada dessas gastava uma
-                # retomada até o teto acabar no meio de trabalho que estava andando bem.
+                # agente narra e para várias vezes no caminho, e cada parada dessas gastava
+                # uma retomada até o teto acabar no meio de trabalho que estava andando bem.
                 if pendentes and ferramentas_ok > retomada_base:
                     retomada_base = ferramentas_ok
                     retomadas = 0
                 # O sinal mais forte que existe, porque não depende do que o modelo escreveu:
-                # é o que ele mesmo registrou que faltava fazer.
+                # é o que ele mesmo registrou que faltava fazer. Tem teto: sem ele, uma lista
+                # com item que o modelo nunca fecha faz o laço girar para sempre.
                 if pendentes and retomadas < MAX_RETOMADAS:
                     retomadas += 1
                     historico.append({"role": "user", "content": retomar_tarefa(pendentes)})
@@ -1424,10 +1466,10 @@ async def executar(
                     completou = False
                     motivo = f"a lista ficou com {len(pendentes)} item(ns) pendente(s)"
                     falta = "; ".join(str(item.get("texto", "")) for item in pendentes[:6])
-                    # A frase tem de ser verdadeira nos dois casos: quem não executou nada ouve
-                    # que nada mudou no disco; quem executou parte e parou ouve só o que falta
-                    # — dizer "nada foi executado" depois de o agente ter criado arquivos era
-                    # uma mentira na cara de quem viu as ferramentas rodando.
+                    # A frase tem de ser verdadeira nos dois casos: quem não executou nada
+                    # ouve que nada mudou no disco; quem executou parte e parou ouve só o que
+                    # falta — dizer "nada foi executado" depois de o agente ter criado
+                    # arquivos era uma mentira na cara de quem viu as ferramentas rodando.
                     texto_final = (
                         f"Não terminei a tarefa: falta {falta}. "
                         + (
@@ -1439,9 +1481,9 @@ async def executar(
                     )
                 elif anunciou(resultado.text):
                     # Esgotaram-se as forçadas e as retomadas: o modelo anunciou o próximo
-                    # passo e encerrou de novo. O fechamento continua honesto — mas agora
-                    # ele só chega aqui depois de o modelo ter lido a cobrança com a
-                    # ferramenta nomeada e **ainda** ter ficado no texto.
+                    # passo e encerrou de novo. O fechamento continua honesto — mas agora ele
+                    # só chega aqui depois de o modelo ter lido a cobrança com a ferramenta
+                    # nomeada e **ainda** ter ficado no texto.
                     completou = False
                     motivo = "o modelo encerrou anunciando o próximo passo, sem executá-lo"
                     texto_final = (
@@ -1658,6 +1700,13 @@ async def executar(
                 {"role": "tool", "tool_call_id": chamada.id, "content": saida}
             )
 
+        if resultado.truncado:
+            # Executa apenas as chamadas completas recebidas e depois retoma do modelo.
+            # Se algum JSON foi cortado, o erro da ferramenta já está no histórico para
+            # que o modelo possa reenviar a chamada completa sem repetir o lote concluído.
+            historico.append({"role": "user", "content": CONTINUAR_TRUNCADA})
+            continue
+
         # Fim do passo: o modelo pediu ferramenta e não disse nada. Conta; e, se já passou
         # do limite, cobra uma linha antes de continuar. Vai como mensagem de pessoa porque
         # é assim que o provedor aceita — depois dos resultados das ferramentas, sem
@@ -1684,7 +1733,8 @@ async def executar(
         # Nenhuma ferramenta desta tarefa funcionou até agora: numa tarefa de ação, isso não
         # é "não havia o que fazer" — é erro de argumento que precisa ser lido e corrigido.
         # Tarefa grande que arrancou sem plano: a lista é cobrada antes de o trabalho
-        # continuar. Só uma vez — da segunda em diante, insistir só toma o tempo.
+        # continuar. Só enquanto o orçamento de cobranças durar — da segunda em diante,
+        # insistir só toma o tempo.
         if grande and not plano_feito and resultado.calls and cobrancas < MAX_COBRANCAS:
             cobrancas += 1
             historico.append({"role": "user", "content": EXIGIR_PLANO})

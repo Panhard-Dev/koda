@@ -414,3 +414,108 @@ export async function sair(): Promise<void> {
     // Já saiu daqui; o token que ficou lá vence sozinho no prazo dele.
   }
 }
+
+// ------------------------------------------------------------------ sonda de sessão
+
+/**
+ * O veredito de uma sonda: a sessão vale, morreu, ou não deu para saber.
+ *
+ * `sem-rede` é um estado de primeira classe de propósito. Sem ele, uma consulta que
+ * tropeçou na rede viraria "sessão morta" e a tela de login apareceria para quem não fez
+ * nada de errado — que é exatamente o que a renovação já evita, e a sonda não pode piorar.
+ */
+export type SessaoViva =
+  | {
+      estado: 'viva'
+      /**
+       * Slugs que o painel conhece mas tirou desta conta — desativados globalmente ou com
+       * exceção individual desligada. É o que faz um modelo desativado sumir do seletor.
+       */
+      bloqueados: string[]
+    }
+  | { estado: 'morta'; motivo: string }
+  | { estado: 'sem-rede' }
+
+/** O que `/api/account/me` devolve e esta sonda aproveita. */
+type PerfilDoPainel = {
+  conta?: { status?: string } | null
+  modelos_bloqueados?: unknown
+}
+
+async function lerPerfil(): Promise<SessaoViva> {
+  const atual = acessoEmVigor()
+  if (!atual) throw new ErroDaConta('missing_token', mensagemDe('missing_token'), 401)
+  const perfil = await pedir<PerfilDoPainel>('/api/account/me', { token: atual.token })
+  return {
+    estado: 'viva',
+    bloqueados: Array.isArray(perfil.modelos_bloqueados)
+      ? perfil.modelos_bloqueados.filter((item): item is string => typeof item === 'string')
+      : [],
+  }
+}
+
+/** Renova e, com a sessão nova, pergunta o perfil de novo. */
+async function renovarEAvalidar(refreshToken: string): Promise<SessaoViva> {
+  try {
+    await renovar(refreshToken)
+  } catch (falha) {
+    return sessaoMorreu(falha)
+      ? {
+          estado: 'morta',
+          motivo: falha instanceof ErroDaConta ? falha.message : mensagemDe('token_revoked'),
+        }
+      : { estado: 'sem-rede' }
+  }
+  try {
+    return await lerPerfil()
+  } catch (falha) {
+    if (falha instanceof ErroDaConta && falha.status === 403) {
+      limpar()
+      return { estado: 'morta', motivo: falha.message }
+    }
+    return { estado: 'sem-rede' }
+  }
+}
+
+/**
+ * A sessão ainda vale? — a pergunta que faz o banimento valer na hora.
+ *
+ * O app confia na credencial por minutos: o token de acesso dura 20, a renovação só é
+ * devida perto dos 12, e o efeito de sessão chega a esperar 10 minutos entre uma volta e
+ * outra. Sem esta sonda, banir alguém no painel só teria efeito quando alguma dessas
+ * contagens terminasse — e até lá a pessoa continuaria dentro do app, com a tela normal e
+ * o seletor cheio. Era esse o buraco: a recusa existia no painel, mas ninguém perguntava.
+ *
+ * A sonda é **barata e sem efeito colateral**: uma leitura do perfil com o token que já
+ * está na mão. Não gira a sessão (a rotação é de uso único — girar sem precisar é o
+ * caminho curto para o painel desconfiar de reuso), não escreve nada, e cabe folgado no
+ * limite da rota.
+ *
+ * Quem decide é sempre a **renovação**, nunca o código do erro: o token curto vence o
+ * tempo todo e um 401 por vencimento é rotina, não banimento. Um 403, sim, é veredito do
+ * painel sobre a conta — banida ou suspensa — e aí a sessão morre na hora, sem tentar
+ * renovar (não há o que renovar).
+ */
+export async function verificarSessao(): Promise<SessaoViva> {
+  const guardada = ler()
+  if (!guardada) return { estado: 'morta', motivo: mensagemDe('token_revoked') }
+
+  // Sem token de acesso em vigor (a janela reabriu, ou o curto venceu): quem responde é a
+  // renovação.
+  if (!acessoEmVigor()) return renovarEAvalidar(guardada.refresh_token)
+
+  try {
+    return await lerPerfil()
+  } catch (falha) {
+    if (!(falha instanceof ErroDaConta)) return { estado: 'sem-rede' }
+    if (falha.status === 403) {
+      // Só apaga o que ainda é a sessão desta sonda: uma renovação que correu em paralelo
+      // pode ter gravado uma sessão nova, e ela não tem culpa do 403 da anterior.
+      if (ler()?.refresh_token === guardada.refresh_token) limpar()
+      return { estado: 'morta', motivo: falha.message }
+    }
+    if (falha.status === 401) return renovarEAvalidar(guardada.refresh_token)
+    // 429 e o resto: o painel pediu calma ou tropeçou — a sessão não foi recusada.
+    return { estado: 'sem-rede' }
+  }
+}

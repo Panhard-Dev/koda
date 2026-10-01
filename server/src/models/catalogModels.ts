@@ -90,6 +90,25 @@ export async function publicos(db: D1Database): Promise<ModeloRow[]> {
   return resultado.results ?? [];
 }
 
+/**
+ * O catálogo inteiro, incluindo os **desligados** — só o que uma conta precisa saber.
+ *
+ * `publicos` responde "o que está ligado"; esta responde "o que o painel conhece, e em
+ * que estado". A diferença é a que deixa o app distinguir **desativado** de **desconhecido**:
+ * com só a lista dos ativos, um modelo desligado e um modelo que o painel nunca viu chegam
+ * iguais (nenhum dos dois aparece), e o app não teria como esconder um sem esconder o outro.
+ */
+export async function catalogoSimples(
+  db: D1Database,
+): Promise<{ slug: string; name: string; is_active: number }[]> {
+  const resultado = await db
+    .prepare(
+      'SELECT slug, name, is_active FROM catalog_models WHERE deleted_at IS NULL ORDER BY sort_order ASC, name ASC',
+    )
+    .all<{ slug: string; name: string; is_active: number }>();
+  return resultado.results ?? [];
+}
+
 export async function buscarPorId(db: D1Database, id: string): Promise<ModeloRow | null> {
   return db.prepare('SELECT * FROM catalog_models WHERE id = ?').bind(id).first<ModeloRow>();
 }

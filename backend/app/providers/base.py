@@ -57,6 +57,8 @@ class Piece:
 
     text: str
     reasoning: bool = False
+    #: Marca de controle no fim do stream quando o provedor fechou com `finish_reason=length`.
+    truncated: bool = False
 
 
 @runtime_checkable
@@ -80,7 +82,18 @@ def system_prompt(options: ChatOptions) -> str:
     if options.reasoning:
         parts.append("Pense passo a passo antes de concluir, sem narrar o raciocínio inteiro.")
     if options.web:
-        parts.append("Se precisar de informação atual, diga que a busca na Web não está disponível aqui.")
+        parts.append(
+            "A busca na Web está ativada: pesquise pelo `web_search` do Bing. Em pedidos "
+            "de pesquisa ampla, faça pelo menos três buscas com formulações diferentes e "
+            "leia páginas de pelo menos três domínios independentes antes de concluir. "
+            "Nunca pesquise, abra ou baixe conteúdo da Wikipedia, Wikimedia ou projetos "
+            "irmãos; escolha fontes independentes."
+        )
+    else:
+        parts.append(
+            "A busca na Web está desativada nesta mensagem: não afirme que pesquisou nem "
+            "use ferramentas de busca, leitura ou download da Web."
+        )
     if options.resumo:
         parts.append(options.resumo)
     if options.attachments:

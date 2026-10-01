@@ -285,7 +285,8 @@ fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
 
 /// Onde o backend está e como chamá-lo.
 pub(crate) struct Backend {
-    /// `python.exe` que roda o `uvicorn`.
+    /// `python.exe` usado para validar o runtime. O servidor prefere o `pythonw.exe`
+    /// irmão para não abrir uma janela de console no Windows.
     pub(crate) python: PathBuf,
     /// Pasta de trabalho — é de onde o `app.main` é importado, então o `app/` tem que
     /// estar aqui dentro.
@@ -377,10 +378,11 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
         log("backend não encontrado (nem o do instalador nem backend/.venv) — interface em modo offline");
         return false;
     };
+    let executavel = executavel_backend(&backend.python);
     log(&format!(
         "iniciando backend{}: {}",
         if backend.empacotado { " empacotado" } else { " do projeto" },
-        backend.python.display()
+        executavel.display()
     ));
 
     // Antes de subir, o interpretador se apresenta: existe, roda e importa o que a API
@@ -388,7 +390,7 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
     // nem a rede, nem a conta — e isso precisa estar escrito no log, com o erro dele.
     conferir_python(&backend.python);
 
-    let mut comando = Command::new(&backend.python);
+    let mut comando = Command::new(&executavel);
     comando
         .args(["-m", "uvicorn", "app.main:app", "--port", &porta.to_string()])
         .current_dir(&backend.pasta)
@@ -461,6 +463,21 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
     }
 }
 
+/// Usa o subsistema Windows sem console quando o runtime fornece `pythonw.exe`.
+///
+/// `stdin`, `stdout` e `stderr` continuam explicitamente ligados a pipes/arquivo no
+/// chamador, então o token e os logs do backend seguem funcionando normalmente.
+fn executavel_backend(python: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let sem_console = python.with_file_name("pythonw.exe");
+        if sem_console.is_file() {
+            return sem_console;
+        }
+    }
+    python.to_path_buf()
+}
+
 /// Confere o interpretador antes de contar com ele e escreve o resultado no log.
 ///
 /// `true` = ele roda e importa `uvicorn`/`fastapi`. A checagem custa o tempo de duas
@@ -471,15 +488,20 @@ fn conferir_python(python: &Path) -> bool {
         log(&format!("python do backend não existe: {}", python.display()));
         return false;
     }
+    let executavel = executavel_backend(python);
 
-    let versao = Command::new(python).arg("-V").output();
+    let versao = Command::new(&executavel).arg("-V").output();
     match versao {
         Ok(saida) => {
-            let texto = String::from_utf8_lossy(&saida.stdout);
+            let texto = if saida.stdout.is_empty() {
+                String::from_utf8_lossy(&saida.stderr)
+            } else {
+                String::from_utf8_lossy(&saida.stdout)
+            };
             log(&format!("python do backend: {}", texto.trim()));
         }
         Err(erro) => {
-            log(&format!("não consegui rodar {}: {erro}", python.display()));
+            log(&format!("não consegui rodar {}: {erro}", executavel.display()));
             return false;
         }
     }
@@ -487,7 +509,10 @@ fn conferir_python(python: &Path) -> bool {
     // O import é o teste que importa: interpretador que roda mas não acha `uvicorn`
     // (runtime montado pela metade, pasta movida, antivírus comendo arquivo) sobe, morre
     // em silêncio e deixa a interface sem serviço.
-    match Command::new(python).args(["-c", "import uvicorn, fastapi"]).output() {
+    match Command::new(&executavel)
+        .args(["-c", "import uvicorn, fastapi"])
+        .output()
+    {
         Ok(saida) if saida.status.success() => {
             log("python do backend importa uvicorn e fastapi");
             true

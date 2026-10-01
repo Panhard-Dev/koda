@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Activity,
   Cable,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleUser,
@@ -39,11 +40,12 @@ import {
 } from '../plan'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
-import { cloudChangelog, cloudUpdate } from '../api/client'
+import { baixarAtualizacao, cloudChangelog, cloudUpdate, statusDoDownload } from '../api/client'
 import type {
   ApiCloud,
   ApiCloudRelease,
   ApiCloudUpdate,
+  ApiDownload,
   ApiMcp,
   ApiSkill,
   CloudCanal,
@@ -278,6 +280,19 @@ const dataCurta = (iso: string | null) => {
 const horaCurta = (ms: number) =>
   new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 
+/** Tamanho de arquivo curto, para a barra do download do instalador. */
+const tamanhoCurto = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const unidades = ['B', 'KB', 'MB', 'GB']
+  let valor = bytes
+  let indice = 0
+  while (valor >= 1024 && indice < unidades.length - 1) {
+    valor /= 1024
+    indice += 1
+  }
+  return `${valor.toFixed(indice === 0 || valor >= 100 ? 0 : 1)} ${unidades[indice]}`
+}
+
 /** Linha rótulo/valor do cartão de atualizações. */
 function CloudRow({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -306,6 +321,8 @@ function Atualizacoes({ cloud, version }: { cloud: ApiCloud | null; version: str
   const [carregando, setCarregando] = useState(ativo)
   const [falhou, setFalhou] = useState(false)
   const [verificadoEm, setVerificadoEm] = useState<number | null>(null)
+  /** Download do instalador em curso: quem baixa é o backend local, nunca o navegador. */
+  const [download, setDownload] = useState<ApiDownload | null>(null)
 
   const verificar = useCallback(
     async (refresh = false) => {
@@ -337,11 +354,60 @@ function Atualizacoes({ cloud, version }: { cloud: ApiCloud | null; version: str
     return () => window.clearTimeout(timer)
   }, [verificar])
 
+  // Enquanto o backend baixa o instalador, pergunta de tempos em tempos: é o que faz a
+  // barra andar e o "salvo" aparecer sem o usuário mexer em nada.
+  useEffect(() => {
+    if (download?.estado !== 'baixando') return
+    const timer = window.setInterval(() => {
+      void statusDoDownload()
+        .then(setDownload)
+        .catch(() =>
+          setDownload((atual) =>
+            atual?.estado === 'baixando'
+              ? { ...atual, estado: 'erro', erro: 'o backend local parou no meio do download' }
+              : atual,
+          ),
+        )
+    }, 400)
+    return () => window.clearInterval(timer)
+  }, [download?.estado])
+
   const disponivel = detalhe?.disponivel ?? cloud?.disponivel ?? false
   const atualizacao = detalhe?.atualizacao ?? null
   const novidade = atualizacao?.update_available ?? cloud?.update_available ?? false
   const publicada = atualizacao?.latest_version ?? cloud?.latest_version ?? null
   const baixar = atualizacao?.download_url ?? cloud?.download_url ?? null
+
+  const baixando = download?.estado === 'baixando'
+  const concluido = download?.estado === 'concluido'
+  const total = download?.total ?? null
+  const percentual =
+    total && total > 0 && download
+      ? Math.min(100, Math.round((download.recebido / total) * 100))
+      : 8
+
+  /**
+   * Baixar é do backend local: ele pega o link publicado e grava o arquivo na pasta de
+   * downloads da máquina, com progresso aqui. Nada de `<a target="_blank">` — dentro do
+   * Tauri isso não abre nada (o clique parecia morto) e no navegador jogava o usuário
+   * para fora do app.
+   */
+  const baixarInstalador = () => {
+    baixarAtualizacao()
+      .then(setDownload)
+      .catch(() =>
+        setDownload({
+          estado: 'erro',
+          recebido: 0,
+          total: null,
+          arquivo: null,
+          pasta: null,
+          caminho: null,
+          versao: null,
+          erro: 'não consegui falar com o backend local',
+        }),
+      )
+  }
 
   return (
     <Card
@@ -432,28 +498,71 @@ function Atualizacoes({ cloud, version }: { cloud: ApiCloud | null; version: str
       </div>
 
       {novidade ? (
-        <div className="flex items-center gap-4 border-t border-koda-fg/8 bg-koda-accent/8 px-5 py-4">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-koda-accent/15 text-koda-accent">
-            <CloudDownload className="h-4 w-4" strokeWidth={1.8} />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-[13.5px] font-semibold text-koda-fg">
-              {publicada ? `Koda ${publicada} está disponível` : 'Atualização disponível'}
+        <div className="border-t border-koda-fg/8 bg-koda-accent/8 px-5 py-4">
+          <div className="flex items-center gap-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-koda-accent/15 text-koda-accent">
+              <CloudDownload className="h-4 w-4" strokeWidth={1.8} />
             </span>
-            <span className="mt-0.5 block text-[12.5px] leading-5 text-koda-fg/55">
-              {atualizacao?.notes?.trim() ||
-                'Há uma versão mais nova publicada no canal escolhido.'}
+            <span className="min-w-0 flex-1">
+              <span className="block text-[13.5px] font-semibold text-koda-fg">
+                {publicada ? `Koda ${publicada} está disponível` : 'Atualização disponível'}
+              </span>
+              <span className="mt-0.5 block text-[12.5px] leading-5 text-koda-fg/55">
+                {atualizacao?.notes?.trim() ||
+                  'Há uma versão mais nova publicada no canal escolhido.'}
+              </span>
             </span>
-          </span>
-          {baixar ? (
-            <a
-              href={baixar}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="shrink-0 rounded-xl bg-koda-accent-strong px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-koda-accent-strong/85 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-            >
-              Baixar
-            </a>
+            {baixar && !baixando && !concluido ? (
+              <button
+                type="button"
+                onClick={baixarInstalador}
+                className="shrink-0 rounded-xl bg-koda-accent-strong px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-koda-accent-strong/85 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+              >
+                Baixar
+              </button>
+            ) : null}
+          </div>
+
+          {baixando ? (
+            <div className="mt-3.5 flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[12.5px] text-koda-fg/75">
+                <Loader2
+                  className="h-3.5 w-3.5 shrink-0 animate-spin text-koda-accent"
+                  strokeWidth={2}
+                />
+                Baixando o instalador…
+                <span className="ml-auto shrink-0 font-mono text-[11.5px] text-koda-fg/50">
+                  {total ? `${percentual}% · ${tamanhoCurto(total)}` : tamanhoCurto(download?.recebido ?? 0)}
+                </span>
+              </div>
+              <span className="h-1.5 w-full overflow-hidden rounded-full bg-koda-fg/10">
+                <span
+                  className={[
+                    'block h-full rounded-full bg-koda-accent-strong transition-[width] duration-300 ease-out',
+                    total ? '' : 'animate-pulse',
+                  ].join(' ')}
+                  style={{ width: `${percentual}%` }}
+                />
+              </span>
+              <p className="text-[11.5px] leading-4 text-koda-fg/40">
+                Direto para a pasta de downloads da máquina — sem sair do Koda.
+              </p>
+            </div>
+          ) : concluido ? (
+            <div className="mt-3.5 rounded-xl bg-koda-accent/10 px-3 py-2.5 ring-1 ring-koda-accent/25">
+              <p className="flex items-center gap-1.5 text-[12.5px] font-medium text-koda-fg">
+                <Check className="h-3.5 w-3.5 shrink-0 text-koda-accent" strokeWidth={2.4} />
+                Instalador salvo
+              </p>
+              <p
+                className="mt-1 truncate font-mono text-[11px] text-koda-fg/55"
+                title={download?.caminho ?? ''}
+              >
+                {download?.caminho ?? download?.arquivo ?? 'koda-setup.exe'}
+              </p>
+            </div>
+          ) : download?.estado === 'erro' ? (
+            <p className="mt-2 text-[12px] leading-4 text-red-400">{download.erro}</p>
           ) : null}
         </div>
       ) : null}
@@ -932,6 +1041,7 @@ export function SettingsScreen({
   backend,
   cloud = null,
   remoteModels = [],
+  modelosBloqueados = [],
   skills = [],
   mcps = [],
 }: {
@@ -960,6 +1070,11 @@ export function SettingsScreen({
   initialSection?: SettingsSection
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[]
+  /**
+   * Modelos que o painel tirou desta conta (desativados, ou desligados por exceção).
+   * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
+   */
+  modelosBloqueados?: readonly string[]
   /** Skills instaladas, lidas do backend (projeto + máquina). */
   skills?: ApiSkill[]
   /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
@@ -1113,7 +1228,7 @@ export function SettingsScreen({
                     </span>
                   </span>
                   <Menu
-                    options={modelMenu(remoteModels)}
+                    options={modelMenu(remoteModels, modelosBloqueados)}
                     value={model}
                     onSelect={onModelChange}
                     align="end"

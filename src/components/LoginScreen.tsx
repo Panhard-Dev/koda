@@ -50,7 +50,20 @@ const CAMPO = [
   'placeholder:text-koda-fg/30 focus:ring-2 focus:ring-koda-accent',
 ].join(' ')
 
-export function LoginScreen({ onEntrou }: { onEntrou: (conta: Conta) => void }) {
+export function LoginScreen({
+  onEntrou,
+  motivo = null,
+}: {
+  onEntrou: (conta: Conta) => void
+  /**
+   * Por que a sessão anterior acabou, na voz do painel.
+   *
+   * Existe porque o app agora **derruba a sessão** quando o painel recusa a conta (banida
+   * ou suspensa). Sem esta frase, quem foi barrado simplesmente apareceria na tela de login
+   * do nada — e a leitura natural seria "o app me expulsou", não "a conta está bloqueada".
+   */
+  motivo?: string | null
+}) {
   const [modo, setModo] = useState<Modo>('entrar')
   const [email, setEmail] = useState('')
   const [senha, setSenha] = useState('')
@@ -216,6 +229,15 @@ export function LoginScreen({ onEntrou }: { onEntrou: (conta: Conta) => void }) 
                 </button>
               </div>
             </Campo>
+
+            {motivo && !erro ? (
+              <p
+                role="status"
+                className="rounded-xl bg-amber-500/10 px-3 py-2 text-[12.5px] leading-4 text-amber-300 ring-1 ring-amber-500/20"
+              >
+                {motivo}
+              </p>
+            ) : null}
 
             {erro ? (
               <p

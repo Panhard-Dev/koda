@@ -89,9 +89,22 @@ const GRUPOS: { chave: string; label: string }[] = [
  * do host aparece no seletor sozinho, sem precisar mexer no frontend. Os ícones são os
  * mesmos da lista de emergência, para o menu não mudar de aparência conforme o backend
  * responda ou não.
+ *
+ * `bloqueados` é o recorte do painel: os slugs que ele cadastrou e depois tirou (modelo
+ * desativado, ou exceção individual desligada). Vale para as **duas** listas de propósito —
+ * a viva e a de emergência. Um modelo desativado que reaparecesse sempre que o host ficasse
+ * calado seria o mesmo defeito de antes, só mais difícil de flagrar.
  */
-export function modelMenu(items: RemoteModel[] = []): MenuOption[] {
-  if (items.length === 0) return MODEL_MENU
+export function modelMenu(items: RemoteModel[] = [], bloqueados: readonly string[] = []): MenuOption[] {
+  const liberado = (value: string) => !bloqueados.includes(value)
+
+  if (items.length === 0) {
+    if (bloqueados.length === 0) return MODEL_MENU
+    return MODEL_MENU.map((categoria) => ({
+      ...categoria,
+      options: (categoria.options ?? []).filter((opcao) => liberado(opcao.value)),
+    })).filter((categoria) => (categoria.options ?? []).length > 0)
+  }
 
   const opcao = (item: RemoteModel): MenuOption => ({
     value: item.value,
@@ -100,10 +113,11 @@ export function modelMenu(items: RemoteModel[] = []): MenuOption[] {
     icon: MODEL_ICON,
   })
 
+  const visiveis = items.filter((item) => liberado(item.value))
   const grupos: MenuOption[] = []
   const usados = new Set<string>()
   for (const grupo of GRUPOS) {
-    const meus = items.filter((item) => item.value.startsWith(`${grupo.chave}-`))
+    const meus = visiveis.filter((item) => item.value.startsWith(`${grupo.chave}-`))
     if (meus.length === 0) continue
     meus.forEach((item) => usados.add(item.value))
     grupos.push({
@@ -114,7 +128,7 @@ export function modelMenu(items: RemoteModel[] = []): MenuOption[] {
     })
   }
 
-  const outros = items.filter((item) => !usados.has(item.value))
+  const outros = visiveis.filter((item) => !usados.has(item.value))
   if (outros.length > 0) {
     grupos.push({
       value: 'categoria-outros',
