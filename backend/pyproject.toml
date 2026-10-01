@@ -10,4 +10,6 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "httpx>=0.27",
     "pydantic-settings>=2.5",
+    "python-multipart>=0.0.32",
+    "pypdf>=6.19.0",
 ]

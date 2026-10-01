@@ -122,8 +122,8 @@ const PROMPT = [
 ].join('\n')
 
 const ANEXOS = [
-  'log-do-build-completo-com-o-erro-que-apareceu-ontem-a-tarde.txt',
-  `${repetir('captura-de-tela-muito-longa-', 6)}.png`,
+  { nome: 'log-do-build-completo-com-o-erro-que-apareceu-ontem-a-tarde.txt' },
+  { nome: `${repetir('captura-de-tela-muito-longa-', 6)}.png` },
 ]
 
 const RESPOSTA = [

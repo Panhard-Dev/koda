@@ -12,6 +12,7 @@ import {
   Globe,
   Hand,
   Image as ImageIcon,
+  Loader2,
   Unlock,
   Mic,
   Paperclip,
@@ -55,7 +56,9 @@ const COR_DO_MODO: Record<ModoPermissao, string> = {
   auto: 'text-red-400',
   livre: 'text-red-500',
 }
+import { fraseDeFalha, removerAnexo, subirAnexo } from '../api/client'
 import type {
+  ApiAnexo,
   ApiProject,
   DecisaoPermissao,
   ModoPermissao,
@@ -64,7 +67,13 @@ import type {
 
 export type SendPayload = {
   text: string
-  attachments: string[]
+  /**
+   * Os anexos **já enviados** ao backend (cada um com o seu `id`).
+   *
+   * Não são nomes de arquivo: o conteúdo subiu no upload e vive no store do backend. O
+   * chat manda os ids, e a ferramenta `read_attachment` lê o conteúdo por eles.
+   */
+  attachments: ApiAnexo[]
   model: string
   reasoning: boolean
   web: boolean
@@ -186,6 +195,7 @@ export function Composer({
   model = MODELO_PADRAO,
   onModelChange,
   remoteModels = [],
+  modelosBloqueados = [],
   contextoPorModelo = {},
   contextoJanela = null,
 }: {
@@ -214,6 +224,11 @@ export function Composer({
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[]
   /**
+   * Modelos que o painel tirou desta conta (desativados, ou desligados por exceção).
+   * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
+   */
+  modelosBloqueados?: readonly string[]
+  /**
    * Contexto já usado, por modelo, em tokens de entrada (o `prompt_tokens` do último
    * passo da última resposta daquele modelo). Vazio = nada medido ainda.
    */
@@ -225,7 +240,11 @@ export function Composer({
   const [reasoning, setReasoning] = useState(true)
   const [web, setWeb] = useState(false)
   const [efforts, setEfforts] = useState<Record<string, Effort>>({})
-  const [attachments, setAttachments] = useState<string[]>([])
+  const [attachments, setAttachments] = useState<ApiAnexo[]>([])
+  /** Subindo anexo: a caixa espera, para ninguém mandar a mensagem sem o arquivo pronto. */
+  const [subindoAnexo, setSubindoAnexo] = useState(false)
+  /** O motivo pelo qual um anexo foi recusado (tipo, tamanho, backend fora do ar). */
+  const [erroAnexo, setErroAnexo] = useState<string | null>(null)
   const [listening, setListening] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -250,7 +269,8 @@ export function Composer({
     element.style.height = `${Math.min(element.scrollHeight, 192)}px`
   }, [message])
 
-  const canSend = !busy && (message.trim().length > 0 || attachments.length > 0)
+  const canSend =
+    !busy && !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
   const activeModel = findModel(model, remoteModels)
   const effort = effortDoModelo(efforts, model)
   const ativo = projects.find((item) => item.id === projectId) ?? null
@@ -363,12 +383,39 @@ export function Composer({
     setListening(true)
   }
 
-  const addFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const names = Array.from(event.target.files ?? []).map((file) => file.name)
-    if (names.length > 0) {
-      setAttachments((current) => Array.from(new Set([...current, ...names])))
-    }
+  /**
+   * Sobe os arquivos escolhidos e guarda o que o backend devolveu.
+   *
+   * O `File` inteiro vai no corpo (multipart) — antes daqui saía só o nome, e o conteúdo
+   * nunca chegava ao modelo. O upload é para o backend local, então é rápido; mesmo assim
+   * a caixa fica bloqueada enquanto sobe, para ninguém mandar a mensagem sem o anexo pronto.
+   */
+  const addFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const arquivos = Array.from(event.target.files ?? [])
     event.target.value = ''
+    if (arquivos.length === 0) return
+    setErroAnexo(null)
+    setSubindoAnexo(true)
+    try {
+      for (const arquivo of arquivos) {
+        const anexo = await subirAnexo(arquivo)
+        setAttachments((current) =>
+          current.some((item) => item.id === anexo.id) ? current : [...current, anexo],
+        )
+      }
+    } catch (falha) {
+      setErroAnexo(fraseDeFalha(falha))
+    } finally {
+      setSubindoAnexo(false)
+    }
+  }
+
+  /** Tira o anexo da caixa e do store — o arquivo não vai ser usado, não fica ocupando disco. */
+  const tirarAnexo = (anexo: ApiAnexo) => {
+    setAttachments((current) => current.filter((item) => item.id !== anexo.id))
+    void removerAnexo(anexo.id).catch(() => {
+      // O anexo já pode ter sido limpo no backend: a caixa já o tirou, que é o que importa.
+    })
   }
 
   const projectTriggerClass = [
@@ -396,27 +443,36 @@ export function Composer({
         ].join(' ')}
       >
       <div className={isChat ? '' : 'rounded-t-3xl bg-koda-input p-4 pb-3'}>
-        {attachments.length > 0 ? (
-          <ul className="mb-2 flex flex-wrap gap-1.5 px-1">
-            {attachments.map((name) => (
+        {attachments.length > 0 || subindoAnexo || erroAnexo ? (
+          <ul className="mb-2 flex flex-wrap items-center gap-1.5 px-1">
+            {attachments.map((anexo) => (
               <li
-                key={name}
+                key={anexo.id}
                 className="flex items-center gap-1.5 rounded-lg bg-koda-fg/6 py-1 pr-1.5 pl-2.5 text-[12px] text-koda-fg/75"
               >
                 <Paperclip className="h-3.5 w-3.5 text-koda-fg/45" strokeWidth={1.8} />
-                <span className="max-w-44 truncate">{name}</span>
+                <span className="max-w-44 truncate">{anexo.nome}</span>
                 <button
                   type="button"
-                  aria-label={`Remover ${name}`}
-                  onClick={() =>
-                    setAttachments((current) => current.filter((item) => item !== name))
-                  }
+                  aria-label={`Remover ${anexo.nome}`}
+                  onClick={() => tirarAnexo(anexo)}
                   className="flex h-4 w-4 items-center justify-center rounded text-koda-fg/45 transition-colors hover:bg-koda-fg/10 hover:text-koda-fg"
                 >
                   <X className="h-3 w-3" strokeWidth={2.2} />
                 </button>
               </li>
             ))}
+            {subindoAnexo ? (
+              <li className="flex items-center gap-1.5 rounded-lg bg-koda-fg/6 py-1 pr-2.5 pl-2.5 text-[12px] text-koda-fg/55">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.8} />
+                enviando…
+              </li>
+            ) : null}
+            {erroAnexo ? (
+              <li className="rounded-lg bg-red-500/10 px-2.5 py-1 text-[12px] text-red-300">
+                {erroAnexo}
+              </li>
+            ) : null}
           </ul>
         ) : null}
 
@@ -474,9 +530,15 @@ export function Composer({
           accept="image/*"
           multiple
           hidden
-          onChange={addFiles}
+          onChange={(event) => void addFiles(event)}
         />
-        <input ref={fileInputRef} type="file" multiple hidden onChange={addFiles} />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => void addFiles(event)}
+        />
 
         <div
           className={[
@@ -540,7 +602,7 @@ export function Composer({
 
           <div className="flex items-center gap-1">
             <Menu
-              options={comMedidor(modelMenu(remoteModels))}
+              options={comMedidor(modelMenu(remoteModels, modelosBloqueados))}
               value={model}
               onSelect={(value) => onModelChange?.(value)}
               align="end"

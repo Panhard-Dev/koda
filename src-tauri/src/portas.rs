@@ -29,6 +29,12 @@ pub enum Ocupante {
     Sobra(u32),
 }
 
+/// `pythonw.exe` é o mesmo runtime do `python.exe`, mas sem console.
+fn imagem_esperada(nome: &str, imagem: &str) -> bool {
+    nome.eq_ignore_ascii_case(imagem)
+        || (imagem.eq_ignore_ascii_case("python.exe") && nome.eq_ignore_ascii_case("pythonw.exe"))
+}
+
 /// Decide o que fazer com o que estiver na porta.
 ///
 /// `imagem` é o executável que aceitamos considerar nosso (`c-host.exe`, `python.exe`) e
@@ -45,7 +51,7 @@ pub fn dono_da_sobra(porta: u16, imagem: &str, assinatura: Option<&str>) -> Ocup
         return Ocupante::Alheio("não consegui descobrir o pid".to_string());
     };
     match sistema::nome_do_processo(pid) {
-        Some(nome) if nome.eq_ignore_ascii_case(imagem) => {}
+        Some(nome) if imagem_esperada(&nome, imagem) => {}
         Some(nome) => return Ocupante::Alheio(format!("outro programa: {nome} (pid {pid})")),
         None => return Ocupante::Alheio(format!("processo fora do alcance (pid {pid})")),
     }
@@ -247,6 +253,13 @@ Conexões ativas
         let linha = "\"python.exe\",\"7884\",\"Console\",\"1\",\"17.236 K\"\n";
         assert_eq!(nome_da_linha_do_tasklist(linha).as_deref(), Some("python.exe"));
         assert_eq!(nome_da_linha_do_tasklist("\"c-host.exe\",\"11296\",\"Console\",\"1\",\"22 K\"").as_deref(), Some("c-host.exe"));
+    }
+
+    #[test]
+    fn reconhece_pythonw_como_runtime_do_backend() {
+        assert!(imagem_esperada("pythonw.exe", "python.exe"));
+        assert!(imagem_esperada("PYTHON.EXE", "python.exe"));
+        assert!(!imagem_esperada("outro.exe", "python.exe"));
     }
 
     #[test]

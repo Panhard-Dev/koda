@@ -136,10 +136,11 @@ export async function perfil(c: ContextoApp) {
   const conta = await usuarios.buscarPorId(c.env.DB, ator.id);
   if (!conta) throw naoEncontrado('conta nao encontrada');
 
-  const [catalogo, avisos, naoLidas] = await Promise.all([
+  const [efetivos, avisos, naoLidas, painel] = await Promise.all([
     modelos.efetivosParaUsuario(c.env.DB, conta.id),
     notificacoes.listarPorUsuario(c.env.DB, conta.id, 20),
     notificacoes.contarNaoLidas(c.env.DB, conta.id),
+    modelos.catalogoDoPainel(c.env.DB, conta.id),
   ]);
 
   return c.json({
@@ -153,13 +154,18 @@ export async function perfil(c: ContextoApp) {
       criada_em: conta.created_at,
       ultimo_login: conta.last_login_at,
     },
-    modelos: catalogo.map((item) => ({
+    modelos: efetivos.map((item) => ({
       slug: item.slug,
       name: item.name,
       provider: item.provider,
       tem_excecao: item.tem_excecao === 1,
       habilitado: item.habilitado_usuario === 1,
     })),
+    // O catálogo como o painel o vê, e o que ele tirou desta conta. Vai junto com o perfil
+    // de propósito: o app já bate aqui para saber se a sessão está viva, e é nesta mesma
+    // resposta que ele descobre que um modelo deixou de valer — sem uma segunda ida à rede.
+    catalogo: painel.catalogo,
+    modelos_bloqueados: painel.bloqueados,
     avisos,
     avisos_nao_lidos: naoLidas,
   });

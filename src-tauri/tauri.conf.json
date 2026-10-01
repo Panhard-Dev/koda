@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Koda",
-  "version": "0.3.10",
+  "version": "0.4.3",
   "identifier": "app.koda.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run app:host",
     "frontendDist": "../dist"
   },
   "app": {
@@ -34,7 +34,7 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "../host/*": "host/",
+      "../host/c-host.exe": "host/c-host.exe",
       "runtime/backend/python": "backend/python",
       "runtime/backend/app": "backend/app"
     },

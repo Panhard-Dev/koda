@@ -517,22 +517,19 @@ meio —, mas nada depois dela roda. O que já tinha saído fica gravado no hist
 
 ### Busca na web
 
-O `web_search` usa **só o Bing**, e nada mais. Uma requisição para
-`https://www.bing.com/search`, as tags `<li class="b_algo">` lidas na mão e os 6 primeiros
-resultados formatados em título, URL e resumo. Sem chave de API, sem dependência nova e sem
-serviço intermediário — a função é `_busca_bing`, em `app/tools/ferramentas.py`.
+O `web_search` usa o RSS do Bing, sem chave de API nem dependência nova. Busca até 12
+resultados por consulta e, quando há palavras de pergunta, também consulta a versão enxuta;
+combina links distintos e devolve até 20. Em pesquisas amplas, o prompt pede ao agente que
+faça três buscas com formulações diferentes e leia páginas de pelo menos três domínios.
 
-Duas coisas que valem saber:
+Wikipedia, Wikimedia e projetos irmãos são excluídos com `-site:` e filtrados de novo após
+a busca. `url_reader` e `download_file` bloqueiam esses domínios tanto na URL inicial quanto
+em redirecionamentos, para o agente não abrir o endpoint ou baixar arquivos da Wikimedia.
+O bloqueio também se aplica ao `upload_file`.
 
-- **A URL de cada resultado vem embrulhada.** O Bing devolve
-  `bing.com/ck/a?u=a1<base64url>` no `href`; `_decodificar_url_bing` extrai a URL de
-  verdade. O payload é base64**url** (usa `-` e `_`), então a decodificação tem que ser
-  `urlsafe_b64decode` — com o `b64decode` comum a URL volta como o wrapper cru.
-- **Não existe plano B.** Se o Bing devolver uma página de bloqueio, a busca retorna
-  `(sem resultados)`; se a rede cair, retorna um `ERRO: o Bing não respondeu`. O modelo não
-  tem como distinguir bloqueio de busca vazia, e agora não há uma segunda fonte para
-  mascarar isso. Medido nesta máquina: 14 de 14 consultas voltaram com 6 resultados cada,
-  média de ~1,3 s — o `User-Agent` de bot do Koda não incomoda o Bing.
+Se o Bing não responder, a busca informa o erro. Não há uma segunda API de busca: o aumento
+de cobertura vem das consultas variadas ao Bing, sem introduzir os outros motores que já
+foram medidos com timeout ou bloqueio nesta rede.
 
 Isso é uma escolha, não um acidente: as **APIs públicas Bing Search v7 e Custom Search
 foram aposentadas em 11/08/2025**, e o substituto que a Microsoft indica (*Grounding with

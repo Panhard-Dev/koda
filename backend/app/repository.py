@@ -11,6 +11,7 @@ from typing import Any
 from .plan import ACCOUNT_DEFAULTS, PLAN
 from .schemas import (
     Account,
+    AttachmentInfo,
     Conversation,
     ConversationSummary,
     Message,
@@ -48,6 +49,26 @@ def _carregar_json(valor: object, padrao: list[Any]) -> list[Any]:
     return dados if isinstance(dados, list) else padrao
 
 
+def _carregar_anexos(valor: object) -> list[AttachmentInfo]:
+    """Lê os anexos gravados na mensagem, tolerando o formato antigo (lista de nomes).
+
+    Antes de o store existir, a coluna guardava só o nome do arquivo. Conversas gravadas
+    naquele formato continuam abrindo: o nome vira um anexo sem id, e a tela mostra o
+    nome como sempre mostrou.
+    """
+    itens = _carregar_json(valor, [])
+    anexos: list[AttachmentInfo] = []
+    for item in itens:
+        if isinstance(item, dict):
+            try:
+                anexos.append(AttachmentInfo.model_validate(item))
+            except ValueError:
+                continue
+        elif isinstance(item, str) and item.strip():
+            anexos.append(AttachmentInfo(id="", nome=item, tipo="", tamanho=0))
+    return anexos
+
+
 def _row_to_message(row: sqlite3.Row) -> Message:
     colunas = row.keys()
     passos = [
@@ -64,7 +85,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         id=row["id"],
         role=row["role"],
         text=row["text"],
-        attachments=[str(item) for item in _carregar_json(row["attachments"], [])],
+        attachments=_carregar_anexos(row["attachments"]),
         model=row["model"],
         elapsed_ms=row["elapsed_ms"],
         tokens=row["tokens"] if "tokens" in colunas else None,
@@ -110,7 +131,9 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
             conversation_id,
             message.role,
             message.text,
-            json.dumps(message.attachments, ensure_ascii=False),
+            json.dumps(
+                [anexo.model_dump() for anexo in message.attachments], ensure_ascii=False
+            ),
             message.model,
             message.elapsed_ms,
             message.tokens,

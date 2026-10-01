@@ -2,19 +2,22 @@
   "name": "koda",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.3.10",
+  "version": "0.4.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "verificar": "tsc -b --pretty false && oxlint && cd backend && .venv\\Scripts\\python.exe -m pytest tests/ -q",
+    "verificar": "tsc -b --pretty false && oxlint && cd backend && .venv\\Scripts\\python.exe executar-testes.py",
     "preview": "vite preview",
     "tauri": "tauri",
     "app": "tauri dev",
+    "app:host": "node scripts/verificar-host.mjs",
+    "app:bundle:host": "node scripts/verificar-bundle-host.mjs",
+    "app:launcher": "node scripts/criar-launcher-instalador.mjs",
     "app:runtime": "node scripts/gerar-runtime-backend.mjs",
-    "app:build": "npm run app:runtime && tauri build"
+    "app:build": "npm run app:host && npm run app:runtime && tauri build && npm run app:launcher && npm run app:bundle:host"
   },
   "dependencies": {
     "lucide-react": "^1.47.0",

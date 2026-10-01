@@ -161,11 +161,26 @@ export type ApiTodo = {
   atual: boolean
 }
 
+/**
+ * Um anexo da conversa, como o backend o devolve depois do upload.
+ *
+ * O conteúdo **não** vem aqui — ele fica no store do backend e só a ferramenta
+ * `read_attachment` o lê. O que a tela guarda é o `id` (que ela manda no chat), o nome
+ * (que ela mostra) e o tipo/tamanho.
+ */
+export type ApiAnexo = {
+  id: string
+  nome: string
+  /** Mime detectado no backend (não o que o navegador declarou). */
+  tipo: string
+  tamanho: number
+}
+
 export type ApiMessage = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  attachments: string[]
+  attachments: ApiAnexo[]
   model: string | null
   elapsed_ms: number | null
   /** Tokens que a resposta custou; `null` quando o provedor não conta. */
@@ -244,10 +259,39 @@ export type ChatPayload = {
   web: boolean
   /** Caminho completo da pasta escolhida no prompt box (projeto). */
   project_path: string | null
+  /** Ids dos anexos desta mensagem — o que veio de `subirAnexo`, nunca o nome do arquivo. */
   attachments: string[]
   conversation_id: string | null
   tz_offset_minutes: number
 }
+
+/**
+ * Sobe um arquivo anexado na conversa e devolve os metadados (o `id` é o que vale).
+ *
+ * Multipart de verdade: o `File` inteiro vai no corpo — é justamente o que faltava antes,
+ * quando o `Composer` mandava só o nome e o conteúdo nunca saía do navegador. O
+ * `content-type` **não** é fixado aqui de propósito: o navegador o monta com o boundary do
+ * multipart, e forçá-lo para `application/json` quebraria o upload.
+ */
+export async function subirAnexo(arquivo: File): Promise<ApiAnexo> {
+  await prepararAcesso()
+  const corpo = new FormData()
+  corpo.append('arquivo', arquivo, arquivo.name)
+  const response = await fetch(`${apiUrl}/api/attachments`, {
+    method: 'POST',
+    headers: { ...cabecalhoDeAcesso() },
+    body: corpo,
+  })
+  if (!response.ok) {
+    const { codigo, mensagem } = await motivoDaFalha(response)
+    throw new ApiError(response.status, '/api/attachments', codigo, mensagem)
+  }
+  return (await response.json()) as ApiAnexo
+}
+
+/** Tira um anexo do store (o usuário removeu o chip antes de enviar a mensagem). */
+export const removerAnexo = (id: string) =>
+  request<void>(`/api/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 /**
  * Falha de uma rota do backend.

@@ -29,7 +29,14 @@ import type { RemoteModel } from './models'
 import { PLAN, dayKey, monthStart, weekStart } from './plan'
 import { DEFAULT_APPEARANCE } from './appearance'
 import type { Appearance } from './appearance'
-import { contaGuardada, msAteRenovar, sair, sessaoAtual, sessaoParaOHost } from './api/cloud'
+import {
+  contaGuardada,
+  msAteRenovar,
+  sair,
+  sessaoAtual,
+  sessaoParaOHost,
+  verificarSessao,
+} from './api/cloud'
 import type { Conta } from './api/cloud'
 import {
   activateProject,
@@ -60,6 +67,7 @@ import {
 import type {
   ApiCloudUpdate,
   ApiConversationSummary,
+  ApiAnexo,
   ApiDownload,
   ApiMessage,
   ApiMcp,
@@ -79,7 +87,7 @@ type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  attachments?: string[]
+  attachments?: ApiAnexo[]
   /** Com qual modelo esta resposta foi feita — é a chave do medidor de contexto. */
   model?: string | null
   /** Tempo de processamento da resposta — vai para a ficha no fim dela. */
@@ -207,7 +215,7 @@ const DO_FONTE = import.meta.env.DEV
 /** Onde ver o que aconteceu, em cada mundo. */
 const COMO_DIAGNOSTICAR = DO_FONTE
   ? 'Suba a API com `cd backend && uv run uvicorn app.main:app --port 8787`.'
-  : 'Abra Ajustes › Servidor e clique em «Ver diagnóstico».'
+  : 'Abra Ajustes › Sobre e clique em «Ver diagnóstico».'
 
 const newId = () => crypto.randomUUID()
 
@@ -245,7 +253,9 @@ function buildReply(payload: SendPayload): string {
   ]
 
   if (payload.attachments.length > 0) {
-    blocks.push(`Anexos recebidos: ${payload.attachments.join(', ')}.`)
+    blocks.push(
+      `Anexos recebidos: ${payload.attachments.map((anexo) => anexo.nome).join(', ')}.`,
+    )
   }
 
 
@@ -414,24 +424,17 @@ function AvisoDeAtualizacao({
 }
 
 /**
- * A caixinha do canto: o aviso de que a conversa está no servidor local, em duas doses.
+ * A caixinha do canto: o aviso de que a conversa caiu para o servidor local.
  *
- * `reconectando` é o caso comum e não pede nada de ninguém — a própria tela está tentando de
- * novo, e o aviso só existe para a resposta que chegar agora não parecer a de verdade.
- * `morta` é o caso em que o painel recusou a sessão: aí sim a única saída é entrar de novo,
- * e o aviso diz isso com todas as letras em vez de mandar tentar de novo à toa.
+ * É o caso comum e não pede nada de ninguém — a própria tela está tentando de novo, e o
+ * aviso só existe para a resposta que chegar agora não parecer a de verdade.
+ *
+ * A versão anterior tinha um segundo modo, "sessão morta", com um botão de entrar de novo.
+ * Ele saiu: quando o painel recusa a conta, o app agora **fecha a porta na hora** — quem
+ * foi barrado volta para o login, com o motivo escrito lá. Manter este cartão para esse caso
+ * seria um caminho que nunca mais acontece, e um mecanismo parado se lê como se funcionasse.
  */
-function AvisoDaSessao({
-  estado,
-  motivo,
-  onEntrar,
-}: {
-  estado: 'reconectando' | 'morta'
-  motivo?: string | null
-  onEntrar: () => void
-}) {
-  const morta = estado === 'morta'
-
+function AvisoDaSessao() {
   return (
     <div className="msg-in fixed right-6 bottom-6 z-40" role="status">
       <div
@@ -447,45 +450,37 @@ function AvisoDaSessao({
         </span>
 
         <p className="mt-3 text-[13.5px] leading-5 font-semibold text-koda-fg">
-          {morta ? 'Sem os modelos da sua conta' : 'Reconectando ao serviço de modelos'}
+          Reconectando ao serviço de modelos
         </p>
         <p className="mt-1 text-[12.5px] leading-5 text-koda-fg/50">
-          {morta
-            ? // O que o painel disse manda: conta bloqueada e sessão vencida pedem coisas
-              // diferentes de quem está lendo.
-              motivo ||
-              'Esta sessão não vale mais para o serviço de modelos. Entre de novo para voltar aos modelos do Koda — com ferramentas.'
-            : 'Enquanto isso a resposta sai do servidor local: sem modelo de verdade e sem ferramentas. Tentando de novo sozinho.'}
+          Enquanto isso a resposta sai do servidor local: sem modelo de verdade e sem
+          ferramentas. Tentando de novo sozinho.
         </p>
 
-        {morta ? (
-          <div className="mt-3.5 flex flex-col gap-2">
-            <button
-              type="button"
-              onClick={onEntrar}
-              className="rounded-xl bg-koda-accent-strong px-3 py-2 text-[13px] font-medium text-white transition-colors duration-150 hover:bg-koda-accent-strong/85 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-            >
-              Entrar de novo
-            </button>
-          </div>
-        ) : (
-          <p className="mt-3 flex items-center gap-2 text-[12px] text-koda-fg/40">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-koda-accent" strokeWidth={1.8} />
-            tentando agora
-          </p>
-        )}
+        <p className="mt-3 flex items-center gap-2 text-[12px] text-koda-fg/40">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-koda-accent" strokeWidth={1.8} />
+          tentando agora
+        </p>
       </div>
     </div>
   )
 }
 
 /**
- * O que a janela mostra no instante entre abrir e saber se há sessão.
+ * O que a janela mostra enquanto a sessão é conferida ou o backend inicia.
  *
- * É curto de propósito: com a sessão guardada esta tela passa voando, e com o login
- * pendente quem chega em seguida é a tela de entrar. Vale mais do que um quadro branco.
+ * Com sessão e backend prontos esta tela passa voando. Se a API Python demorar, ela
+ * continua visível em vez de revelar um chat que ainda não funciona.
  */
-function Abertura() {
+function Abertura({
+  aguardandoBackend = false,
+  backendDemorando = false,
+  onTentarNovamente,
+}: {
+  aguardandoBackend?: boolean
+  backendDemorando?: boolean
+  onTentarNovamente?: () => void
+}) {
   return (
     <div className={CLASSE_DA_JANELA}>
       <div data-tauri-drag-region className="flex shrink-0 items-center p-5">
@@ -495,7 +490,24 @@ function Abertura() {
       </div>
       <div className="flex flex-1 flex-col items-center justify-center gap-4 pb-20">
         <KodaLogo className="h-10 w-auto" />
-        <p className="text-[13px] text-koda-fg/40">abrindo o Koda…</p>
+        <Loader2 className="h-4 w-4 animate-spin text-koda-accent" strokeWidth={1.8} />
+        <p className="text-[13px] text-koda-fg/55">
+          {aguardandoBackend ? 'iniciando o backend do Koda…' : 'abrindo o Koda…'}
+        </p>
+        {aguardandoBackend && backendDemorando && (
+          <div className="flex flex-col items-center gap-3">
+            <p className="max-w-sm text-center text-[12px] text-koda-fg/40">
+              O Python está demorando para iniciar. O Koda continuará tentando automaticamente.
+            </p>
+            <button
+              type="button"
+              onClick={onTentarNovamente}
+              className="rounded-lg px-3 py-1.5 text-[12px] text-koda-fg/65 transition-colors hover:bg-koda-fg/8 hover:text-koda-fg"
+            >
+              Tentar agora
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -528,13 +540,21 @@ const fromApiSummary = (conversation: ApiConversationSummary): Conversation => (
  * O app abre a janela **sem esperar** os serviços (ver `src-tauri/src/main.rs`), e o
  * Python empacotado leva segundos para atender a 8787. Primeiro de segundo em segundo,
  * pelo mesmo prazo que o lado Rust dá antes de chamar o backend de offline; depois mais
- * devagar, de cinco em cinco segundos, até completar perto de seis minutos — partida a
- * frio em máquina lenta não pode virar "modo offline" para sempre.
+ * devagar, de cinco em cinco segundos, sem desistir. Partida a frio em máquina lenta não
+ * deve revelar um chat sem API nem virar "modo offline" para sempre.
  */
 const ESPERA_BACKEND_MS = 1000
 const TENTATIVAS_BACKEND = 40
 const ESPERA_BACKEND_LENTA_MS = 5000
-const TENTATIVAS_BACKEND_LENTAS = 60
+
+/**
+ * De quanto em quanto tempo o app pergunta ao painel se a sessão ainda vale.
+ *
+ * Não é o intervalo da renovação: esta pergunta **não** gira a sessão, é só uma leitura.
+ * Por isso pode ser curta. Banir alguém no painel passa a ter efeito em menos de um minuto,
+ * em vez de esperar o token curto vencer (20 min) ou o host perguntar de novo (10 min).
+ */
+const SONDA_DE_SESSAO_MS = 45_000
 
 /** Uma rodada de leitura no servidor: estado, cotas, histórico, conta, skills e MCPs. */
 async function loadSession() {
@@ -559,11 +579,20 @@ function App() {
    * bem diferentes: rede caindo (que se resolve sozinho em segundos) e sessão recusada pelo
    * painel (que só um login novo resolve). Com um aviso só, a tela mandava a pessoa tentar
    * de novo até quando não havia o que tentar.
+   *
+   * Sessão recusada pelo painel **não** mora mais aqui: ela virou logout. Manter um estado
+   * para ela seria guardar um caso que a tela não mostra mais.
    */
   const [credencial, setCredencial] = useState<
-    'enviando' | 'pronto' | 'voltando' | 'morta' | 'sem-sessao'
+    'enviando' | 'pronto' | 'voltando' | 'sem-sessao'
   >('enviando')
-  /** Por que a sessão morreu, na voz do painel — é o texto que o aviso mostra. */
+  /**
+   * Por que a sessão acabou, na voz do painel.
+   *
+   * Quem mostra é a **tela de login**: quando o painel barra a conta, o app fecha a porta e
+   * leva esta frase junto. Sem ela, quem foi banido veria a tela de entrar aparecer do nada
+   * e leria isso como "o app me expulsou", não como "a conta está bloqueada".
+   */
   const [motivoDaSessao, setMotivoDaSessao] = useState<string | null>(null)
   /**
    * Relógio de 400 ms enquanto a resposta está em curso.
@@ -604,11 +633,23 @@ function App() {
   const [conta, setConta] = useState<Conta | null>(contaGuardada)
   /** `null` = backend fora do ar: as respostas voltam a ser simuladas no navegador. */
   const [backend, setBackend] = useState<Health | null>(null)
+  /** A primeira tela só libera o chat depois que o backend respondeu à carga inicial. */
+  const [backendInicializado, setBackendInicializado] = useState(false)
+  const [backendDemorando, setBackendDemorando] = useState(false)
+  const [tentativaManualBackend, setTentativaManualBackend] = useState(0)
   /** Cada clique em "tentar de novo" no aviso de sessão roda o envio na hora. */
   const [tentativaDeSessao, setTentativaDeSessao] = useState(0)
   const [remoteUsage, setRemoteUsage] = useState<ApiUsage | null>(null)
   /** Catálogo do provedor (o serviço lista os modelos dele em /v1/models). */
   const [remoteModels, setRemoteModels] = useState<RemoteModel[]>([])
+  /**
+   * Slugs que o **painel** tirou desta conta.
+   *
+   * Vazio = o painel não tirou nada (ou nunca foi consultado). Só entra aqui o que o painel
+   * cadastrou e desligou — um modelo que ele nem conhece continua valendo, porque o dono do
+   * catálogo é o host e o painel só tem o direito de riscar o que ele mesmo escreveu.
+   */
+  const [modelosBloqueados, setModelosBloqueados] = useState<string[]>([])
   /** Skills instaladas (o backend lê `.agents/skills` do projeto e da máquina). */
   const [skills, setSkills] = useState<ApiSkill[]>([])
   /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
@@ -665,13 +706,29 @@ function App() {
     return mapa
   }, [messages])
 
+  /**
+   * O catálogo que o seletor pode mostrar: o do host, menos o que o painel tirou.
+   *
+   * Este é o único ponto onde o painel entra na lista — daí em diante todo mundo (o menu do
+   * prompt, o de Ajustes, o rótulo do modelo em uso) enxerga o mesmo recorte. Sem isso o
+   * seletor continuaria oferecendo um modelo desativado, porque quem lista os modelos é o
+   * host, e o host não sabe de painel: ele publica o catálogo dele e pronto.
+   */
+  const modelosVisiveis = useMemo(
+    () =>
+      modelosBloqueados.length === 0
+        ? remoteModels
+        : remoteModels.filter((item) => !modelosBloqueados.includes(item.value)),
+    [remoteModels, modelosBloqueados],
+  )
+
   /** O teto que o backend aplica à conversa — o denominador do anel. */
   const janelaDoContexto = useMemo(() => {
     const doBackend = backend?.contexto_tokens ?? 0
     if (doBackend > 0) return doBackend
-    const doCatalogo = remoteModels.find((item) => item.janela)?.janela ?? null
+    const doCatalogo = modelosVisiveis.find((item) => item.janela)?.janela ?? null
     return doCatalogo ?? null
-  }, [backend, remoteModels])
+  }, [backend, modelosVisiveis])
 
   const todosAtivos = useMemo(() => {
     const ultima = [...messages].reverse().find((message) => message.role === 'assistant')
@@ -733,7 +790,7 @@ function App() {
     return new Set(
       messages
         .filter((message) =>
-          [message.text, ...(message.attachments ?? [])]
+          [message.text, ...(message.attachments ?? []).map((anexo) => anexo.nome)]
             .join(' ')
             .toLowerCase()
             .includes(normalizedQuery),
@@ -887,12 +944,17 @@ function App() {
       // delas é entregar o backend sem credencial.
       //
       // O painel recusou a renovação: a sessão morreu (expirou, foi revogada, a conta foi
-      // barrada). Não há o que tentar sozinho — quem resolve é entrar de novo, e é isso que
-      // o aviso da tela passa a dizer.
+      // barrada). Não há o que tentar sozinho — quem resolve é entrar de novo.
+      //
+      // E é **entrar de novo** mesmo: a porta fecha agora. Antes daqui saía só um aviso no
+      // canto e a pessoa continuava dentro do app, com a tela parecendo normal enquanto
+      // nada do que ela pedisse funcionava — o pior dos mundos, porque o aviso parecia um
+      // detalhe. A cópia local da sessão já foi apagada pela própria renovação; o que falta
+      // é a tela obedecer. O motivo vai junto para o login dizer por que a sessão acabou.
       if (credencial.estado === 'morta') {
-        setCredencial('morta')
         setMotivoDaSessao(credencial.motivo)
-        agendar(esperaDaTentativa(20))
+        setConta(null)
+        setSessao('fora')
         return
       }
 
@@ -980,6 +1042,115 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [semModeloDaConta, credencial])
 
+  /**
+   * A sonda: a sessão ainda vale, e o painel tirou algum modelo desta conta?
+   *
+   * As duas perguntas viajam juntas porque são a mesma consulta — o perfil da conta. Uma
+   * responde "a conta foi barrada?", a outra "o catálogo mudou?".
+   *
+   * Sem a sonda, o banimento só teria efeito quando alguma das contagens do app terminasse:
+   * a renovação é devida perto dos 12 minutos do token curto, e o efeito de sessão chega a
+   * esperar 10 minutos entre uma volta e outra. Nesse meio-tempo a pessoa ficaria dentro do
+   * app, com a tela normal, mesmo depois de o painel já ter recusado tudo dela.
+   *
+   * Ela é barata de propósito: uma leitura, sem girar a sessão (a rotação é de uso único) e
+   * sem escrever nada. E nunca derruba por dúvida: "sem rede" não é "sem sessão", então uma
+   * consulta que tropeçou não devolve ninguém para a tela de login.
+   */
+  useEffect(() => {
+    if (sessao !== 'dentro') return
+    let cancelado = false
+    let timer: number | undefined
+
+    const rodar = async () => {
+      // Uma volta de cada vez: o foco, a rede voltando e o relógio podem coincidir, e sem
+      // isto cada um agendaria a sua própria próxima volta.
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        timer = undefined
+      }
+
+      const resultado = await verificarSessao()
+      if (cancelado) return
+
+      if (resultado.estado === 'morta') {
+        // O painel barrou a conta. Não há o que insistir: a cópia local já foi apagada pela
+        // própria sonda. Aqui a tela obedece na hora — e leva o motivo junto, para o login
+        // não parecer que a pessoa foi expulsa sem explicação.
+        resetRun()
+        conversationIdRef.current = null
+        tokenEntregueRef.current = null
+        setMessages([])
+        setHistory([])
+        setBusy(false)
+        setInterrupted(false)
+        setQuery('')
+        setSearchOpen(false)
+        setRemoteUsage(null)
+        setView('chat')
+        setMotivoDaSessao(resultado.motivo)
+        setConta(null)
+        setSessao('fora')
+        return
+      }
+
+      // Só a resposta afirmativa mexe no catálogo: "sem rede" não é motivo para reabrir um
+      // modelo que o painel tirou.
+      if (resultado.estado === 'viva') setModelosBloqueados(resultado.bloqueados)
+
+      timer = window.setTimeout(() => void rodar(), SONDA_DE_SESSAO_MS)
+    }
+
+    // A máquina dorme, a janela fica escondida por horas, a rede cai e volta: em todos esses
+    // casos a resposta velha pode já estar errada. Voltar é motivo para perguntar na hora.
+    const aoVoltar = () => {
+      if (document.visibilityState === 'visible') void rodar()
+    }
+    const aoVoltarARede = () => void rodar()
+
+    void rodar()
+    document.addEventListener('visibilitychange', aoVoltar)
+    window.addEventListener('online', aoVoltarARede)
+    window.addEventListener('focus', aoVoltarARede)
+    return () => {
+      cancelado = true
+      document.removeEventListener('visibilitychange', aoVoltar)
+      window.removeEventListener('online', aoVoltarARede)
+      window.removeEventListener('focus', aoVoltarARede)
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [sessao])
+
+  /**
+   * Um modelo que o painel desativou sai do seletor na hora — e se era o escolhido, quem
+   * manda passa a ser o primeiro que sobrou.
+   *
+   * `model` é a escolha guardada, e ela pode apontar para um modelo que o painel tirou
+   * enquanto o app estava aberto. A conferência é feita **no render**, e não por um efeito
+   * corrigindo o estado depois: sem isso existiria um quadro com a tela apontando para um
+   * modelo que não está mais na lista — e é justamente nesse quadro que a mensagem seguinte
+   * sairia nele.
+   *
+   * Lista vazia (host calado) não invalida nada: sem catálogo não há o que conferir, e a
+   * escolha da pessoa continua valendo.
+   */
+  const modeloAtivo = useMemo(() => {
+    if (modelosVisiveis.length === 0) return model
+    if (modelosVisiveis.some((item) => item.value === model)) return model
+    return modelosVisiveis[0]?.value ?? model
+  }, [modelosVisiveis, model])
+
+  /**
+   * Um modelo bloqueado não volta pela porta de trás.
+   *
+   * "Rodar de novo" e "continuar" reaproveitam o pedido anterior inteiro — inclusive o
+   * modelo que foi usado naquela vez. Se o painel desativou esse modelo no meio, repetir o
+   * pedido seria um jeito de continuar usando exatamente o que ele tirou, sem passar pelo
+   * seletor. Aqui o modelo guardado só vale se ainda estiver de pé; se não, cai no ativo.
+   */
+  const modeloSeguro = (escolhido: string | null | undefined): string =>
+    escolhido && !modelosBloqueados.includes(escolhido) ? escolhido : modeloAtivo
+
   // Com a conta em pé, pergunta ao backend se ele está de pé. Se estiver, a sessão passa a
   // ser dele: histórico, cotas e conta vêm do SQLite.
   //
@@ -999,6 +1170,8 @@ function App() {
         const { info, usage, conversations, models, skills, mcps } = await loadSession()
         if (cancelled) return
         setBackend(info)
+        setBackendInicializado(true)
+        setBackendDemorando(false)
         setRemoteUsage(usage)
         setHistory(conversations.map(fromApiSummary))
         setRemoteModels(models)
@@ -1011,9 +1184,10 @@ function App() {
         if (cancelled) return
         setBackend(null)
         const proxima = tentativa + 1
+        if (proxima > TENTATIVAS_BACKEND) setBackendDemorando(true)
         if (proxima <= TENTATIVAS_BACKEND) {
           timer = window.setTimeout(() => void connect(proxima), ESPERA_BACKEND_MS)
-        } else if (proxima <= TENTATIVAS_BACKEND + TENTATIVAS_BACKEND_LENTAS) {
+        } else {
           timer = window.setTimeout(() => void connect(proxima), ESPERA_BACKEND_LENTA_MS)
         }
       }
@@ -1024,7 +1198,7 @@ function App() {
       cancelled = true
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [sessao, backend])
+  }, [sessao, backend, tentativaManualBackend])
 
   // Contagem local, usada quando não há backend (e como base do modo offline).
   const usageCounts = useMemo(() => {
@@ -1151,17 +1325,20 @@ function App() {
     setInterrupted(true)
   }
 
-  // O aviso de versão nova depende de alguém ter consultado a nuvem. Numa sessão nova,
-  // ninguém consultou: a tela pergunta ao abrir (e o backend guarda o resultado por 15
-  // minutos, então isso não vira consulta a cada render).
+  // O aviso de versão nova depende de alguém ter consultado a nuvem — e quem consulta é o
+  // backend local. A janela abre **sem esperar** o Python subir, então perguntar na
+  // montagem chegava antes de a porta atender: a chamada falhava, o `catch` engolia e o
+  // aviso nunca aparecia (o cartão de Ajustes só funcionava porque reconsulta ao abrir).
+  // Agora a pergunta sai quando o backend responde pela primeira vez — e de novo se ele
+  // cair e voltar. O backend guarda o resultado por 15 minutos, então não vira enxurrada.
   useEffect(() => {
-    if (!DENTRO_DO_TAURI) return
+    if (!DENTRO_DO_TAURI || !backend) return
     cloudUpdate()
       .then(setNuvemDetalhe)
       .catch(() => {
-        // Sem backend local, ou nuvem fora do ar: o health responde o que já sabe.
+        // Nuvem fora do ar: o health responde o que já sabe.
       })
-  }, [])
+  }, [backend])
 
   // Enquanto o backend baixa o instalador, a tela pergunta de tempos em tempos: é o que
   // faz a barra andar e o "salvo" aparecer sem o usuário ter de mexer em nada.
@@ -1358,6 +1535,9 @@ function App() {
     setSearchOpen(false)
     setRemoteUsage(null)
     setView('chat')
+    // Sair por vontade própria não tem motivo a explicar: a frase é do painel, e ela só
+    // deve aparecer quando foi o painel que barrou a conta.
+    setMotivoDaSessao(null)
     setConta(null)
     setSessao('fora')
     void sair()
@@ -1494,7 +1674,9 @@ function App() {
           effort: payload.effort,
           web: payload.web,
           project_path: payload.project_path,
-          attachments: payload.attachments,
+          // O chat manda os **ids** dos anexos (o conteúdo já subiu no upload); o backend
+          // resolve cada id no store e a `read_attachment` é quem lê o arquivo.
+          attachments: payload.attachments.map((anexo) => anexo.id),
           conversation_id: conversationIdRef.current,
           tz_offset_minutes: new Date().getTimezoneOffset(),
         },
@@ -1603,7 +1785,7 @@ function App() {
     void handleSend({
       text: pergunta.text,
       attachments: pergunta.attachments ?? [],
-      model: anterior?.model ?? model,
+      model: modeloSeguro(anterior?.model),
       reasoning: anterior?.reasoning ?? true,
       web: anterior?.web ?? false,
       effort: anterior?.effort ?? EFFORT_PADRAO,
@@ -1626,7 +1808,7 @@ function App() {
     void handleSend({
       text: 'continue',
       attachments: [],
-      model: anterior?.model ?? model,
+      model: modeloSeguro(anterior?.model),
       reasoning: anterior?.reasoning ?? true,
       web: anterior?.web ?? false,
       effort: anterior?.effort ?? EFFORT_PADRAO,
@@ -1641,9 +1823,25 @@ function App() {
   if (sessao === 'fora' || conta === null) {
     return (
       <LoginScreen
+        // O motivo só existe quando foi o app que fechou a porta (conta barrada no painel).
+        // Uma sessão que a pessoa encerrou sozinha não tem o que explicar.
+        motivo={motivoDaSessao}
         onEntrou={(nova) => {
+          setMotivoDaSessao(null)
           setConta(nova)
           setSessao('dentro')
+        }}
+      />
+    )
+  }
+  if (!backendInicializado) {
+    return (
+      <Abertura
+        aguardandoBackend
+        backendDemorando={backendDemorando}
+        onTentarNovamente={() => {
+          setBackendDemorando(false)
+          setTentativaManualBackend((atual) => atual + 1)
         }}
       />
     )
@@ -1717,7 +1915,7 @@ function App() {
             },
             // Os rótulos do catálogo da casa são strings; o tipo do menu aceita JSX
             // por causa dos contadores do submenu de skills.
-            model: findModel(model, remoteModels).label as string,
+            model: findModel(modeloAtivo, modelosVisiveis).label as string,
             project:
               projects.find((item) => item.id === projectId)?.nome ?? 'Nenhum projeto',
           }}
@@ -1735,9 +1933,10 @@ function App() {
           projects={projects}
           projectId={projectId}
           onProjectChange={trocarProjeto}
-          model={model}
+          model={modeloAtivo}
           onModelChange={setModel}
-          remoteModels={remoteModels}
+          remoteModels={modelosVisiveis}
+          modelosBloqueados={modelosBloqueados}
           skills={skills}
           mcps={mcps}
           mostrarRodape={mostrarRodape}
@@ -1924,20 +2123,17 @@ function App() {
               respondendoPermissao={respondendoPermissao}
               erroPermissao={erroPermissao}
               onDecidirPermissao={responderPermissao}
-              model={model}
+              model={modeloAtivo}
               onModelChange={setModel}
-              remoteModels={remoteModels}
+              remoteModels={modelosVisiveis}
+              modelosBloqueados={modelosBloqueados}
               contextoPorModelo={contextoPorModelo}
               contextoJanela={janelaDoContexto}
             />
             {/* A sessão que não vale mais vem antes de qualquer novidade: uma conversa
                 respondida pelo servidor local é mais urgente que uma versão nova. */}
             {semModeloDaConta ? (
-              <AvisoDaSessao
-                estado={credencial === 'morta' ? 'morta' : 'reconectando'}
-                motivo={motivoDaSessao}
-                onEntrar={handleSignOut}
-              />
+              <AvisoDaSessao />
             ) : versaoNova ? (
               <AvisoDeAtualizacao
                 versao={versaoNova}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Role = Literal["user", "assistant"]
 
@@ -29,10 +29,24 @@ provedor, com uma frase que dá para ler.
 """
 
 
+class AttachmentInfo(BaseModel):
+    """Um anexo da conversa, como a interface o conhece depois do upload.
+
+    O conteúdo **não** aparece aqui — quem lê é a ferramenta `read_attachment`, no backend.
+    O que trafega é o `id` (o que o chat devolve em `ChatRequest.attachments`), o nome, o
+    tipo e o tamanho. O caminho no store nunca sai do servidor.
+    """
+
+    id: str
+    nome: str
+    tipo: str
+    tamanho: int
+
+
 class ChatRequest(BaseModel):
     """O que o prompt box envia ao apertar Enter."""
 
-    text: str = Field(min_length=1, max_length=MAX_TEXTO)
+    text: str = Field(default="", max_length=MAX_TEXTO)
     model: str = "liz-4"
     reasoning: bool = True
     effort: Effort = "auto"
@@ -41,6 +55,12 @@ class ChatRequest(BaseModel):
     """Pasta completa do projeto escolhido no prompt box (o nome antigo não vai mais)."""
     project_path: str | None = None
     attachments: list[str] = Field(default_factory=list)
+    """Ids dos anexos desta mensagem (vindos de `POST /api/attachments`).
+
+    **Não** são nomes de arquivo: o conteúdo do anexo nunca passa por aqui. O backend
+    resolve cada id no store e a ferramenta `read_attachment` é quem lê o conteúdo. Mandar
+    o nome não serve — `read_file` só enxerga o workspace, e o anexo não está lá.
+    """
     conversation_id: str | None = None
     """Ferramentas nesta mensagem: `None` segue a configuração do servidor."""
     tools: bool | None = None
@@ -50,13 +70,18 @@ class ChatRequest(BaseModel):
     """Fuso do cliente em minutos (como `Date.getTimezoneOffset()`), para o uso contar no dia local."""
     tz_offset_minutes: int = 0
 
-    @field_validator("text")
-    @classmethod
-    def _strip(cls, value: str) -> str:
-        clean = value.strip()
-        if not clean:
+    @model_validator(mode="after")
+    def _exige_conteudo(self) -> ChatRequest:
+        """Limpa o texto e exige **alguma** coisa: ou uma mensagem, ou um anexo.
+
+        Texto vazio **com** anexo é válido de propósito: quem manda só o arquivo não está
+        mandando mensagem vazia. Antes, `text` tinha `min_length=1` e esse caso voltava
+        `422` — a interface liberava o envio e o backend recusava.
+        """
+        self.text = self.text.strip()
+        if not self.text and not self.attachments:
             raise ValueError("a mensagem não pode ficar vazia")
-        return clean
+        return self
 
 
 class ToolStepOut(BaseModel):
@@ -89,7 +114,13 @@ class Message(BaseModel):
     id: str
     role: Role
     text: str
-    attachments: list[str] = Field(default_factory=list)
+    attachments: list[AttachmentInfo] = Field(default_factory=list)
+    """Os anexos da mensagem, com os metadados que a tela mostra (nome, tipo, tamanho).
+
+    Guardar os metadados junto da mensagem é o que faz a bolha mostrar o **nome** ao
+    reabrir a conversa — e o que permite ao histórico remontar o bloco de anexos sem
+    consultar o store. O conteúdo continua só no store, alcançável por `read_attachment`.
+    """
     model: str | None = None
     elapsed_ms: int | None = None
     """

@@ -107,12 +107,11 @@ class Settings(BaseSettings):
     comando_olhada_s: int = 240
     """De quanto em quanto tempo um comando longo devolve a palavra ao modelo."""
 
-    max_tool_calls: int = 400
+    max_tool_calls: int = 0
     """Teto de **chamadas de ferramenta** numa tarefa (0 = sem teto).
 
-    Rede de segurança contra o modelo em laço: `max_steps` é 0 por decisão do projeto
-    (tarefa grande não cabe em número fixo de passos), mas uma tarefa que chama quatrocentas
-    ferramentas já não está progredindo — está girando.
+    Sem teto por padrão para não encerrar tarefas longas antes de terminar. Configure um
+    valor positivo somente quando quiser impor um limite explícito para uma instalação.
     """
     contexto_tokens: int = 1_000_000
     """Quanto a conversa pode ocupar, em tokens, antes de ser compactada em resumo.

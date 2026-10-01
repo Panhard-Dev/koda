@@ -209,6 +209,27 @@ export async function efetivosParaUsuario(db: D1Database, userId: string) {
   return catalogo.listarParaUsuario(db, userId);
 }
 
+/**
+ * O catálogo do painel do ponto de vista de uma conta: o que ele conhece e o que sobrou.
+ *
+ * `bloqueados` é a resposta que o app usa — os slugs que o painel conhece mas **não**
+ * liberou para esta conta, seja porque o modelo foi desativado globalmente, seja porque
+ * existe uma exceção individual desligada. Um slug fora daqui é um modelo que o painel
+ * nunca cadastrou; o app continua mostrando, porque quem manda no catálogo de verdade é o
+ * host, e o painel só tem o direito de **tirar** o que ele mesmo cadastrou.
+ */
+export async function catalogoDoPainel(db: D1Database, userId: string) {
+  const [todos, efetivos] = await Promise.all([
+    catalogo.catalogoSimples(db),
+    catalogo.listarParaUsuario(db, userId),
+  ]);
+  const liberados = new Set(efetivos.map((item) => item.slug));
+  return {
+    catalogo: todos.map((item) => ({ slug: item.slug, name: item.name, ativo: item.is_active === 1 })),
+    bloqueados: todos.filter((item) => !liberados.has(item.slug)).map((item) => item.slug),
+  };
+}
+
 export async function listaPublica(db: D1Database) {
   const modelos = await catalogo.publicos(db);
   return modelos.map((modelo) => ({

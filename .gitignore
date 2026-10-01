@@ -38,6 +38,16 @@ backend/.tmp-debug/
 backend/tests/
 backend/testar_*.py
 backend/probe_*.py
+backend/diagnostico_anexos.py
+
+# Rascunho e bancada local: nota solta, medição de disco, sandbox do pytest, relatório de
+# diagnóstico. Nada disso é código do produto.
+.agents/
+.tmp-*
+_sizes.txt
+LEIA EU/
+diagnostico-anexos/
+backend/pytest-of-*/
 
 # Sandbox do pytest (symlinks e projetos temporários) — não é código
 backend/.pytest-local/
