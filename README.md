@@ -111,6 +111,10 @@ npm run app          # janela em modo dev (usa o Vite com HMR)
 npm run app:build    # instalador NSIS + exe em src-tauri/target
 ```
 
+O instalador exige o binário proprietário `host/c-host.exe`, que não é versionado no Git.
+`npm run app:build` valida o arquivo antes de gerar o pacote e falha com o caminho esperado se
+ele não estiver presente; a etapa de release deve provisionar o binário oficial nessa pasta.
+
 Ao abrir, o app sobe as duas peças da conversa, nesta ordem, e **encerra as duas quando
 fecha**:
 

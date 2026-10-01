@@ -22,6 +22,7 @@ from .nuvem import ServicoNuvem
 from .providers import build_provider
 from .routers import (
     account,
+    attachments,
     chat,
     conversations,
     host,
@@ -162,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await call_next(request)
 
     app.include_router(chat.router, prefix="/api")
+    app.include_router(attachments.router, prefix="/api")
     app.include_router(models.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(usage.router, prefix="/api")

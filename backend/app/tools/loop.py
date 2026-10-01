@@ -472,6 +472,13 @@ ANUNCIO_LEITURA: tuple[tuple[re.Pattern[str], str], ...] = (
         "search_codebase",
     ),
     (
+        # Anexo é leitura por **id**, não por caminho: mandar "vou ler o anexo" para o
+        # `read_file` faz o modelo tentar abrir o nome como se fosse arquivo do projeto —
+        # e receber "arquivo não encontrado". O anexo tem ferramenta própria.
+        re.compile(r"\b(anexos?|attachments?)\b", re.I),
+        "read_attachment",
+    ),
+    (
         re.compile(
             r"\b(ler|leia|li|lidas?|read|abrir|abre|open|conferir|verificar|ver|revisar|"
             r"analisar|checar|faltam?)\b",
@@ -511,6 +518,7 @@ def funcao_do_anuncio(texto: str) -> str | None:
 FORCAVEIS = frozenset(
     {
         "read_file",
+        "read_attachment",
         "list_dir",
         "search_files",
         "search_codebase",
@@ -560,6 +568,7 @@ def escolha_forcada(texto: str, tentativa: int) -> str | dict[str, Any]:
 #: `git_status` seguinte devolvia o estado velho.
 SO_LEITURA = (
     "read_file",
+    "read_attachment",
     "list_dir",
     "search_files",
     "search_codebase",
@@ -1052,6 +1061,7 @@ async def executar(
     orcamento: int = contexto.ORCAMENTO_PADRAO,
     dono: str = "",
     max_tool_calls: int = 0,
+    anexos: Any = None,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -1643,6 +1653,7 @@ async def executar(
                         negadas,
                         acesso_livre=liberado,
                         dono=dono,
+                        anexos=anexos,
                     )
                 )
                 if chamada.name in SO_LEITURA:

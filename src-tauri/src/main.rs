@@ -209,21 +209,45 @@ fn liberar_porta(porta: u16, imagem: &str, assinatura: Option<&str>) -> bool {
 fn achar_host(app: &AppHandle) -> Option<PathBuf> {
     let mut candidatos: Vec<PathBuf> = Vec::new();
 
-    // 1. Empacotado: recurso `host/` dentro do diretório de recursos do app.
+    // No NSIS, Tauri instala os recursos ao lado do executável (o backend é encontrado
+    // nesse mesmo diretório). Em alguns layouts de atualização os recursos ficam sob
+    // `resources/`; aceitar os dois evita deixar o app sem modelos só por um nível de
+    // diferença no diretório-base.
     if let Ok(recursos) = app.path().resource_dir() {
         candidatos.push(recursos.join("host").join("c-host.exe"));
+        candidatos.push(recursos.join("resources").join("host").join("c-host.exe"));
+        // Compatibilidade com builds que mapearam `host/*` diretamente na raiz.
+        candidatos.push(recursos.join("c-host.exe"));
     }
-    // 2. Dev: a pasta `host/` do projeto, subindo a partir de onde o app está.
     if let Ok(cwd) = std::env::current_dir() {
         candidatos.push(achar_subindo(&cwd, "host/c-host.exe").unwrap_or_default());
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(pasta) = exe.parent() {
+            candidatos.push(pasta.join("host").join("c-host.exe"));
+            candidatos.push(pasta.join("resources").join("host").join("c-host.exe"));
             candidatos.push(achar_subindo(pasta, "host/c-host.exe").unwrap_or_default());
         }
     }
 
-    candidatos.into_iter().find(|caminho| caminho.is_file())
+    // Elimina caminhos repetidos e registra o que foi procurado: em instalações
+    // distribuídas, isto diferencia erro de layout de arquivo removido/quarentenado.
+    candidatos.sort();
+    candidatos.dedup();
+    if let Some(host) = candidatos.iter().find(|caminho| caminho.is_file()) {
+        log(&format!("host encontrado: {}", host.display()));
+        return Some(host.clone());
+    }
+    log(&format!(
+        "c-host.exe ausente; caminhos verificados: {}",
+        candidatos
+            .iter()
+            .filter(|caminho| !caminho.as_os_str().is_empty())
+            .map(|caminho| caminho.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    None
 }
 
 /// Sobe o host. `false` = a porta não respondeu (o vigia tenta de novo).
@@ -243,7 +267,7 @@ fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
     servicos.cuidar_de(Papel::Host);
 
     let Some(host) = achar_host(app) else {
-        log("host (c-host.exe) não encontrado — sem serviço de modelos");
+        log("host (c-host.exe) não encontrado — confira a quarentena do antivírus ou repare/reinstale o Koda");
         return false;
     };
     log(&format!("iniciando host: {}", host.display()));

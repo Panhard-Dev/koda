@@ -21,6 +21,21 @@
   ; No painel de detalhes, para quem instala em silêncio e para o log do instalador.
   DetailPrint "Runtime do serviço local instalado: Python 3.13 + dependências (nada a instalar à parte)."
 
+  ; Os modelos oficiais dependem deste binário proprietário. O instalador já o empacota
+  ; como recurso; confira o arquivo instalado para detectar remoção por antivírus ou pacote
+  ; incompleto ainda durante a instalação, em vez de deixar o usuário descobrir no chat.
+  IfFileExists "$INSTDIR\host\c-host.exe" koda_host_presente
+  DetailPrint "AVISO: c-host.exe não está em $INSTDIR\host\c-host.exe."
+  IfSilent koda_aviso_host_fim
+  MessageBox MB_OK|MB_ICONEXCLAMATION \
+    "O serviço de modelos não foi encontrado em $INSTDIR\host\c-host.exe.$\r$\n\
+    O Koda ficará sem os modelos oficiais. Verifique se o antivírus colocou c-host.exe em quarentena e reinstale o Koda depois de restaurá-lo."
+  Goto koda_aviso_host_fim
+
+  koda_host_presente:
+    DetailPrint "Serviço de modelos instalado: host\c-host.exe."
+  koda_aviso_host_fim:
+
   ; Caixa de aviso: só quando alguém está olhando a tela (instalação silenciosa não para).
   IfSilent koda_aviso_python_fim
 

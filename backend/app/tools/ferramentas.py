@@ -424,6 +424,11 @@ SINONIMOS: dict[str, str] = {
     "arquivo": "caminho",
     "folder": "caminho",
     "directory": "caminho",
+    # Anexo é lido por `id` — o modelo às vezes escreve o nome do campo por extenso.
+    "attachment_id": "id",
+    "attachment": "id",
+    "anexo": "id",
+    "anexo_id": "id",
     "content": "conteudo",
     "contents": "conteudo",
     "text": "conteudo",
@@ -630,6 +635,26 @@ DEFINICOES: list[dict[str, Any]] = [
             },
         },
         ["caminho"],
+    ),
+    _def(
+        "read_attachment",
+        "Lê o conteúdo de um arquivo que o usuário **anexou nesta conversa**. O anexo NÃO "
+        "está na pasta de trabalho: passe o `id` que vem no bloco «[anexos desta mensagem]». "
+        "Não passe o nome nem um caminho — `read_file` não acha o anexo, e o nome não é "
+        "caminho. Devolve o texto para texto/código e para pdf; para imagem, devolve os "
+        "metadados (não há texto a ler).",
+        {
+            "id": {
+                "type": "string",
+                "description": "o id do anexo, exatamente como veio no bloco de anexos da mensagem",
+            },
+            "inicio": {"type": "integer", "description": "linha inicial, 1 = primeira (padrão 1)"},
+            "limite": {
+                "type": "integer",
+                "description": "quantas linhas ler (padrão: o anexo inteiro)",
+            },
+        },
+        ["id"],
     ),
     _def(
         "write_file",
@@ -1127,6 +1152,84 @@ def _ler_trecho(
             if not recorte and acumulado > teto:
                 excedeu = True
     return guardadas, total, excedeu
+
+
+def _texto_do_pdf(rota: Path) -> str | None:
+    """Extrai o texto de um PDF. `None` quando não dá (escaneado, corrompido, sem pypdf)."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:  # pragma: no cover — pypdf é dependência declarada
+        return None
+    try:
+        leitor = PdfReader(str(rota))
+        paginas = [(pagina.extract_text() or "").strip() for pagina in leitor.pages]
+    except Exception:
+        # PDF quebrado, criptografado ou fora do que o pypdf entende: não é erro do agente,
+        # é um anexo que não dá para ler como texto. Quem responde é `_ler_anexo`.
+        return None
+    texto = "\n\n".join(pagina for pagina in paginas if pagina)
+    return texto or None
+
+
+def _ler_anexo(anexo: Any, inicio: int, limite: int) -> str:
+    """O conteúdo do anexo, do jeito que o modelo precisa.
+
+    Texto e código saem crus, com a mesma faixa de linhas do `read_file`. PDF sai com o
+    texto extraído. Imagem **não** vira bytes — bytes de imagem não ajudam um modelo de
+    texto; o que volta são os metadados.
+    """
+    if anexo.imagem:
+        return (
+            f"[anexo de imagem] {anexo.nome} · {anexo.mime} · {anexo.tamanho} bytes · "
+            f"id {anexo.id}\n"
+            "O conteúdo é uma imagem — não há texto para ler aqui."
+        )
+    if not anexo.caminho.exists():
+        return f"ERRO: o conteúdo do anexo {anexo.nome} não está mais no store"
+
+    if anexo.mime == "application/pdf":
+        texto = _texto_do_pdf(anexo.caminho)
+        if texto is None:
+            return (
+                f"[anexo pdf] {anexo.nome} · {anexo.tamanho} bytes · id {anexo.id}\n"
+                "Não consegui extrair texto deste PDF (pode ser digitalizado/escaneado, "
+                "sem camada de texto)."
+            )
+        return _limitar(texto)
+
+    if not anexo.texto:
+        return f"[anexo {anexo.mime}] {anexo.nome} · {anexo.tamanho} bytes · id {anexo.id}"
+
+    pediu_recorte = inicio > 1 or limite > 0
+    try:
+        guardadas, total, excedeu = _ler_trecho(anexo.caminho, inicio, limite, pediu_recorte)
+    except FileNotFoundError:
+        return f"ERRO: o conteúdo do anexo {anexo.nome} não está mais no store"
+    except PermissionError:
+        return f"ERRO: sem permissão para ler o anexo {anexo.nome}"
+    except OSError as exc:
+        return f"ERRO ao ler o anexo {anexo.nome}: {exc}"
+    if not any(linha.strip() for linha in guardadas):
+        return f"(o anexo {anexo.nome} está vazio)"
+    if pediu_recorte:
+        if inicio > total:
+            return f"ERRO: {anexo.nome} tem {total} linha(s) — `inicio={inicio}` passa do fim"
+        fim = inicio + len(guardadas) - 1
+        recorte = "\n".join(linha.rstrip("\r\n") for linha in guardadas)
+        aviso = ""
+        if fim < total:
+            aviso = (
+                f"\n...[faltam as linhas {fim + 1}-{total}: leia com inicio={fim + 1} se "
+                "precisar do resto]"
+            )
+        return _limitar(f"({anexo.nome}: linhas {inicio}-{fim} de {total})\n{recorte}{aviso}")
+    texto = "".join(guardadas)
+    if excedeu:
+        return _limitar(texto) + (
+            "\n...[anexo maior que o teto de leitura — use `inicio`/`limite` para ler o "
+            "resto por faixa]"
+        )
+    return _limitar(texto)
 
 
 def _escrever_atomico(rota: Path, texto: str) -> None:
@@ -2935,11 +3038,17 @@ def executar(
     *,
     acesso_livre: bool = False,
     dono: str = "",
+    anexos: Any = None,
 ) -> str:
     """Roda uma ferramenta e devolve o texto que volta para o modelo.
 
     `dono` é o id da tarefa que chamou: vai junto do processo que o `shell` começar, para o
     botão Parar conseguir derrubar só o que é daquela conversa.
+
+    `anexos` é o store dos anexos da conversa (`app.anexos.AnexoStore`). Só a
+    `read_attachment` usa — é por ele que o conteúdo de um anexo chega ao modelo, sem
+    passar pelo workspace. Sem store, a ferramenta responde que os anexos não estão
+    disponíveis, em vez de fingir que leu.
     """
     argumentos = _sinonimos(argumentos or {})
     nome = canonico(nome)
@@ -3012,6 +3121,28 @@ def executar(
                 workspace,
                 env={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
             )
+
+    if nome == "read_attachment":
+        # O anexo da conversa vive no store, não no workspace — a leitura é por id, e o
+        # conteúdo nunca é copiado para a pasta do projeto. `read_file` continua sendo o
+        # único caminho para o disco do projeto; esta ferramenta não aceita caminho.
+        if anexos is None:
+            return (
+                "ERRO: o store de anexos não está disponível nesta execução — "
+                "não dá para ler anexo agora."
+            )
+        anexo_id = str(argumentos.get("id", "") or "").strip()
+        if not anexo_id:
+            return (
+                "ERRO: informe o `id` do anexo (o que aparece no bloco «[anexos desta "
+                "mensagem]»). O nome do arquivo não serve: ele não é caminho nem id."
+            )
+        anexo = anexos.buscar(anexo_id)
+        if anexo is None:
+            return f"ERRO: anexo não encontrado: {anexo_id}"
+        inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
+        limite = _inteiro(argumentos.get("limite"), 0)
+        return _ler_anexo(anexo, inicio, limite)
 
     if nome == "read_file":
         rota = _resolver(workspace, str(argumentos.get("caminho", "")))

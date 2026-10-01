@@ -97,7 +97,13 @@ def system_prompt(options: ChatOptions) -> str:
     if options.resumo:
         parts.append(options.resumo)
     if options.attachments:
-        parts.append("O usuário anexou: " + ", ".join(options.attachments) + ".")
+        parts.append(
+            "Nesta conversa há anexos do usuário: "
+            + ", ".join(options.attachments)
+            + ". O conteúdo deles NÃO está na pasta de trabalho: para ler, use a ferramenta "
+            "`read_attachment` com o id que aparece no bloco «[anexos desta mensagem]». "
+            "Não tente abrir o anexo com `read_file` pelo nome — ele não está no workspace."
+        )
     # Quem está do outro lado. Sem isto o assistente responde "não tenho acesso aos dados
     # da sua conta" — tecnicamente verdade, e uma péssima primeira impressão para quem
     # acabou de entrar. O e-mail é o da conta no painel, e vai só para o provedor da

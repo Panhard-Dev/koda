@@ -73,6 +73,23 @@ CREATE TABLE IF NOT EXISTS approval_rules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_approval_rules_kind ON approval_rules(kind, scope);
+
+-- Anexos da conversa. O conteúdo **não** mora aqui: fica no store próprio (uma pasta ao
+-- lado do banco, fora do workspace). Esta tabela é só o índice — id, nome e o caminho no
+-- store. É por `id` que a ferramenta `read_attachment` alcança o arquivo; `read_file`
+-- continua preso à pasta de trabalho.
+CREATE TABLE IF NOT EXISTS attachments (
+  id          TEXT PRIMARY KEY,
+  nome        TEXT NOT NULL,
+  nome_seguro TEXT NOT NULL,
+  caminho     TEXT NOT NULL,
+  mime        TEXT NOT NULL,
+  tamanho     INTEGER NOT NULL,
+  sha256      TEXT NOT NULL,
+  criado_em   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_criado ON attachments(criado_em);
 """
 
 

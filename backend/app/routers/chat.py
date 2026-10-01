@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pathlib import Path
 
-from .. import approvals, contexto, host_auth, projects
+from .. import anexos, approvals, contexto, host_auth, projects
 from ..config import Settings
 from ..db import Database
 from ..deps import call, database, provider
@@ -26,7 +26,15 @@ from ..identidade import remover_intro
 from ..providers import ChatOptions, ChatTurn, ProviderError, system_prompt
 from ..repository import append_message, ensure_conversation, get_conversation, new_id
 from ..repository import usage as usage_for
-from ..schemas import ApprovalDecision, ChatRequest, Message, TodoItem, ToolStepOut, sse
+from ..schemas import (
+    ApprovalDecision,
+    AttachmentInfo,
+    ChatRequest,
+    Message,
+    TodoItem,
+    ToolStepOut,
+    sse,
+)
 from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas
@@ -50,6 +58,11 @@ CANCELAMENTO_MAX_S = 5.0
 def now_ms() -> int:
     """Epoch em milissegundos — mesma unidade que o front usa para `at`."""
     return int(time.time() * 1000)
+
+
+def _store_de_anexos(request: Request) -> anexos.AnexoStore:
+    """O store dos anexos desta execução — de onde a `read_attachment` lê o conteúdo."""
+    return anexos.AnexoStore(request.app.state.settings)
 
 
 @router.post("/chat/approval", tags=["chat"])
@@ -107,7 +120,9 @@ async def _texto(
         return
 
     started = time.perf_counter()
-    conversation_id, turns = await call(_prepare, db, payload, now_ms())
+    store = _store_de_anexos(request)
+    anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
+    conversation_id, turns = await call(_prepare, db, store, payload, now_ms())
     resumo, turns, compactados = contexto.compactar_turnos(
         turns, request.app.state.settings.contexto_tokens
     )
@@ -133,7 +148,12 @@ async def _texto(
         )
         return
 
-    options = _options(payload, request.app.state.settings.assistente, resumo)
+    options = _options(
+        payload,
+        request.app.state.settings.assistente,
+        resumo,
+        [item.nome for item in anexos_do_pedido],
+    )
     # Com qual modelo o provedor realmente responde (o seletor manda o nome da interface).
     modelo = engine.resolve_model(payload.model) if hasattr(engine, "resolve_model") else options.model
 
@@ -204,7 +224,9 @@ async def _agente(
     engine = provider(request)
 
     started = time.perf_counter()
-    conversation_id, turns = await call(_prepare, db, payload, now_ms())
+    store = _store_de_anexos(request)
+    anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
+    conversation_id, turns = await call(_prepare, db, store, payload, now_ms())
     # Conversa longa: o que é antigo vira resumo no prompt de sistema, em vez de sair do
     # pedido inteiro. Sem isso, uma conversa de projeto grande estoura o contexto e a
     # tarefa morre no meio, com erro do provedor que nem parece ter a ver com o trabalho.
@@ -223,7 +245,9 @@ async def _agente(
     # Skills ligadas do projeto entram no prompt: o agente fica sabendo que elas
     # existem e lê o SKILL.md com read_file quando a tarefa combina.
     skills_prompt = indice_para_agente(settings)
-    instrucoes_base = _options(payload, settings.assistente, resumo)
+    instrucoes_base = _options(
+        payload, settings.assistente, resumo, [item.nome for item in anexos_do_pedido]
+    )
     mensagens: list[dict[str, object]] = [
         {
             "role": "system",
@@ -292,6 +316,7 @@ async def _agente(
                 orcamento=settings.contexto_tokens,
                 dono=dono_da_tarefa,
                 max_tool_calls=settings.max_tool_calls,
+                anexos=store,
             )
         finally:
             await fim.put(None)
@@ -483,14 +508,24 @@ def _workspace(db: Database, caminho: str | None, padrao: Path) -> Path:
 # --- funções que tocam o SQLite, sempre chamadas via `call` (thread) --------
 
 
-def _options(payload: ChatRequest, assistente: str, resumo: str = "") -> ChatOptions:
+def _options(
+    payload: ChatRequest,
+    assistente: str,
+    resumo: str = "",
+    anexos: list[str] | None = None,
+) -> ChatOptions:
+    """As opções do provedor. `anexos` são os **nomes** dos anexos já resolvidos no store.
+
+    O id do anexo não entra aqui: quem carrega o id (para o `read_attachment`) é o bloco de
+    anexos da mensagem do usuário. O prompt de sistema só precisa saber que há anexos.
+    """
     return ChatOptions(
         model=payload.model,
         resumo=resumo,
         reasoning=payload.reasoning,
         web=payload.web,
         project=payload.project or None,
-        attachments=payload.attachments,
+        attachments=anexos if anexos is not None else [],
         assistente=assistente,
         # Quem está logado, quando a tela já informou a sessão. Vem da memória do processo
         # (nenhuma conta é gravada), e some ao sair.
@@ -505,10 +540,19 @@ def _effort(payload: ChatRequest) -> str | None:
 
 
 def _prepare(
-    db: Database, payload: ChatRequest, at_ms: int
+    db: Database, store: anexos.AnexoStore, payload: ChatRequest, at_ms: int
 ) -> tuple[str, list[ChatTurn]]:
+    """Grava a mensagem do usuário e monta o histórico que vai ao provedor.
+
+    Os ids dos anexos são resolvidos no store **uma vez**, aqui: o que fica gravado na
+    mensagem são os metadados (nome, tipo, tamanho), para a bolha mostrar o nome ao reabrir
+    a conversa. O `text` pode vir vazio quando a mensagem é só anexo — aí o título nasce do
+    nome do primeiro anexo, para a lista não mostrar "Nova conversa" para sempre.
+    """
+    do_pedido = store.buscar_varios(payload.attachments)
+    semente = payload.text or (do_pedido[0].nome if do_pedido else "")
     with db.connect() as conn:
-        conversation_id = ensure_conversation(conn, payload.conversation_id, payload.text, at_ms)
+        conversation_id = ensure_conversation(conn, payload.conversation_id, semente, at_ms)
         append_message(
             conn,
             conversation_id,
@@ -516,7 +560,12 @@ def _prepare(
                 id=new_id(),
                 role="user",
                 text=payload.text,
-                attachments=payload.attachments,
+                attachments=[
+                    AttachmentInfo(
+                        id=item.id, nome=item.nome, tipo=item.mime, tamanho=item.tamanho
+                    )
+                    for item in do_pedido
+                ],
                 model=payload.model,
                 at=at_ms,
             ),
@@ -527,20 +576,50 @@ def _prepare(
     return conversation_id, turns
 
 
+def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo]) -> str:
+    """Os metadados dos anexos desta mensagem, como o modelo precisa vê-los.
+
+    Vai junto do turno do usuário (e não no prompt de sistema) porque anexo é **desta
+    mensagem** — e é aqui que o `id` aparece para a `read_attachment`. Anexo sem id (o
+    formato antigo, gravado antes do store) só aparece pelo nome: não há o que ler.
+    """
+    if not anexos_da_mensagem:
+        return ""
+    linhas = ["[anexos desta mensagem — o conteúdo NÃO está na pasta de trabalho]"]
+    for item in anexos_da_mensagem:
+        if item.id:
+            linhas.append(f"- {item.nome} ({item.tipo}, {item.tamanho} bytes) · id: {item.id}")
+        else:
+            linhas.append(f"- {item.nome} (anexo antigo, sem conteúdo guardado)")
+    linhas.append(
+        "Para ler o conteúdo, use `read_attachment` com o id acima. Não use `read_file` "
+        "com o nome do anexo: ele não está no workspace."
+    )
+    return "\n".join(linhas)
+
+
 def _turns(mensagens: list[Message]) -> list[ChatTurn]:
     """Histórico para o provedor, sem as apresentações que ficaram gravadas.
 
     O modelo aprende pelo próprio histórico: uma resposta antiga começando com "oii, eu
     sou a Liz…" faz ele repetir a apresentação em todas as mensagens seguintes. Tirar
     isso do que é reenviado quebra a repetição.
+
+    Anexo da conversa entra no turno do usuário como um bloco de metadados (nome, tipo,
+    tamanho e **id**) — é o que diz ao modelo que o arquivo existe e como lê-lo. Sem isso
+    ele só teria o nome no prompt de sistema e tentaria `read_file`, que não acha o anexo.
     """
     turns: list[ChatTurn] = []
     for item in mensagens:
         texto = remover_intro(item.text) if item.role == "assistant" else item.text
-        if not texto.strip():
+        bloco = _bloco_de_anexos(item.attachments) if item.role == "user" else ""
+        corpo = texto.strip()
+        if bloco:
+            corpo = f"{corpo}\n\n{bloco}" if corpo else bloco
+        if not corpo:
             # Mensagem que era só apresentação: melhor sair do histórico do que ir vazia.
             continue
-        turns.append(ChatTurn(role=item.role, text=texto))
+        turns.append(ChatTurn(role=item.role, text=corpo))
     return turns
 
 

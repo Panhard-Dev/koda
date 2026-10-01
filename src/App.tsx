@@ -67,6 +67,7 @@ import {
 import type {
   ApiCloudUpdate,
   ApiConversationSummary,
+  ApiAnexo,
   ApiDownload,
   ApiMessage,
   ApiMcp,
@@ -86,7 +87,7 @@ type Message = {
   id: string
   role: 'user' | 'assistant'
   text: string
-  attachments?: string[]
+  attachments?: ApiAnexo[]
   /** Com qual modelo esta resposta foi feita — é a chave do medidor de contexto. */
   model?: string | null
   /** Tempo de processamento da resposta — vai para a ficha no fim dela. */
@@ -214,7 +215,7 @@ const DO_FONTE = import.meta.env.DEV
 /** Onde ver o que aconteceu, em cada mundo. */
 const COMO_DIAGNOSTICAR = DO_FONTE
   ? 'Suba a API com `cd backend && uv run uvicorn app.main:app --port 8787`.'
-  : 'Abra Ajustes › Servidor e clique em «Ver diagnóstico».'
+  : 'Abra Ajustes › Sobre e clique em «Ver diagnóstico».'
 
 const newId = () => crypto.randomUUID()
 
@@ -252,7 +253,9 @@ function buildReply(payload: SendPayload): string {
   ]
 
   if (payload.attachments.length > 0) {
-    blocks.push(`Anexos recebidos: ${payload.attachments.join(', ')}.`)
+    blocks.push(
+      `Anexos recebidos: ${payload.attachments.map((anexo) => anexo.nome).join(', ')}.`,
+    )
   }
 
 
@@ -787,7 +790,7 @@ function App() {
     return new Set(
       messages
         .filter((message) =>
-          [message.text, ...(message.attachments ?? [])]
+          [message.text, ...(message.attachments ?? []).map((anexo) => anexo.nome)]
             .join(' ')
             .toLowerCase()
             .includes(normalizedQuery),
@@ -1671,7 +1674,9 @@ function App() {
           effort: payload.effort,
           web: payload.web,
           project_path: payload.project_path,
-          attachments: payload.attachments,
+          // O chat manda os **ids** dos anexos (o conteúdo já subiu no upload); o backend
+          // resolve cada id no store e a `read_attachment` é quem lê o arquivo.
+          attachments: payload.attachments.map((anexo) => anexo.id),
           conversation_id: conversationIdRef.current,
           tz_offset_minutes: new Date().getTimezoneOffset(),
         },

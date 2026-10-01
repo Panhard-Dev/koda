@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "koda"
-version = "0.4.1"
+version = "0.4.3"
 dependencies = [
  "getrandom 0.3.4",
  "serde",

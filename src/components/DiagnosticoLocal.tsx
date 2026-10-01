@@ -97,9 +97,15 @@ export default function DiagnosticoLocal() {
         <div className="min-w-0">
           <h2 className="text-[15px] font-semibold text-koda-fg">Serviço local</h2>
           <p className="mt-1 text-[13px] leading-5 text-koda-fg/45">
-            O app traz o próprio Python (nada para instalar à parte). Aqui você vê se ele
-            subiu, onde estão o banco e os arquivos de log, e o que o serviço escreveu por
-            último — é o que explica uma conversa que não responde.
+            Este é o retrato do serviço local — o backend em Python que responde às suas
+            mensagens. Ele fica aqui, em <span className="text-koda-fg/70">Ajustes › Sobre</span>.
+            Clique em <span className="text-koda-fg/70">«Ver diagnóstico»</span> e o app confere
+            na hora, nesta ordem: se a API local e os serviços de modelos estão no ar; se o
+            Python que o app traz consigo importa <span className="text-koda-fg/70">uvicorn</span> e{' '}
+            <span className="text-koda-fg/70">fastapi</span>; onde ficam o banco e os arquivos de
+            log; as portas em uso; e as últimas linhas que o backend escreveu. É isso que explica
+            uma conversa que não responde. O botão <span className="text-koda-fg/70">«copiar
+            diagnóstico»</span> leva o texto inteiro, pronto para colar.
           </p>
         </div>
         <button
