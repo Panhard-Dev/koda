@@ -8,6 +8,7 @@ import MessageFooter from './components/MessageFooter'
 import Reasoning from './components/Reasoning'
 import TarefaIncompleta from './components/TarefaIncompleta'
 import ToolSteps from './components/ToolSteps'
+import CartaoDeCompactacao from './components/Compactacao'
 import Composer from './components/Composer'
 import { CLASSE_DA_JANELA } from './components/Janela'
 import type { ToolStep } from './api/client'
@@ -174,9 +175,9 @@ const RACIOCINIO = [
 
 // ------------------------------------------------------------------ cenários
 
-type Cenario = 'prompt' | 'resposta' | 'misto' | 'regressao'
+type Cenario = 'prompt' | 'resposta' | 'misto' | 'regressao' | 'compactacao'
 
-const CENARIOS: Cenario[] = ['prompt', 'resposta', 'misto', 'regressao']
+const CENARIOS: Cenario[] = ['prompt', 'resposta', 'misto', 'regressao', 'compactacao']
 
 /**
  * A bolha como ela era **antes** do conserto.
@@ -268,9 +269,64 @@ function Conversa({ cenario }: { cenario: Cenario }) {
               </div>
             ) : null}
 
+            {/*
+             * O cartão de tarefa não concluída, nos estados que importam: com itens
+             * pendentes, por queda de provedor (sem itens, mas com trabalho no disco) e no
+             * motivo que **não** retoma — o contexto estourado. É aqui que se confere a olho
+             * que a cópia muda por motivo e que o Retomar aparece só quando faz sentido.
+             */}
             {cenario === 'misto' ? (
-              <div className="flex flex-col gap-1.5">
-                <TarefaIncompleta onContinuar={() => {}} />
+              <div className="flex flex-col gap-3">
+                <TarefaIncompleta
+                  motivo="pending_steps"
+                  pendentes={['criar a rota de health', 'ligar o medidor de contexto']}
+                  executou={4}
+                  onRetomar={() => {}}
+                />
+                <TarefaIncompleta
+                  motivo="provider_error"
+                  pendentes={[]}
+                  executou={2}
+                  onRetomar={() => {}}
+                />
+                <TarefaIncompleta
+                  motivo="context_overflow"
+                  pendentes={[]}
+                  executou={0}
+                  retomavel={false}
+                  onRetomar={() => {}}
+                />
+              </div>
+            ) : null}
+
+            {/*
+             * O cartão de compactação e a linha resumida de ferramentas: os dois estados
+             * que a conversa ganhou em 01/10/2026, para conferir a olho que eles param em
+             * pé no meio de texto longo e que a linha resumida abre no detalhe.
+             */}
+            {cenario === 'compactacao' ? (
+              <div className="flex flex-col gap-3">
+                <CartaoDeCompactacao
+                  aviso={{
+                    motivo: 'historico',
+                    compactados: 13,
+                    tokensAntes: null,
+                    tokensDepois: null,
+                  }}
+                />
+                <FalaDoModelo texto={RESPOSTA} />
+                <ToolSteps steps={FERRAMENTAS} resumido />
+                <CartaoDeCompactacao
+                  aviso={{
+                    motivo: 'contexto',
+                    compactados: null,
+                    tokensAntes: 612_000,
+                    tokensDepois: 148_000,
+                  }}
+                />
+                <CartaoDeCompactacao
+                  aviso={{ motivo: 'corte', compactados: null, tokensAntes: null, tokensDepois: null }}
+                />
               </div>
             ) : null}
           </div>

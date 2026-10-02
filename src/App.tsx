@@ -15,6 +15,9 @@ import { CLASSE_DA_JANELA } from './components/Janela'
 import TarefaIncompleta from './components/TarefaIncompleta'
 import ToDosMenu from './components/ToDos'
 import ToolSteps from './components/ToolSteps'
+import CartaoDeCompactacao from './components/Compactacao'
+import { separarCompactacoes } from './compactacao'
+import type { Compactacao as AvisoDeCompactacao } from './compactacao'
 import WorkingLine from './components/WorkingLine'
 import {
   DENTRO_DO_TAURI,
@@ -141,7 +144,27 @@ type Message = {
    * depois não promete uma retomada que ninguém pode garantir.
    */
   incompleto?: boolean
+  /**
+   * O **contrato** da rodada incompleta, direto do `done`: código do motivo, os itens que
+   * ficaram pendentes, quantas ferramentas rodaram e se dá para retomar.
+   *
+   * Vem separado do texto de propósito: o loop não escreve mais instrução de uso na resposta
+   * ("me diga continue"), então quem explica o que falta é o cartão — e ele precisa do dados,
+   * não de uma frase para interpretar.
+   */
+  motivo?: string | null
+  pendentes?: string[]
+  executou?: number
+  retomavel?: boolean
 }
+
+/**
+ * O que o App envia ao backend: o payload do Composer mais o **Retomar**.
+ *
+ * `resume` não é uma mensagem — é a ação do botão do cartão de tarefa não concluída. Por
+ * isso ele não vira bolha na conversa (ver `handleSend`).
+ */
+type PayloadDeEnvio = SendPayload & { resume?: boolean }
 
 /**
  * Um pedaço da resposta viva: o que o modelo pensou, o que ele falou, ou uma ferramenta
@@ -151,15 +174,31 @@ type Bloco =
   | { tipo: 'texto'; texto: string }
   | { tipo: 'passo'; passo: ToolStep }
   | { tipo: 'raciocinio'; texto: string }
+  | { tipo: 'compactacao'; compactacao: AvisoDeCompactacao }
 
-/** Anexa a fala ao último bloco de texto aberto, ou abre um novo. */
+/**
+ * Anexa a fala ao último bloco de texto aberto, ou abre um novo.
+ *
+ * O que chega pode trazer junto um aviso de compactação — ele viaja **dentro do texto**
+ * porque precisa ficar gravado com a mensagem. Na tela ele sai do texto e vira bloco
+ * próprio, no ponto exato da resposta onde a compactação aconteceu: ver
+ * `components/Compactacao.tsx`.
+ */
 const anexarFala = (blocos: Bloco[] | undefined, texto: string): Bloco[] => {
   const lista = [...(blocos ?? [])]
   const ultimo = lista.at(-1)
-  if (ultimo?.tipo === 'texto') {
-    lista[lista.length - 1] = { tipo: 'texto', texto: ultimo.texto + texto }
-  } else {
-    lista.push({ tipo: 'texto', texto })
+  const acumulado = ultimo?.tipo === 'texto' ? ultimo.texto + texto : texto
+  if (ultimo?.tipo === 'texto') lista.pop()
+
+  if (!acumulado) {
+    lista.push({ tipo: 'texto', texto: '' })
+    return lista
+  }
+
+  const partes = separarCompactacoes(acumulado)
+  for (const parte of partes) {
+    if (parte.tipo === 'texto') lista.push({ tipo: 'texto', texto: parte.texto })
+    else lista.push({ tipo: 'compactacao', compactacao: parte.compactacao })
   }
   return lista
 }
@@ -513,19 +552,44 @@ function Abertura({
   )
 }
 
-const fromApiMessage = (message: ApiMessage): Message => ({
-  id: message.id,
-  role: message.role,
-  text: message.text,
-  attachments: message.attachments,
-  model: message.model,
-  elapsedMs: message.elapsed_ms ?? undefined,
-  tokens: message.tokens,
-  contexto: message.contexto,
-  at: message.at,
-  steps: message.steps,
-  todos: message.todos ?? [],
-})
+/**
+ * Reabre uma mensagem gravada.
+ *
+ * O texto guardado pode trazer a nota de compactação **dentro** dele — foi assim que ela
+ * ficou no banco, junto da resposta, para quem reler saber que parte do histórico virou
+ * resumo. Aqui ela vira o mesmo cartão que apareceu durante a conversa; as ferramentas, que
+ * vêm separadas e sem a ordem de quando aconteceram, entram primeiro, como sempre entraram.
+ * Sem nota nenhuma, a mensagem continua sendo só texto: nada muda para quem já tinha a
+ * conversa salva.
+ */
+const fromApiMessage = (message: ApiMessage): Message => {
+  const comum = {
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    attachments: message.attachments,
+    model: message.model,
+    elapsedMs: message.elapsed_ms ?? undefined,
+    tokens: message.tokens,
+    contexto: message.contexto,
+    at: message.at,
+    steps: message.steps,
+    todos: message.todos ?? [],
+  }
+
+  const partes = message.role === 'assistant' ? separarCompactacoes(message.text) : []
+  if (!partes.some((parte) => parte.tipo === 'compactacao')) return comum
+
+  const blocos: Bloco[] = [
+    ...(message.steps ?? []).map((passo): Bloco => ({ tipo: 'passo', passo })),
+    ...partes.map((parte): Bloco =>
+      parte.tipo === 'texto'
+        ? { tipo: 'texto', texto: parte.texto }
+        : { tipo: 'compactacao', compactacao: parte.compactacao },
+    ),
+  ]
+  return { ...comum, blocos }
+}
 
 const fromApiSummary = (conversation: ApiConversationSummary): Conversation => ({
   id: conversation.id,
@@ -622,6 +686,16 @@ function App() {
   const [erroPermissao, setErroPermissao] = useState<string | null>(null)
   /** Números da rodada (uso, tempo, hora) na ficha no fim de cada resposta. */
   const [mostrarRodape, setMostrarRodape] = useState(true)
+  /**
+   * Raciocínio e passos das ferramentas abertos na conversa.
+   *
+   * Desligado por padrão: quem usa o app quer a resposta, e o rascunho do modelo, os
+   * caminhos das pastas lidas e o tempo de cada ferramenta são diagnóstico — não conversa.
+   * Desligado, as ferramentas ainda aparecem como **uma linha** (quantas rodaram e quanto
+   * levou), com o detalhe atrás de um clique. Ligado, é o comportamento de antes: tudo
+   * aberto, do jeito que quem está depurando o agente precisa.
+   */
+  const [mostrarTraces, setMostrarTraces] = useState(false)
   const [history, setHistory] = useState<Conversation[]>([])
   const [view, setView] = useState<'chat' | 'settings'>('chat')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
@@ -677,7 +751,7 @@ function App() {
    * É com ele que "rodar de novo" remonta um pedido sem adivinhar ajuste nenhum: o que
    * volta é exatamente o que a pessoa tinha escolhido na última vez.
    */
-  const ultimoPayloadRef = useRef<SendPayload | null>(null)
+  const ultimoPayloadRef = useRef<PayloadDeEnvio | null>(null)
 
   const hasMessages = messages.length > 0
   const normalizedQuery = query.trim().toLowerCase()
@@ -1543,18 +1617,23 @@ function App() {
     void sair()
   }
 
-  const handleSend = async (payload: SendPayload) => {
+  const handleSend = async (payload: PayloadDeEnvio) => {
     setInterrupted(false)
-    setMessages((current) => [
-      ...current,
-      {
-        id: newId(),
-        role: 'user',
-        text: payload.text,
-        attachments: payload.attachments,
-        at: Date.now(),
-      },
-    ])
+    // Retomar **não** é uma mensagem da pessoa: o backend continua o histórico e não grava
+    // turno de usuário, então desenhar uma bolha aqui criaria na tela uma fala que não
+    // existe no banco. Era o defeito antigo: o botão virava uma bolha com "continue".
+    if (!payload.resume) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: newId(),
+          role: 'user',
+          text: payload.text,
+          attachments: payload.attachments,
+          at: Date.now(),
+        },
+      ])
+    }
     setBusy(true)
     ultimoPayloadRef.current = payload
     const startedAt = performance.now()
@@ -1679,6 +1758,7 @@ function App() {
           attachments: payload.attachments.map((anexo) => anexo.id),
           conversation_id: conversationIdRef.current,
           tz_offset_minutes: new Date().getTimezoneOffset(),
+          resume: payload.resume,
         },
         {
           signal: controller.signal,
@@ -1726,6 +1806,11 @@ function App() {
               contexto: data.contexto ?? message.contexto ?? null,
               // O backend é quem sabe: ele só diz `false` depois de insistir sozinho.
               incompleto: data.completed === false,
+              // O contrato estruturado da rodada incompleta — é dele que o cartão vive.
+              motivo: data.reason ?? null,
+              pendentes: data.pending_items ?? [],
+              executou: data.executed ?? 0,
+              retomavel: data.resumable ?? false,
               at: Date.now(),
             }))
             setBusy(false)
@@ -1795,18 +1880,22 @@ function App() {
   }
 
   /**
-   * Continua a tarefa que fechou no meio, sem a pessoa ter que escrever nada.
+   * Retoma a tarefa que fechou no meio — a ação do botão do cartão de "tarefa não concluída".
    *
-   * O pedido vai como um turno normal e vira uma bolha na conversa ("continue"), de
-   * propósito: o backend guarda o turno, então escondê-lo aqui só faria o histórico ficar
-   * diferente do que a tela mostrou. Os ajustes são os da última rodada, iguais aos de
-   * "rodar de novo" — quem pediu para seguir não quer reconferir modelo e esforço.
+   * Vai como `resume`, e **não** como uma mensagem: o backend continua do histórico que já
+   * existe e não grava turno de usuário. Assim a conversa não ganha uma bolha de pessoa com
+   * a palavra "continue" — o que existia antes era exatamente isso, a tela mostrando o
+   * próprio dono pedindo a palavra mágica que o produto deveria saber sozinho.
+   *
+   * Os ajustes são os da última rodada, iguais aos de "rodar de novo": quem pediu para
+   * seguir não quer reconferir modelo e esforço.
    */
-  const continuarTarefa = () => {
+  const retomarTarefa = () => {
     if (busy) return
     const anterior = ultimoPayloadRef.current
     void handleSend({
-      text: 'continue',
+      text: '',
+      resume: true,
       attachments: [],
       model: modeloSeguro(anterior?.model),
       reasoning: anterior?.reasoning ?? true,
@@ -1941,6 +2030,8 @@ function App() {
           mcps={mcps}
           mostrarRodape={mostrarRodape}
           onToggleRodape={() => setMostrarRodape((value) => !value)}
+          mostrarTraces={mostrarTraces}
+          onToggleTraces={() => setMostrarTraces((value) => !value)}
           appearance={appearance}
           onAppearanceChange={(patch) =>
             setAppearance((current) => ({ ...current, ...patch }))
@@ -1969,7 +2060,7 @@ function App() {
                * girando e "pensando" ao lado. A linha de trabalho entra só quando ele não
                * está ali — senão a tela teria dois sinais dizendo a mesma coisa.
                */
-              const pensando = blocos.at(-1)?.tipo === 'raciocinio' && ehViva
+              const pensando = mostrarTraces && blocos.at(-1)?.tipo === 'raciocinio' && ehViva
               // O plano já não conta como conteúdo da bolha: ele mora no menu acima da
               // caixa agora. Mensagem que só tinha to-dos não vira bolha vazia na conversa.
               const semConteudo =
@@ -2004,9 +2095,9 @@ function App() {
                   ].join(' ')}
                 >
                   {message.steps && message.steps.length > 0 && blocos.length === 0 ? (
-                    <ToolSteps steps={message.steps} />
+                    <ToolSteps steps={message.steps} resumido={!mostrarTraces} />
                   ) : null}
-                  {message.reasoning && blocos.length === 0 ? (
+                  {mostrarTraces && message.reasoning && blocos.length === 0 ? (
                     // Caminho de exceção: pensamento sem nenhum bloco (mensagem antiga).
                     <Reasoning texto={message.reasoning} ativo={false} />
                   ) : null}
@@ -2016,16 +2107,37 @@ function App() {
                     blocos.map((bloco, indice) => {
                       const ultimo = indice === blocos.length - 1
                       if (bloco.tipo === 'passo') {
+                        if (mostrarTraces) {
+                          return (
+                            <ToolSteps
+                              key={`passo-${bloco.passo.call_id || indice}`}
+                              steps={[bloco.passo]}
+                            />
+                          )
+                        }
+                        // Modo resumido: os passos seguidos viram **uma** linha na posição do
+                        // primeiro deles. Os seguintes não desenham nada (o grupo já está lá).
+                        if (blocos[indice - 1]?.tipo === 'passo') return null
+                        let fim = indice
+                        while (blocos[fim + 1]?.tipo === 'passo') fim += 1
+                        const grupo = blocos
+                          .slice(indice, fim + 1)
+                          .map((item) => (item as { passo: ToolStep }).passo)
+                        return <ToolSteps key={`passos-${indice}`} steps={grupo} resumido />
+                      }
+                      if (bloco.tipo === 'compactacao') {
                         return (
-                          <ToolSteps
-                            key={`passo-${bloco.passo.call_id || indice}`}
-                            steps={[bloco.passo]}
+                          <CartaoDeCompactacao
+                            key={`compacta-${indice}`}
+                            aviso={bloco.compactacao}
                           />
                         )
                       }
                       if (bloco.tipo === 'raciocinio') {
-                        // Só pensa o raciocínio que ainda está no fim da resposta viva:
+                        // Raciocínio é o rascunho do modelo: só aparece com os traces ligados.
+                        // Ligado, só fica aberto o que ainda está no fim da resposta viva:
                         // assim que vem fala, ferramenta ou o fim da mensagem, ele fecha.
+                        if (!mostrarTraces) return null
                         return (
                           <Reasoning
                             key={`pensa-${indice}`}
@@ -2067,7 +2179,14 @@ function App() {
                    * assunto que a conversa já deixou para trás.
                    */}
                   {message.incompleto && message.id === messages.at(-1)?.id ? (
-                    <TarefaIncompleta ocupado={busy} onContinuar={continuarTarefa} />
+                    <TarefaIncompleta
+                      motivo={message.motivo}
+                      pendentes={message.pendentes}
+                      executou={message.executou}
+                      retomavel={message.retomavel}
+                      ocupado={busy}
+                      onRetomar={retomarTarefa}
+                    />
                   ) : null}
                 </div>
               )

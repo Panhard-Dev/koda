@@ -182,6 +182,40 @@ body {
   }
 }
 
+/*
+ * O cartão de compactação entra crescendo um fio e um brilho atravessa a borda uma vez.
+ * A compactação acontece no meio do trabalho, sem clique nenhum: o movimento é o que faz
+ * o olho parar ali e entender que **aconteceu** alguma coisa com a conversa.
+ */
+@keyframes compact-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.compact-in {
+  animation: compact-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes compact-shine {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(560%);
+  }
+}
+
+.compact-shine {
+  animation: compact-shine 1.5s cubic-bezier(0.5, 0, 0.5, 1) 0.2s both;
+}
+
+
 .heat-col {
   animation: fade-in 0.35s ease-out both;
 }

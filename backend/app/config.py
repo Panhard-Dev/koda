@@ -69,13 +69,14 @@ class Settings(BaseSettings):
     algo do sistema. O `shell`/`terminal` continua podendo tudo — é o que ele é.
     """
     max_steps: int = 0
-    """Teto de passos de uma mensagem do agente. **0 = sem teto.**
+    """Teto de passos do modelo por tarefa. **0 = sem teto**, como o projeto de origem.
 
-    Era 12, e 12 não é "tarefa grande": montar um projeto, refatorar um módulo ou rodar uma
-    bateria de testes passa disso no meio de trabalho legítimo — e o agente parava com a
-    tarefa pela metade. Projeto gigante não cabe em número fixo de passos, então o padrão é
-    não ter teto. Quem impede um loop sem fim é o tempo abaixo, o botão de parar e o
-    contador de respostas vazias do loop.
+    Ele não tem teto de turno por padrão, e a razão é conhecida: teto
+    fixo trunca tarefa grande no meio, em silêncio. Este número já foi 12 e depois 100, e
+    100 não é "tarefa grande": montar um projeto, refatorar um módulo ou rodar uma bateria
+    de testes passa disso no meio de trabalho legítimo. Quem impede um loop sem fim é o
+    botão de parar, o teto de tempo da tarefa (`tool_timeout_s`) e o contador de respostas
+    vazias do loop — não a contagem de passos.
     """
     tool_timeout_s: int = 0
     """Orçamento de tempo da tarefa inteira, em segundos (0 = **sem limite**).
@@ -85,7 +86,22 @@ class Settings(BaseSettings):
     explícito: a tarefa vai até acabar, não importa o tamanho. O que impede um loop sem fim
     é o botão de parar, o contador de respostas vazias e o de provedor fora do ar.
     """
-    tool_output_limit: int = 4000
+    # --- Tetos de saída das ferramentas (os mesmos do projeto de origem) --------------
+    # A referência de comportamento do Koda é esse projeto, e estes são os números dele:
+    # `tools/tool_output_limits.py` publica max_bytes 50_000, max_lines 2_000 e
+    # max_line_length 2_000, e `tools/file_tools.py` usa file_read_max_chars 100_000. O
+    # Koda teve números próprios (4 000 / 12 000 / 800) enquanto as ideias ainda estavam
+    # sendo portadas; agora são os mesmos, e continuam ajustáveis por aqui.
+    tool_output_limit: int = 50_000
+    """Quanto da saída de cada ferramenta fica na tela e no histórico."""
+    tool_output_max_bytes: int = 50_000
+    """Teto da saída que uma ferramenta devolve ao modelo."""
+    tool_output_max_lines: int = 2_000
+    """Teto de linhas de uma listagem ou busca."""
+    tool_output_max_line_length: int = 2_000
+    """Teto de **uma** linha na leitura de arquivo."""
+    file_read_max_chars: int = 100_000
+    """Teto de leitura de um arquivo ou anexo por vez (`file_read_max_chars`)."""
 
     # --- Tetos do `shell` (processo), separados de propósito -------------------------
     # Antes os três prazos estavam amarrados: `tempo_limite` limitava só cada **olhada**, o
@@ -108,10 +124,17 @@ class Settings(BaseSettings):
     """De quanto em quanto tempo um comando longo devolve a palavra ao modelo."""
 
     max_tool_calls: int = 0
-    """Teto de **chamadas de ferramenta** numa tarefa (0 = sem teto).
+    """Teto de chamadas de ferramenta por tarefa. **0 = sem teto**, como o projeto de origem.
 
-    Sem teto por padrão para não encerrar tarefas longas antes de terminar. Configure um
-    valor positivo somente quando quiser impor um limite explícito para uma instalação.
+    Mesma razão do `max_steps`: tarefa grande faz dezenas de chamadas legítimas, e parar no
+    meio por contagem é o modelo ficando sem como terminar o que começou. Configure um valor
+    positivo só quando quiser um teto explícito numa instalação.
+    """
+    tool_call_timeout_s: int = 120
+    """Tempo máximo de uma chamada de ferramenta, em segundos (0 = sem teto explícito).
+
+    Comandos longos do terminal devolvem uma olhada após este prazo e continuam sob o
+    lifecycle próprio do processo; subprocessos de execução direta são encerrados no prazo.
     """
     contexto_tokens: int = 1_000_000
     """Quanto a conversa pode ocupar, em tokens, antes de ser compactada em resumo.

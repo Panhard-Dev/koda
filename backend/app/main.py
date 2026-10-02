@@ -71,10 +71,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.aprovacoes = {}
         # Tetos do `shell`, separados como manda a configuração: teto total do processo,
         # tempo sem saída que caracteriza travamento, e intervalo de acompanhamento.
+        # Junto vão os tetos de saída — o mesmo número vale para o backend inteiro.
         ferramentas.definir_limites(
             timeout=config.comando_timeout_s,
             inatividade=config.comando_inatividade_s,
             olhada=config.comando_olhada_s,
+            saida=config.tool_output_max_bytes,
+            listagem=config.tool_output_max_lines,
+            leitura=config.file_read_max_chars,
+            linha=config.tool_output_max_line_length,
         )
         # A nuvem nunca segura a subida: a consulta é opcional e roda fora do caminho
         # crítico, num task que morre junto com o app.

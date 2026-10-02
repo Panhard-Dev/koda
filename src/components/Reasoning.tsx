@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Brain, ChevronRight } from 'lucide-react'
+import { formatarCaracteres } from '../duracao'
 import { ToolSpinner } from './ToolIcon'
 
 /**
@@ -35,7 +36,7 @@ export default function Reasoning({ texto, ativo }: { texto: string; ativo: bool
         <span className="shrink-0 text-[12.5px] font-medium">Raciocínio</span>
 
         <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[11.5px] tabular-nums text-koda-fg/30">
-          {ativo ? 'pensando' : `${texto.length.toLocaleString('pt-BR')} caracteres`}
+          {ativo ? 'pensando' : formatarCaracteres(texto.length)}
           <ChevronRight
             className="h-3.5 w-3.5 transition-transform duration-200 group-open:rotate-90"
             strokeWidth={1.7}

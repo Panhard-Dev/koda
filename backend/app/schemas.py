@@ -70,6 +70,17 @@ class ChatRequest(BaseModel):
     """Fuso do cliente em minutos (como `Date.getTimezoneOffset()`), para o uso contar no dia local."""
     tz_offset_minutes: int = 0
 
+    resume: bool = False
+    """Retomar a tarefa da conversa, sem mensagem nova.
+
+    É o clique no botão Retomar do cartão de "tarefa não concluída". A rodada anterior
+    parou no meio e a pessoa quer que o agente siga de onde parou: o backend continua do
+    histórico que já existe e **não** grava turno de usuário nenhum — era esse o defeito da
+    versão antiga, que mandava `text: "continue"` e criava uma bolha de pessoa na tela.
+
+    Exige `conversation_id` e dispensa `text`.
+    """
+
     @model_validator(mode="after")
     def _exige_conteudo(self) -> ChatRequest:
         """Limpa o texto e exige **alguma** coisa: ou uma mensagem, ou um anexo.
@@ -77,9 +88,12 @@ class ChatRequest(BaseModel):
         Texto vazio **com** anexo é válido de propósito: quem manda só o arquivo não está
         mandando mensagem vazia. Antes, `text` tinha `min_length=1` e esse caso voltava
         `422` — a interface liberava o envio e o backend recusava.
+
+        Retomar (`resume`) também dispensa o texto: não há mensagem nova para exigir — a
+        tarefa é a mesma de antes, continuada de onde parou.
         """
         self.text = self.text.strip()
-        if not self.text and not self.attachments:
+        if not self.resume and not self.text and not self.attachments:
             raise ValueError("a mensagem não pode ficar vazia")
         return self
 

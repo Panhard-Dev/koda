@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Clock, Coins, Copy, RotateCcw, ThumbsDown, ThumbsUp } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { formatarDuracao } from '../duracao'
 
 /** Tokens em número curto: `870`, `9,2K`, `1,4M` (a ficha não é lugar de número comprido). */
 const formatarTokens = (tokens: number): string => {
@@ -8,10 +9,6 @@ const formatarTokens = (tokens: number): string => {
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1).replace('.', ',')}K`
   return `${(tokens / 1_000_000).toFixed(1).replace('.', ',')}M`
 }
-
-/** Duração como o resto do app mostra (`1.2s` embaixo de um segundo, `12s` acima). */
-const formatarDuracao = (ms: number): string =>
-  ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`
 
 const formatarHora = (ms: number): string =>
   new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })

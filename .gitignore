@@ -56,6 +56,11 @@ backend/.tmp-pytest-*/
 # Backups locais de binários (o host .exe é grande e não vai para o repositório)
 backups/
 
+# Painel/backend de nuvem de uma fase anterior do produto: saiu do repositório na 0.5.1.
+# Este repositório é do app de desktop, e a pasta ficou parada enquanto o resto andou.
+# A cópia local é preservada (não é apagada), mas não volta para o controle de versão.
+server/
+
 # Saída solta de teste — os logs já estão cobertos por *.log acima
 out.txt
 err.txt
