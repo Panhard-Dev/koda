@@ -80,7 +80,12 @@ def system_prompt(options: ChatOptions) -> str:
     if options.project:
         parts.append(f"O contexto de código ativo é o projeto {options.project}.")
     if options.reasoning:
-        parts.append("Pense passo a passo antes de concluir, sem narrar o raciocínio inteiro.")
+        parts.append(
+            "Pense passo a passo antes de concluir, sem narrar o raciocínio inteiro. "
+            "Pense em português do Brasil: o rascunho antes da resposta aparece na tela de "
+            "quem está acompanhando, e rascunho em inglês no meio de uma conversa em "
+            "português é vazamento de bastidor, não conteúdo."
+        )
     if options.web:
         parts.append(
             "A busca na Web está ativada: pesquise pelo `web_search` do Bing. Em pedidos "

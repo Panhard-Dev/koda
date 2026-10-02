@@ -296,7 +296,6 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         model: str = "",
-        escolha_ferramenta: str | dict[str, Any] | None = None,
     ) -> StepResult:
         """Um passo não-streaming com as ferramentas à mão.
 
@@ -304,9 +303,8 @@ class OpenAICompatibleProvider:
         que o proxy trata melhor: as `tool_calls` chegam completas, com o id que ele
         espera de volta no eco.
 
-        `escolha_ferramenta` vai como `tool_choice` no corpo: `"required"` obriga a
-        resposta a trazer uma chamada, e `{"type": "function", "function": {"name": …}}`
-        aponta a ferramenta pelo nome — é o conserto do "anunciou e encerrou".
+        Com ferramentas, não envia `tool_choice`: o provedor mantém a seleção automática
+        e o modelo decide se chama uma ferramenta e qual delas.
         """
         if not self.ready:
             raise ProviderError("Provider sem chave para chamar ferramentas.")
@@ -325,8 +323,6 @@ class OpenAICompatibleProvider:
         }
         if tools:
             payload["tools"] = tools
-            if escolha_ferramenta:
-                payload["tool_choice"] = escolha_ferramenta
 
         try:
             response = await self._cliente().post(
@@ -380,7 +376,6 @@ class OpenAICompatibleProvider:
         model: str = "",
         reasoning: bool = True,
         effort: str | None = None,
-        escolha_ferramenta: str | dict[str, Any] | None = None,
     ) -> AsyncIterator[Piece | StepResult]:
         """O mesmo passo do `step()`, mas narrando o texto enquanto ele sai.
 
@@ -392,7 +387,8 @@ class OpenAICompatibleProvider:
         seguintes, agrupadas por `index`) e são remontadas exatamente como o `step()` as
         devolveria, para o eco continuar casando com a assinatura que o host guarda.
 
-        `escolha_ferramenta` vai como `tool_choice` (ver `step()`).
+        Com ferramentas, não envia `tool_choice`: o provedor mantém a seleção automática
+        e o modelo decide se chama uma ferramenta e qual delas.
         """
         modelo = self.resolve_model(model)
         payload: dict[str, Any] = {
@@ -408,8 +404,6 @@ class OpenAICompatibleProvider:
             payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
-            if escolha_ferramenta:
-                payload["tool_choice"] = escolha_ferramenta
         if self.manda_esforco:
             payload["reasoning_effort"] = await self.esforco(reasoning, modelo, effort)
 

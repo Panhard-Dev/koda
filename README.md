@@ -70,7 +70,23 @@ o host no ar, ele cai na lista da casa, que é esta:
   grande, sem reconfigurar nada.
 - **Contexto grande de verdade.** O teto é `KODA_CONTEXTO_TOKENS` — **1 milhão** por padrão,
   a janela dos modelos — e passou disso o Koda **compacta** a conversa (saídas antigas viram
-  uma linha, o miolo resolvido vira resumo) em vez de estourar.
+  uma linha, o miolo resolvido vira resumo) em vez de estourar. A compactação aparece na
+  conversa como um **cartão** no ponto exato em que aconteceu (quantas mensagens viraram
+  resumo, ou quantos milhares de tokens saíram do contexto) — antes era uma linha em itálico
+  no meio da resposta, que ninguém entendia.
+- **Faça exatamente o que foi pedido — nada além.** O pedido é classificado antes do primeiro
+  passo: pergunta, resumo ou conversa solta roda **sem** ferramenta de arquivo, shell ou web
+  (a resposta sai do que o modelo sabe e dos anexos); pedido de código ou de ação no projeto
+  roda com o catálogo completo, e o trabalho é para ser feito por inteiro. Instrução negativa
+  explícita — "não use arquivos", "responda apenas" — tira a ferramenta da rodada de verdade,
+  e não é só uma frase que o modelo pode ignorar.
+- **Raciocínio é bastidor.** Por padrão a conversa mostra a resposta: o rascunho do modelo e
+  os detalhes de cada ferramenta (caminho, tempo, saída) ficam atrás de *Ajustes →
+  Preferências → "Mostrar raciocínio e passos das ferramentas"*, e as ferramentas aparecem
+  como uma linha — quantas rodaram e quanto levou — que abre no detalhe por um clique.
+- **Tempo em escala humana.** Nada de `2725 ms` ou `314s` lado a lado: a régua sobe sozinha
+  (`47 ms` → `1,4 s` → `2,7 min` → `1,2 h`), a mesma para a ficha de resposta, para cada
+  ferramenta e para o relógio da resposta em curso.
 - **Ou traga o seu provedor.** Com `OPENAI_API_KEY` e `OPENAI_BASE_URL` o backend fala com
   qualquer serviço OpenAI-compatível — OpenAI, Groq, OpenRouter, Ollama em `/v1`. Sem chave,
   quem responde é o provider local, offline e explícito.

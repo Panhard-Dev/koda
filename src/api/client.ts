@@ -263,6 +263,15 @@ export type ChatPayload = {
   attachments: string[]
   conversation_id: string | null
   tz_offset_minutes: number
+  /**
+   * Retomar a tarefa da conversa, sem mensagem nova.
+   *
+   * É o clique no botão Retomar do cartão de "tarefa não concluída". O backend continua do
+   * histórico que já existe e **não** grava turno de usuário — por isso o App não desenha
+   * bolha nenhuma ao retomar. Era esse o defeito da versão antiga, que mandava
+   * `text: "continue"` e fazia a tela mostrar o próprio usuário pedindo a palavra mágica.
+   */
+  resume?: boolean
 }
 
 /**
@@ -681,6 +690,18 @@ type StreamData = {
     elapsed_ms: number
     steps: number
     completed?: boolean
+    /**
+     * **Por que** a rodada não fechou, como código (`pending_steps`, `time_limit`,
+     * `provider_error`…). É o contrato de `loop.PARADA_*`; a tradução para leitura é do
+     * `components/TarefaIncompleta.tsx`. `null`/ausente quando a rodada concluiu.
+     */
+    reason?: string | null
+    /** Os itens do plano que ficaram em aberto — o que faltou, com o nome que o modelo deu. */
+    pending_items?: string[]
+    /** Quantas ferramentas rodaram de verdade: separa "nada foi executado" de "parte está no disco". */
+    executed?: number
+    /** Dá para retomar? Falso no único motivo que não vale a pena (`context_overflow`). */
+    resumable?: boolean
     /** Tokens que esta resposta custou (soma dos passos); `null` se o provedor não conta. */
     tokens?: number | null
     /**

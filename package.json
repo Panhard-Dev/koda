@@ -2,7 +2,7 @@
   "name": "koda",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.4.3",
+  "version": "0.5.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,6 +20,7 @@
     "app:build": "npm run app:host && npm run app:runtime && tauri build && npm run app:launcher && npm run app:bundle:host"
   },
   "dependencies": {
+    "lodash": "^4.18.1",
     "lucide-react": "^1.47.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

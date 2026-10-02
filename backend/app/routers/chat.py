@@ -9,6 +9,7 @@ Dois caminhos, escolhidos por `tools` no corpo:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -38,7 +39,7 @@ from ..schemas import (
 from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas
-from ..tools.loop import CONTINUAR_TRUNCADA, Emit, Resultado
+from ..tools.loop import CONTINUAR_TRUNCADA, RETOMAR_TAREFA, Emit, Resultado
 
 router = APIRouter(tags=["chat"])
 
@@ -88,6 +89,15 @@ async def approval(payload: ApprovalDecision, request: Request) -> dict[str, obj
 async def chat(payload: ChatRequest, request: Request) -> StreamingResponse:
     settings: Settings = request.app.state.settings
     engine = provider(request)
+    # Retomar exige uma conversa existente — e a checagem é **aqui**, antes de o stream
+    # começar: lá dentro o status já foi 200, e um `HTTPException` viraria um stream
+    # truncado em vez de um erro legível.
+    if payload.resume and not await call(
+        _conversa_existe, database(request), payload.conversation_id
+    ):
+        raise HTTPException(
+            status_code=400, detail="não há conversa para retomar: mande o conversation_id"
+        )
     # O agente é o comportamento normal quando o provedor sabe chamar ferramentas;
     # `tools` no corpo só serve para forçar (true) ou desligar (false) numa mensagem.
     usa_ferramentas = settings.tools if payload.tools is None else payload.tools
@@ -127,14 +137,6 @@ async def _texto(
         turns, request.app.state.settings.contexto_tokens
     )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": False})
-    if compactados:
-        yield sse(
-            "delta",
-            {
-                "text": f"_(histórico compactado: {compactados} mensagens antigas viraram "
-                "resumo, para a conversa caber no contexto)_\n\n"
-            },
-        )
 
     if not engine.ready:
         yield sse(
@@ -244,7 +246,12 @@ async def _agente(
     limite = settings.tool_output_limit
     # Skills ligadas do projeto entram no prompt: o agente fica sabendo que elas
     # existem e lê o SKILL.md com read_file quando a tarefa combina.
-    skills_prompt = indice_para_agente(settings)
+    #
+    # Em thread: `indice_para_agente` varre `.agents/skills` do projeto e da máquina, e
+    # lê o SKILL.md de cada uma — medido em ~34 ms aqui, dezenas a mais num projeto
+    # grande. Chamada direta, ela segura o laço de eventos antes de o pedido ao modelo
+    # sair, e o atraso aparece inteiro na espera do primeiro passo.
+    skills_prompt = await call(indice_para_agente, settings)
     instrucoes_base = _options(
         payload, settings.assistente, resumo, [item.nome for item in anexos_do_pedido]
     )
@@ -275,6 +282,7 @@ async def _agente(
     #: Id desta tarefa. Vai junto de cada processo que ela começar, para o Parar derrubar
     #: só os processos **dela** (ver `ferramentas.encerrar_do_dono`).
     dono_da_tarefa = new_id()
+    cancelamento = threading.Event()
 
     async def emit(evento: str, dados: dict[str, object]) -> None:
         if evento == "tool_result":
@@ -297,7 +305,9 @@ async def _agente(
                 engine,
                 mensagens,
                 workspace=workspace,
-                max_steps=payload.max_steps or settings.max_steps,
+                max_steps=(
+                    settings.max_steps if payload.max_steps is None else payload.max_steps
+                ),
                 emit=emit,
                 negadas=negadas,
                 model=payload.model,
@@ -316,6 +326,8 @@ async def _agente(
                 orcamento=settings.contexto_tokens,
                 dono=dono_da_tarefa,
                 max_tool_calls=settings.max_tool_calls,
+                tool_call_timeout_s=settings.tool_call_timeout_s or None,
+                cancelamento=cancelamento,
                 anexos=store,
             )
         finally:
@@ -392,6 +404,15 @@ async def _agente(
                 "elapsed_ms": elapsed_ms,
                 "steps": len(passos),
                 "completed": resultado.completou,
+                # Contrato da rodada **não concluída**: é dele que a interface monta o cartão
+                # de "tarefa não concluída" e decide se o botão Retomar aparece. O motivo é
+                # um código (`pending_steps`, `time_limit`, `provider_error`…), nunca uma
+                # frase: traduzir frase é do frontend, e quem grava a conversa não precisa
+                # dela. Ver `loop.PARADA_*`.
+                "reason": resultado.motivo or None,
+                "pending_items": resultado.pendentes,
+                "executed": resultado.executou,
+                "resumable": resultado.retomavel,
                 "tokens": message.tokens,
                 # O medidor de contexto ao lado do modelo lê daqui, sem recarregar nada.
                 "contexto": resultado.contexto or None,
@@ -401,14 +422,12 @@ async def _agente(
     except ProviderError as error:
         yield sse("error", {"message": str(error)})
     finally:
-        # O cliente abortou (botão parar, aba fechada). Três coisas, nesta ordem:
-        # 1. cancelar o loop — para ele não avançar para o próximo passo;
-        # 2. **derrubar os processos** que esta tarefa deixou rodando: cancelar a coroutine
-        #    não mata o subprocesso, e um `npm install`/build continuava vivo depois de o
-        #    usuário mandar parar (era a inconsistência mais irritante do botão);
-        # 3. esperar o loop terminar **com teto**: sem o teto, uma ferramenta já em execução
-        #    (roda em thread, não dá para cortar no meio) segurava o stream até acabar.
+        # O cliente abortou (botão parar, aba fechada): sinaliza o cancelamento cooperativo,
+        # cancela o loop, derruba os processos desta tarefa e espera o loop com teto. O evento
+        # permite que ferramentas síncronas interrompam subprocessos diretos sem depender de
+        # uma thread poder ser encerrada à força.
         if loop_task is not None:
+            cancelamento.set()
             loop_task.cancel()  # no-op quando a tarefa já terminou
             ferramentas.encerrar_do_dono(dono_da_tarefa)
             try:
@@ -539,6 +558,15 @@ def _effort(payload: ChatRequest) -> str | None:
     return None if payload.effort == "auto" else payload.effort
 
 
+def _conversa_existe(db: Database, conversation_id: str | None) -> bool:
+    """A conversa existe e tem pelo menos uma mensagem? É o pré-requisito de Retomar."""
+    if not conversation_id:
+        return False
+    with db.connect() as conn:
+        conversa = get_conversation(conn, conversation_id)
+    return conversa is not None and bool(conversa.messages)
+
+
 def _prepare(
     db: Database, store: anexos.AnexoStore, payload: ChatRequest, at_ms: int
 ) -> tuple[str, list[ChatTurn]]:
@@ -549,6 +577,23 @@ def _prepare(
     a conversa. O `text` pode vir vazio quando a mensagem é só anexo — aí o título nasce do
     nome do primeiro anexo, para a lista não mostrar "Nova conversa" para sempre.
     """
+    # Retomar pelo **botão**: a rodada anterior não terminou e a pessoa quer que o agente
+    # siga de onde parou. Não é uma mensagem dela — nada é gravado como turno de usuário.
+    # O que o modelo recebe é o turno interno `RETOMAR_TAREFA`, montado só em memória, no
+    # fim do histórico: era assim que a versão antiga errava, criando uma bolha de pessoa
+    # com a palavra "continue" na tela.
+    if payload.resume:
+        assert payload.conversation_id  # validado na rota, antes do stream começar
+        with db.connect() as conn:
+            conversa = get_conversation(conn, payload.conversation_id)
+        if conversa is None or not conversa.messages:
+            # Inalcançável pela rota (a checagem é feita antes do stream): se acontecer, a
+            # conversa sumiu entre a checagem e a montagem do histórico.
+            raise LookupError("não há conversa para retomar")
+        turns = _turns(conversa.messages)
+        turns.append(ChatTurn(role="user", text=RETOMAR_TAREFA))
+        return payload.conversation_id, turns
+
     do_pedido = store.buscar_varios(payload.attachments)
     semente = payload.text or (do_pedido[0].nome if do_pedido else "")
     with db.connect() as conn:

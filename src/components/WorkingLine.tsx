@@ -1,4 +1,5 @@
 import type { ToolStep } from '../api/client'
+import { formatarDuracao } from '../duracao'
 import { resumoArgumentos, rotuloFerramenta } from '../tools'
 import ThinkingMark from './ThinkingMark'
 import { ToolSpinner } from './ToolIcon'
@@ -47,7 +48,7 @@ export default function WorkingLine({
 
       {segundos === undefined ? null : (
         <span className="ml-auto shrink-0 font-mono text-[11.5px] tabular-nums text-koda-fg/25">
-          {segundos}s
+          {formatarDuracao(segundos * 1000)}
         </span>
       )}
     </div>

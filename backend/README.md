@@ -125,17 +125,46 @@ casamento e o passo volta com erro.
 
 O corpo aceita `"tools": false` para responder **essa** mensagem sem ferramenta (e
 `true` para exigir, que dá erro se o provedor não souber). No servidor, `KODA_TOOLS=off`
-desliga o agente de vez, `KODA_MAX_STEPS` limita os passos e `KODA_TOOL_TIMEOUT` dá um
-teto de tempo (segundos) para a tarefa inteira — com o provedor fora do ar, é ele que
-impede a resposta de ficar pendurada em tentativas.
+desliga o agente. Os limites do ciclo são configuráveis:
 
-Os dois padrões são **sem teto de passos** (`KODA_MAX_STEPS=0`) e **meia hora de tarefa**
-(`KODA_TOOL_TIMEOUT=1800`). Não é descuido: projeto grande não cabe em número fixo de
-passos, e um teto pequeno cortava trabalho legítimo pela metade — criar um conjunto de
-arquivos, compilar ou rodar uma bateria de testes passa de qualquer teto curto. Quem
-impede um loop sem fim é o tempo, o contador de respostas vazias do loop e o botão de
-parar. Cada comando do terminal tem o seu próprio teto (`TEMPO_COMANDO`, 10 min por padrão,
-ampliável pelo modelo até uma hora), porque é ali que uma suíte grande realmente demora.
+| Variável | Padrão | O que limita |
+| --- | ---: | --- |
+| `KODA_MAX_STEPS` | `0` | Respostas do modelo por tarefa (`0` = sem teto, como o projeto de origem) |
+| `KODA_MAX_TOOL_CALLS` | `0` | Chamadas de ferramenta por tarefa (`0` = sem teto, como o projeto de origem) |
+| `KODA_TOOL_CALL_TIMEOUT_S` | `120` s | Tempo de uma chamada de ferramenta (`0` desliga o teto) |
+| `KODA_TOOL_TIMEOUT_S` | `0` | Tempo total da tarefa (`0` significa sem teto) |
+| `KODA_COMANDO_TIMEOUT_S` | `600` s | Tempo total de um comando shell/terminal (`0` desliga o teto) |
+| `KODA_COMANDO_INATIVIDADE_S` | `300` s | Tempo sem saída até o comando ser considerado travado |
+| `KODA_COMANDO_OLHADA_S` | `240` s | Intervalo entre atualizações do shell ao modelo |
+| `KODA_TOOL_OUTPUT_MAX_BYTES` | `50000` | Caracteres que uma ferramenta devolve ao modelo |
+| `KODA_TOOL_OUTPUT_MAX_LINES` | `2000` | Linhas de uma listagem ou busca |
+| `KODA_TOOL_OUTPUT_MAX_LINE_LENGTH` | `2000` | Caracteres de uma linha na leitura de arquivo |
+| `KODA_FILE_READ_MAX_CHARS` | `100000` | Caracteres lidos de um arquivo ou anexo por vez (`file_read_max_chars`) |
+| `KODA_TOOL_OUTPUT_LIMIT` | `50000` | Saída de cada ferramenta que fica na tela e no histórico |
+
+Os tetos de saída são **os do projeto de origem**, que é a referência de comportamento do Koda:
+os valores do `tool_output` (50 000 / 2 000 / 2 000) e o `file_read_max_chars` (100 000). Foi
+lá que esses números foram medidos; o que os portou para cá tinha valores próprios e mais apertados
+(4 000 na tela, 12 000 para o modelo, 800 numa listagem), o que fazia o agente pedir o mesmo
+arquivo várias vezes.
+
+Ao atingir o orçamento de ferramentas, o Koda para de oferecê-las ao modelo e pede um
+resumo final. O teto também é aplicado dentro de lotes: nenhuma chamada acima do número
+configurado é executada. Se a mesma ferramenta vier pela terceira vez com os mesmos
+argumentos, pedido e plano, ela recebe um aviso para mudar de estratégia; se vier de novo
+após esse aviso, o ciclo é encerrado como incompleto. O detector não conta polls `continuar`
+do terminal, pois essas chamadas acompanham o processo existente.
+
+Cada comando do terminal tem um teto absoluto (`KODA_COMANDO_TIMEOUT_S`, 10 min por padrão,
+ampliável pelo modelo até uma hora) e é considerado travado após 5 min sem produzir saída
+(`KODA_COMANDO_INATIVIDADE_S`). Enquanto estiver rodando, o modelo recebe uma olhada a cada
+4 min (`KODA_COMANDO_OLHADA_S`) com a saída acumulada e pode continuar acompanhando ou parar
+o processo. O backend mantém o processo registrado entre as olhadas e o encerra ao atingir
+o teto absoluto ou ao detectar inatividade; o timeout genérico de 120 s não corta esse ciclo.
+A referência de origem usa **180 s** neste mesmo teto; o Koda fica generoso de propósito, porque a olhada de
+4 min só faz sentido com um teto acima dela — 180 s mataria o comando antes da primeira olhada.
+Subprocessos diretos e requisições de rede usam o prazo da chamada para encerrar o trabalho
+de forma cooperativa.
 
 ### O plano da tarefa (To-dos)
 
@@ -174,9 +203,42 @@ a borda acende no item atual e some quando o trabalho termina; sem nada em andam
 painel diz que está vazio. A lista vem da última resposta assistente: é ela que
 `update_todos` mantém, e é ela que sobrevive a reabrir a conversa.
 
+### Faça exatamente o que foi pedido — nada além
+
+A regra do dono (01/10/2026), e ela vale **antes** do primeiro passo, não como conselho no
+prompt: `classificar_pedido` olha o último pedido da pessoa e decide o que a rodada é.
+
+- **Pergunta, resumo, explicação ou texto avulso** (sem relação com a pasta de trabalho) →
+  `MODO_RESPOSTA`. O catálogo da rodada fica só com `read_attachment`: arquivo, shell, web e
+  código ficam de fora. A resposta sai do que o modelo sabe e dos anexos da conversa.
+- **Pedido que toca no projeto** — nome de arquivo com extensão, caminho com barra, ou o
+  vocabulário do trabalho (pasta, código, teste, git, erro, instalar, README…) — ou que pede
+  uma mudança de verdade → `MODO_CODIGO`. Aí o catálogo é o completo, e o trabalho é para ser
+  feito por inteiro, validado antes de entregar.
+
+Na dúvida, o veredito é `MODO_CODIGO`: negar ferramenta a quem pediu trabalho é pior do que
+oferecer ferramenta a quem pediu conversa — quem só queria conversa recebe a resposta de
+qualquer jeito. E "nunca troque o tipo de entrega" está escrito no `PROMPT_FERRAMENTAS`: o
+prompt explica as duas categorias e o que cada uma pede.
+
+**Instrução negativa explícita vira restrição de catálogo.** "Não use web nem arquivos" tira
+as ferramentas de arquivo e de web daquela rodada (`restricoes_do_pedido`); "responda apenas
+…" e "não use ferramenta nenhuma" rodam sem catálogo nenhum. Antes, frases assim eram só
+enunciados no meio do pedido: o modelo recebia tudo, escolhia `list_dir` e a resposta exibia
+os nomes das pastas e dos arquivos da pessoa (achado do QA). O que sai do catálogo também é
+dito ao modelo, no prompt de sistema — restringir calado faz ele pedir o que não existe.
+
+Ressalva de quem cita arquivo: "responda apenas: quantas linhas tem o app.py?" continua em
+`MODO_CODIGO` — quem escreve isso quer o número, não uma recusa.
+
+**Recusa é fechamento.** "Não posso revelar instruções internas" encerra a rodada: o loop não
+cobra ferramenta depois de uma recusa (só quando nada foi executado ainda, não há comando
+rodando e nada foi bloqueado). Antes, a recusa correta vinha seguida de uma cobrança do loop
+e o modelo, cobrado, saía listando a pasta de trabalho — 65 s e ~26 mil tokens para uma frase.
+
 ### Portões de parada: o que faz a conversa **não** fechar cedo
 
-A ideia vem do Hermes (`agent/turn_stop_gates.py`, de onde foram copiadas as duas lições
+A ideia vem da referência de implementação (de onde foram copiadas as duas lições
 que valem ouro). A primeira: quando o modelo para com uma resposta de texto, portões
 decidem se a conversa pode fechar. A segunda, e a que custou caro aqui: **o sinal tem de
 ser de estado — o que foi mexido, o que foi executado, o que ficou em aberto — e não de
@@ -194,81 +256,51 @@ tinha `deletar`. Agora as marcas de futuro valem por si (`vou…`, `preciso…`,
 frase final que **começa** em infinitivo conta como anúncio, e a lista de verbos ficou só
 como reforço.
 
-Quatro portões, em `app/tools/loop.py`, avaliados nesta ordem quando chega uma resposta de
-texto. Cada um tem orçamento próprio e **nenhum custa a resposta**: o texto já saiu na tela
-e é o que fica guardado — o portão só decide se ele é o fim ou se vem mais trabalho.
+O loop em `app/tools/loop.py` avalia o estado da tarefa quando o modelo responde em texto.
+O texto continua visível e guardado; o loop decide se pode fechar ou precisa pedir que o
+modelo retome:
 
-1. **Lista em aberto** (`retomar_tarefa`, até `MAX_RETOMADAS` = 3, renovando a cada avanço):
-   o sinal mais forte, porque não depende do que o modelo escreveu — é o que ele mesmo
-   registrou que faltava. A cobrança **nomeia** os itens e manda marcar na lista o que já
-   está feito, em vez de refazer;
-2. **Prova do que mudou** (`PROVAR_MUDANCA`, uma vez): mudou arquivo de **código** e não
-   executou nada depois disso é entrega sem prova de que funciona. O portão olha a
-   extensão (README não pede teste), e vale o **comando/código que rodou depois da última
-   mudança** — não o que rodou antes;
-3. **Promessa no fim** (`tool_choice: "required"`, até `MAX_FORCADAS` = 3): a resposta termina
-   anunciando trabalho. O passo é **refeito** com a ferramenta obrigatória — ver a seção
-   abaixo;
-4. **Ação sem nada ter funcionado** (`CONSERTAR_FERRAMENTA`, até 2): o pedido é uma ação e
-   nenhuma ferramenta funcionou — ali não existe "não havia o que fazer", existe erro de
-   argumento para ler e corrigir.
+1. **Lista em aberto** (`retomar_tarefa`, até `MAX_RETOMADAS` = 10, renovando a cada avanço):
+   usa os itens registrados pelo próprio modelo e pede que ele atualize a lista conforme
+   terminar cada um;
+2. **Anúncio sem chamada** (`RETOMAR_ANUNCIO`, até `MAX_RETOMADAS_ANUNCIO` = 10): se o
+   modelo diz que vai agir mas não chama ferramenta, o loop registra o que ficou pendente e
+   pede que ele continue. A próxima chamada recebe o catálogo completo e a seleção fica
+   livre para o modelo;
+3. **Ação sem ferramenta bem-sucedida** (`CONSERTAR_FERRAMENTA`, até 2 cobranças): o modelo
+   recebe o erro para corrigir os argumentos ou escolher outra abordagem.
 
 Esgotados os orçamentos, o fechamento é **honesto** em vez de silencioso: `completed: false`
 e uma frase que diz o que ficou faltando. Quem não executou nada ouve que nada mudou no
 disco; quem executou parte ouve só o que ficou em aberto.
 
-### O modelo é obrigado a executar
+### Retomadas sem impor a ferramenta
 
-O sintoma original: o modelo respondia **"Vou seguir com a Fase 1…"** e encerrava o passo
-sem chamar ferramenta nenhuma — o plano na tela e o disco intacto. Para quem estava olhando,
-o agente "falou que ia fazer e não fez". Duas defesas, e a terceira que substituiu a
-cobrança:
+O modelo pode anunciar um passo e terminar sem chamar ferramenta. Nessa situação, o loop
+manda uma mensagem interna com o anúncio e o pedido original, lembrando-o de continuar ou
+explicar que não há mais trabalho. **Não escolhe a ferramenta por ele:** não envia
+`tool_choice`, não reduz o catálogo e não aponta `shell`, `edit_file` ou outra chamada pelo
+nome. A seleção automática fica com o modelo em todos os passos, inclusive os de retomada.
+As retomadas têm teto (`MAX_RETOMADAS_ANUNCIO` = 10), renovado quando o modelo volta a
+chamar ferramentas, para evitar laço infinito sem cortar uma tarefa que está progredindo.
 
-- **lista em aberto não deixa encerrar.** É o sinal mais objetivo que existe, porque não
-  depende do que o modelo escreveu: se a lista registrada por ele tem item pendente, uma
-  resposta de texto é interrupção no meio da tarefa. A cobrança (`retomar_tarefa`) nomeia os
-  itens em aberto — cobrança genérica vira outra linha de intenção e para de novo. Trabalho
-  feito entre uma parada e outra **renova** o orçamento de retomadas (`MAX_RETOMADAS`, 3):
-  numa tarefa longa o agente narra e para várias vezes no caminho, e sem isso o teto acabava
-  no meio de trabalho que estava andando bem;
-- **anúncio refaz o passo com a ferramenta obrigatória.** A resposta que **termina**
-  anunciando o próximo passo (`vou…`, `próximo passo`, `em seguida`, `seguir com`) não vira
-  mensagem de bronca no histórico: o passo é **refeito** apontando a ferramenta. O anúncio
-  sai do histórico (para não virar exemplo) e o trabalho acontece — sem "cobrança" na
-  conversa. Duas forças, porque uma só não cobre o catálogo:
-
-  1. `tool_choice: "required"` — a API é obrigada a devolver uma chamada;
-  2. da segunda tentativa em diante, a ferramenta **pelo nome**
-     (`{"type": "function", "function": {"name": "read_file"}}`), inferida do próprio
-     anúncio (`funcao_do_anuncio`). É o caso do **`liz-nano`**, que **ignora** `required`
-     (medido) e chama quando a função é dita. Só ferramenta de leitura/busca/comando entra
-     aqui: forçar um `write_file` que o modelo não planejou grava arquivo pela metade.
-
-  Até `MAX_FORCADAS` (3); se nem apontada o modelo agir, o fechamento é honesto
-  (`completed: false`). A checagem olha o **fim** do texto, e não o texto inteiro: uma
-  explicação que só menciona o próximo passo no meio não pode virar "não terminei". A lista
-  de verbos é ampla de propósito (`analisar`, `revisar`, `conferir`, `abrir`, `ler`…): era o
-  `agora vou **analisar** os arquivos restantes` que passava batido e parava a tarefa;
-
-- **nada no prompt pede turno só de fala.** A regra 5 mandava narrar "ANTES de cada
-  ferramenta", e o loop injetava, a cada dois passos mudos, um pedido de narração que dizia
-  *"sem pedir ferramenta nesta resposta"*. Os modelos menores leram isso como licença para
-  **encerrar o passo narrando** — a tela mostrava "agora vou verificar o último arquivo" e
-  nada acontecia; o loop então brigava com o anúncio que ele mesmo tinha pedido. Agora a
-  linha curta e a chamada vão na **mesma resposta**, e a narração pedida pelo loop exige a
-  ferramenta junto;
-- **tarefa de ação sem nenhuma ferramenta também.** Se o pedido é uma ação ("arruma o
-  bug") e nada rodou ainda, a resposta de texto não encerra a tarefa: entra
-  `CONSERTAR_FERRAMENTA` (ler o erro, corrigir o argumento, executar). Pergunta de verdade
-  (`o que faz…?`) segue respondida em texto, como deve ser. Registrar o plano **não** conta
-  como ferramenta que funcionou — e, logo depois do plano, a cobrança de erro não aparece:
-  ali nada foi tentado, então não há erro para consertar;
-- **depois das cobranças, a verdade.** Se o modelo insistir em só falar, o `done` sai com
-  `completed: false` e a mensagem diz o que faltou pelo nome. A frase é verdadeira nos dois
-  casos: quem não executou nada ouve que nada mudou no disco, e quem executou parte do
-  trabalho ouve só o que ficou em aberto — dizer "nada foi executado" depois de arquivos
-  criados seria mentira na cara de quem viu as ferramentas rodando.
-
+- **Lista em aberto não deixa encerrar.** Se a lista registrada pelo modelo tem itens
+  pendentes, `retomar_tarefa` nomeia o que falta e pede que ele atualize o plano ao concluir
+  cada item.
+- **O catálogo explica as opções.** As descrições distinguem busca por nome (`search_files`)
+  de busca no conteúdo (`search_codebase`/`regex_search`), leitura de caminho conhecido
+  (`read_file`) de listagem (`list_dir`), edição de trecho (`edit_file`) de substituição do
+  arquivo inteiro (`write_file`) e de aplicação de diff (`apply_patch`), além de explicar
+  `shell` para comandos/build/testes e `code_interpreter` para cálculo/análise.
+- **Ação sem ferramenta bem-sucedida.** Quando o pedido exige uma ação e nenhuma ferramenta
+  funcionou, o loop devolve o erro para o modelo corrigir argumentos ou tentar outra
+  abordagem. Perguntas que pedem só uma explicação continuam podendo terminar em texto.
+- **Anúncio não é trabalho concluído.** Narração curta acompanha a chamada escolhida pelo
+  modelo na mesma resposta. Se a tarefa pede mudança e o modelo só promete, o loop pede que
+  continue; a chamada seguinte continua livre para qualquer ferramenta do catálogo.
+- **Fechamento honesto.** Se o modelo insistir em só falar, `completed: false` informa o que
+  ficou faltando. Quem não executou nada ouve que nada mudou no disco, e quem executou parte
+  ouve apenas o que continua em aberto.
 O que a própria pessoa bloqueou não entra na conta: ação negada no cartão de permissão (e
 ferramenta desligada por `KODA_TOOLS_DENY`) não vira cobrança — ali o certo é explicar.
 
@@ -329,6 +361,31 @@ para quem reler depois saber que parte do histórico virou resumo.
 O padrão é 1 milhão — a janela dos modelos do serviço. Compactar antes disso descartaria
 contexto que ainda cabia. Para trabalhar com mais, suba `KODA_CONTEXTO_TOKENS`
 (2_000_000, 10_000_000…) e confira o valor em `GET /api/health` (`contexto_tokens`).
+
+### Latência: o que pesa em cada passo
+
+O modo agente reenvia, a **cada** passo, o prompt de ferramentas (10,3 mil caracteres) mais o
+prompt de sistema (~1,3 mil) mais o catálogo JSON das 38 ferramentas (14,3 mil) — cerca de
+26 mil caracteres fixos, perto de 8 mil tokens, antes de qualquer histórico. Medido no
+`loop.executar`; é o custo que aparece como "chamada ao modelo meio lenta" em pedido curto.
+
+Três coisas atacam isso, e as três já estão no caminho:
+
+- **Rodada de resposta não recebe catálogo** (`MODO_RESPOSTA` — ver "Faça exatamente o que foi
+  pedido"). A maior parte do peso fixo sai junto: pergunta, resumo e conversa solta não
+  precisam de 38 esquemas de ferramenta para serem respondidas.
+- **A rodada fecha no texto quando o pedido pede texto.** Cada passo a mais é um pedido
+  inteiro ao provedor; os portões de parada deixaram de cobrar ferramenta em pedido de
+  resposta e depois de recusa (era aí que uma frase custava 100 s e ~35 mil tokens).
+- **O que é disco não roda no laço de eventos.** O índice de skills varre `.agents/skills` do
+  projeto e da máquina a cada mensagem (~34 ms medidos, mais em projeto grande) e agora vai
+  para uma thread (`asyncio.to_thread` via `call`), como as consultas de banco e o store de
+  anexos já iam.
+
+O resto do tempo é rede e trabalho de verdade: o histórico da tarefa, os resultados das
+ferramentas (até `KODA_TOOL_OUTPUT_LIMIT`, 50 mil caracteres cada) e o comando que a
+ferramenta executou. Nada disso é gordura para cortar sem perder o que o agente sabe — o que
+corta é a compactação, logo acima.
 
 ### Quando o provedor falha
 
@@ -448,7 +505,7 @@ comando: npm run build
 Antes era `subprocess.run(timeout=...)`: no limite o comando era **morto** e um build de
 vinte minutos ia junto com o trabalho. Agora quem decide é o modelo — acompanhar
 (`continuar`) ou parar (`parar`, que mata a **árvore** com `taskkill /T`, senão o filho do
-`npm` sobrevive). A saída guardada é o **fim** dela (`LIMITE_SAIDA_RODANDO`, 24 mil
+`npm` sobrevive). A saída guardada é o **fim** dela (`LIMITE_SAIDA_RODANDO`, 200 mil
 caracteres): comando tagarela não enche a memória, e o erro está no fim mesmo.
 
 **Quem interrompe é o progresso, não o relógio.** Houve um teto por tempo aqui (30 min) e ele
@@ -568,9 +625,8 @@ modelos (se estiver respondendo) e o provider local.
   com "host fora do ar", jogando o `auto` no provider local e sumindo com as ferramentas.
 
   O modelo padrão é **`liz-4`** (o maior do catálogo, e o primeiro da lista no seletor).
-  O `liz-nano` era o padrão e saiu: ele **ignora** o `tool_choice` genérico e é justamente
-  o modelo que mais encerra anunciando em vez de executar (medido — ver os portões de
-  parada). `KODA_HOST_MODEL` troca o padrão.
+  `KODA_HOST_MODEL` troca o padrão. O Koda envia as ferramentas disponíveis sem
+  `tool_choice` e deixa cada modelo decidir quando e qual ferramenta chamar.
 
   Subindo o `c-host.exe` **à mão** (fora do app), ele precisa de duas coisas que o app
   passa sozinho e que não estão no binário: `SERVE_LIZ_AUTH_URL` com o **endereço base do

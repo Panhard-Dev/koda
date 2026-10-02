@@ -1033,6 +1033,8 @@ export function SettingsScreen({
   onModelChange,
   mostrarRodape,
   onToggleRodape,
+  mostrarTraces,
+  onToggleTraces,
   appearance,
   onAppearanceChange,
   onSignOut,
@@ -1061,6 +1063,9 @@ export function SettingsScreen({
   /** Números da rodada (uso, tempo, hora) na ficha no fim de cada resposta. */
   mostrarRodape: boolean
   onToggleRodape: () => void
+  /** Raciocínio do modelo e passos das ferramentas abertos na conversa. */
+  mostrarTraces: boolean
+  onToggleTraces: () => void
   appearance: Appearance
   onAppearanceChange: (patch: Partial<Appearance>) => void
   /** Conta do painel (quem entrou na tela de login). `null` só em tese: o app não abre sem ela. */
@@ -1216,6 +1221,13 @@ export function SettingsScreen({
                   description="Exibe o uso de tokens, a duração e a hora no rodapé de cada resposta."
                   checked={mostrarRodape}
                   onChange={onToggleRodape}
+                />
+
+                <Switch
+                  label="Mostrar raciocínio e passos das ferramentas"
+                  description="Abre o rascunho do modelo e os detalhes de cada ferramenta (caminhos, tempo e saída). Desligado, as ferramentas aparecem só como uma linha resumida."
+                  checked={mostrarTraces}
+                  onChange={onToggleTraces}
                 />
 
                 <div className="flex items-center justify-between gap-4 px-5 py-4">

@@ -1,7 +1,7 @@
 """Orçamento de contexto: o que fazer quando a conversa (ou a tarefa) não cabe mais.
 
 O agente reenvia o histórico inteiro ao provedor a cada passo. Num projeto grande isso
-vira o problema principal: cada saída de ferramenta (até 12 mil caracteres) entra na
+vira o problema principal: cada saída de ferramenta (até 50 mil caracteres) entra na
 conta, e depois de dezenas de passos o pedido passa do que o provedor aceita — o modelo
 começa a responder errado, a chamada volta com erro, e a tarefa morre no meio.
 

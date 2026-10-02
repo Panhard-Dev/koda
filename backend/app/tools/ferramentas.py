@@ -27,12 +27,54 @@ import threading
 import time
 import urllib.parse
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import httpx
 
-LIMITE_SAIDA = 12_000
+_PRAZO_DA_FERRAMENTA: ContextVar[float | None] = ContextVar(
+    "prazo_da_ferramenta", default=None
+)
+_CANCELAMENTO_DA_FERRAMENTA: ContextVar[Event | None] = ContextVar(
+    "cancelamento_da_ferramenta", default=None
+)
+
+
+def _restante_da_ferramenta() -> float | None:
+    prazo = _PRAZO_DA_FERRAMENTA.get()
+    return None if prazo is None else prazo - time.monotonic()
+
+
+def _verificar_cancelamento() -> None:
+    evento = _CANCELAMENTO_DA_FERRAMENTA.get()
+    if evento is not None and evento.is_set():
+        raise InterruptedError("a pessoa cancelou a tarefa")
+
+
+def _timeout_da_ferramenta(padrao: float) -> float:
+    restante = _restante_da_ferramenta()
+    return padrao if restante is None else max(0.05, min(padrao, restante))
+
+
+def _timeout_httpx(padrao: float) -> httpx.Timeout:
+    return httpx.Timeout(_timeout_da_ferramenta(padrao))
+
+#: Teto do que uma ferramenta devolve ao modelo, em caracteres. 50 mil: era 12 mil, e o
+#: teto apertado cortava saída de build e de bateria de testes no meio.
+LIMITE_SAIDA = 50_000
+
+#: Teto de leitura de um arquivo (ou anexo) por vez, em caracteres — o `file_read_max_chars`
+#: do projeto de origem (100 mil). Fica **acima** do teto de saída de propósito: assim o arquivo é lido
+#: inteiro e o corte acontece num lugar só, o `_limitar`.
+LIMITE_LEITURA = 100_000
+
+#: Teto de **uma** linha só. Arquivo minificado é uma linha de megabytes: sem isto ela come
+#: o orçamento inteiro da leitura e o modelo recebe um começo de linha, sem fim e sem
+#: contexto. É 2 mil.
+LIMITE_DE_LINHA = 2_000
+
 #: Tempo padrão de um comando no terminal, em segundos. Era 120 s e cortava justamente o
 #: que a pessoa pediu: suíte de testes grande, build, instalação de dependência. O modelo
 #: pode pedir mais em `tempo_limite`, até o teto de `TEMPO_COMANDO_MAX`.
@@ -50,7 +92,7 @@ INTERVALO_DE_OLHADA = 240
 #: Quanto da saída de um comando longo fica guardado, em caracteres. Comando tagarela
 #: (build com milhares de linhas) não pode encher a memória do app: guarda o **fim**, que é
 #: onde está o erro, e diz quanta coisa ficou de fora.
-LIMITE_SAIDA_RODANDO = 24_000
+LIMITE_SAIDA_RODANDO = 200_000
 
 #: Quantas olhadas seguidas **sem uma linha nova** antes de considerar o comando travado.
 #:
@@ -90,20 +132,35 @@ def definir_limites(
     timeout: int | None = None,
     inatividade: int | None = None,
     olhada: int | None = None,
+    saida: int | None = None,
+    listagem: int | None = None,
+    leitura: int | None = None,
+    linha: int | None = None,
 ) -> None:
-    """Ajusta os tetos do `shell` a partir da configuração do app.
+    """Ajusta os tetos das ferramentas a partir da configuração do app.
 
-    Chamado uma vez na subida (`main.py`). Existe para os três prazos ficarem **separados**
+    Chamado uma vez na subida (`main.py`). Os três prazos do `shell` ficam **separados**
     como o dono pediu: teto total do processo (`timeout`), tempo sem saída que caracteriza
-    travamento (`inatividade`) e intervalo de acompanhamento (`olhada`).
+    travamento (`inatividade`) e intervalo de acompanhamento (`olhada`). Os tetos de saída
+    (`saida`, `listagem`, `leitura`, `linha`) são os do projeto de origem, e existem
+    para o mesmo número valer no backend inteiro em vez de ficar preso numa constante.
     """
+    global LIMITE_SAIDA, LIMITE_LISTAGEM, LIMITE_LEITURA, LIMITE_DE_LINHA
     global TEMPO_COMANDO, INATIVIDADE_MAX_S, INTERVALO_DE_OLHADA
-    if timeout and timeout > 0:
+    if timeout is not None and timeout >= 0:
         TEMPO_COMANDO = int(timeout)
     if inatividade and inatividade > 0:
         INATIVIDADE_MAX_S = int(inatividade)
     if olhada and olhada > 0:
         INTERVALO_DE_OLHADA = int(olhada)
+    if saida and saida > 0:
+        LIMITE_SAIDA = int(saida)
+    if listagem and listagem > 0:
+        LIMITE_LISTAGEM = int(listagem)
+    if leitura and leitura > 0:
+        LIMITE_LEITURA = int(leitura)
+    if linha and linha > 0:
+        LIMITE_DE_LINHA = int(linha)
 
 
 def _reservar_processo() -> bool:
@@ -203,8 +260,9 @@ DOMINIOS_WIKI = frozenset(
 
 #: Quantas entradas o `list_dir` mostra de uma pasta. Alto de propósito: pasta de projeto
 #: tem centenas de arquivos, e cortar calado faz o modelo trabalhar com meia lista na
-#: cabeça. Passando disso, o retorno diz quantas ficaram de fora.
-LIMITE_LISTAGEM = 800
+#: cabeça. Passando disso, o retorno diz quantas ficaram de fora. O teto é o
+#: 2 mil, o mesmo número que corta uma busca.
+LIMITE_LISTAGEM = 2_000
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -375,7 +433,7 @@ APELIDOS: dict[str, str] = {
     "lint": "get_problems",
     "check_file": "get_problems",
     "apply_diff": "apply_patch",
-    "patch": "apply_patch",
+    "patch": "edit_file",  # o `patch` do Koda/OpenAI é find-and-replace, igual ao nosso edit_file
     "apply_changes": "apply_patch",
     # ambiente, web, git
     "env": "get_environment",
@@ -386,6 +444,8 @@ APELIDOS: dict[str, str] = {
     "fetch_url": "url_reader",
     "read_url": "url_reader",
     "web_fetch": "url_reader",
+    "web_extract": "url_reader",
+    "extract_url": "url_reader",
     "visit_url": "url_reader",
     "search_web": "web_search",
     "websearch": "web_search",
@@ -409,6 +469,11 @@ APELIDOS: dict[str, str] = {
     "uninstall": "uninstall_package",
     "remove_package": "uninstall_package",
     "uninstall_dependency": "uninstall_package",
+    # plano
+    "todo_list": "update_todos",
+    "todo_write": "update_todos",
+    "write_todos": "update_todos",
+    "set_todos": "update_todos",
 }
 
 #: Sinônimos de **argumento**: o mesmo campo escrito como o modelo lembra. Sem isso, o
@@ -580,7 +645,8 @@ DEFINICOES: list[dict[str, Any]] = [
     # ---- execução ----
     _def(
         "code_interpreter",
-        "Executa um trecho de código e devolve a saída (print etc). Python por padrão; "
+        "Executa um trecho de código e devolve a saída (print etc). Use para calcular e "
+        "analisar; para rodar teste/build/programa use `shell`. Python por padrão; "
         "com `linguagem: node` roda JavaScript — o certo num projeto JS. Para ler ou "
         "procurar arquivo do projeto, use read_file/search_codebase.",
         {
@@ -594,7 +660,9 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def(
         "shell",
-        "Executa um comando no terminal (cmd) e devolve stdout+stderr. Comando que demora "
+        "Executa um comando no terminal (cmd) e devolve stdout+stderr. Use só para "
+        "programa de verdade (build, teste, git, install); NÃO use para ler, criar, editar, "
+        "listar, mover ou apagar arquivo — há ferramenta própria para cada um. Comando que demora "
         "NÃO é interrompido: a cada 4 minutos ele devolve a saída até agora com um id, e "
         'você decide — continue acompanhando com {"continuar": "<id>"} ou pare com '
         '{"parar": "<id>"}. Comando que não termina sozinho (servidor, programa com janela, '
@@ -623,7 +691,8 @@ DEFINICOES: list[dict[str, Any]] = [
     # ---- arquivos ----
     _def(
         "read_file",
-        "Lê um arquivo de texto inteiro. Não passe `limite` por hábito: o arquivo vem "
+        "Lê um arquivo de texto inteiro. Use isto em vez de `cat`/`type`/`head`/`tail` no "
+        "shell. Não passe `limite` por hábito: o arquivo vem "
         "completo, e é isso que evita ler o mesmo arquivo várias vezes. Use `inicio`/`limite` "
         "só em arquivo muito grande, e aí o retorno diz o que ficou de fora.",
         {
@@ -658,13 +727,16 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def(
         "write_file",
-        "Cria ou sobrescreve um arquivo de texto (cria subpastas).",
+        "Cria ou sobrescreve um arquivo de texto INTEIRO (cria subpastas). Use isto em vez "
+        "de `echo`/heredoc no shell. Substitui o conteúdo todo — para alterar um trecho use "
+        "`edit_file`.",
         {"caminho": {"type": "string"}, "conteudo": {"type": "string"}},
         ["caminho", "conteudo"],
     ),
     _def(
         "edit_file",
-        "Substitui trecho exato em um arquivo (old_string deve ocorrer uma única vez).",
+        "Substitui um trecho exato em um arquivo (old_string deve ocorrer uma única vez). "
+        "Use isto em vez de `sed`/`awk` no shell; para o arquivo inteiro use `write_file`.",
         {
             "caminho": {"type": "string"},
             "old_string": {"type": "string"},
@@ -684,38 +756,39 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def(
         "list_dir",
-        "Lista arquivos e subpastas de um diretório (padrão: pasta de trabalho).",
+        "Lista arquivos e subpastas de um diretório (padrão: pasta de trabalho). Use isto "
+        "em vez de `dir`/`ls` no shell.",
         {"caminho": {"type": "string", "description": "padrão: ."}},
         [],
     ),
-    _def("delete_file", "Apaga um arquivo (não apaga pastas).", {"caminho": {"type": "string"}}, ["caminho"]),
+    _def("delete_file", "Apaga um arquivo (não apaga pastas). Use isto em vez de `del`/`rm` no shell.", {"caminho": {"type": "string"}}, ["caminho"]),
     _def(
         "create_directory",
-        "Cria uma pasta (cria também as pastas acima dela que faltarem).",
+        "Cria uma pasta (cria também as pastas acima dela que faltarem). Use isto em vez de `mkdir` no shell.",
         {"caminho": {"type": "string"}},
         ["caminho"],
     ),
     _def(
         "move_file",
-        "Move um arquivo ou uma pasta para outro caminho (o destino não pode existir).",
+        "Move um arquivo ou uma pasta para outro caminho (o destino não pode existir). Use isto em vez de `mv` no shell.",
         {"origem": {"type": "string"}, "destino": {"type": "string"}},
         ["origem", "destino"],
     ),
     _def(
         "copy_file",
-        "Copia um arquivo ou uma pasta inteira para outro caminho.",
+        "Copia um arquivo ou uma pasta inteira para outro caminho. Use isto em vez de `cp` no shell.",
         {"origem": {"type": "string"}, "destino": {"type": "string"}},
         ["origem", "destino"],
     ),
     _def(
         "rename_file",
-        "Renomeia um arquivo ou pasta dentro da mesma pasta (só o nome, sem caminho).",
+        "Renomeia um arquivo ou pasta dentro da mesma pasta (só o nome, sem caminho). Use isto em vez de `ren`/`mv` no shell.",
         {"caminho": {"type": "string"}, "novo_nome": {"type": "string"}},
         ["caminho", "novo_nome"],
     ),
     _def(
         "delete_directory",
-        "Apaga uma pasta inteira, com tudo dentro dela. Nunca apaga a pasta de trabalho.",
+        "Apaga uma pasta inteira, com tudo dentro dela. Nunca apaga a pasta de trabalho. Use isto em vez de `rmdir`/`rm -rf` no shell.",
         {"caminho": {"type": "string"}},
         ["caminho"],
     ),
@@ -728,7 +801,8 @@ DEFINICOES: list[dict[str, Any]] = [
     # ---- busca ----
     _def(
         "search_codebase",
-        "Busca um termo (texto ou regex) em todos os arquivos do projeto e devolve arquivo:linha com a linha.",
+        "Busca um termo (texto ou regex) em todos os arquivos do projeto e devolve "
+        "arquivo:linha com a linha. Use isto em vez de `findstr`/`grep` no shell.",
         {"termo": {"type": "string"}, "regex": {"type": "boolean", "description": "tratar termo como regex (padrão false)"}},
         ["termo"],
     ),
@@ -741,7 +815,8 @@ DEFINICOES: list[dict[str, Any]] = [
     _def("grep", "Alias de regex_search: busca com expressão regular nos arquivos.", {"padrao": {"type": "string"}}, ["padrao"]),
     _def(
         "regex_search",
-        "Busca com expressão regular nos arquivos do projeto (arquivo:linha:trecho).",
+        "Busca com expressão regular nos arquivos do projeto (arquivo:linha:trecho). Use "
+        "isto em vez de `findstr`/`grep` no shell; para buscar um texto use `search_codebase`.",
         {"padrao": {"type": "string"}},
         ["padrao"],
     ),
@@ -753,14 +828,14 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def("linter", "Alias de get_problems.", {"caminho": {"type": "string"}}, ["caminho"]),
     # ---- web ----
-    _def("web_search", "Pesquisa no Bing e devolve vários resultados; em pesquisa ampla, use consultas diferentes para achar fontes em mais domínios.", {"consulta": {"type": "string"}}, ["consulta"]),
-    _def("url_reader", "Baixa uma URL pública (http/https) e devolve o texto da página.", {"url": {"type": "string"}}, ["url"]),
+    _def("web_search", "Pesquisa no Bing e devolve vários resultados. Use isto para descobrir na web; para ler uma página já conhecida use `url_reader`. Em pesquisa ampla, use consultas diferentes para achar fontes em mais domínios.", {"consulta": {"type": "string"}}, ["consulta"]),
+    _def("url_reader", "Baixa uma URL pública (http/https) conhecida e devolve o texto da página. Use isto para abrir uma página específica; para descobrir na web use `web_search`.", {"url": {"type": "string"}}, ["url"]),
     _def("browser", "Alias de url_reader: abre uma URL e devolve o texto.", {"url": {"type": "string"}}, ["url"]),
     # ---- git ----
-    _def("git_status", "Mostra o status git do projeto.", {}, []),
-    _def("git_diff", "Mostra o diff não-commitado (staged + unstaged).", {}, []),
-    _def("git_log", "Mostra os últimos commits (padrão 10).", {"quantidade": {"type": "integer"}}, []),
-    _def("git_commit", "Faz git add -A e commit com a mensagem dada.", {"mensagem": {"type": "string"}}, ["mensagem"]),
+    _def("git_status", "Mostra o status git do projeto. Use isto em vez do shell para git.", {}, []),
+    _def("git_diff", "Mostra o diff não-commitado (staged + unstaged). Use isto em vez de `git diff` no shell.", {}, []),
+    _def("git_log", "Mostra os últimos commits (padrão 10). Use isto em vez de `git log` no shell.", {"quantidade": {"type": "integer"}}, []),
+    _def("git_commit", "Faz git add -A e commit com a mensagem dada. Use isto em vez de `git commit` no shell.", {"mensagem": {"type": "string"}}, ["mensagem"]),
     _def(
         "update_todos",
         "Registra/atualiza a lista de tarefas da resposta (o plano). Marque cada item como "
@@ -784,7 +859,9 @@ DEFINICOES: list[dict[str, Any]] = [
     ),
     _def(
         "search_files",
-        "Procura arquivos pelo nome ou por um padrão glob (ex.: **/*.py) e devolve os caminhos.",
+        "Procura arquivos pelo nome ou por um padrão glob (ex.: **/*.py) e devolve os "
+        "caminhos. Use isto em vez de `find`/`ls` no shell; para procurar conteúdo use "
+        "`search_codebase`/`regex_search`.",
         {
             "padrao": {"type": "string", "description": "padrão glob, ex.: **/*.ts"},
             "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"},
@@ -824,7 +901,7 @@ DEFINICOES: list[dict[str, Any]] = [
     # ---- dependências ----
     _def(
         "install_package",
-        "Instala uma dependência no projeto (npm/pnpm/yarn, uv/pip ou cargo, pelo que o projeto usa).",
+        "Instala uma dependência no projeto (npm/pnpm/yarn, uv/pip ou cargo, pelo que o projeto usa). Use isto em vez de rodar `npm install`/`pip install` no shell. Chame direto: a ferramenta descobre o gerenciador sozinha — não investigue o projeto antes.",
         {
             "pacote": {"type": "string"},
             "gerenciador": {
@@ -1065,6 +1142,7 @@ def _inteiro(valor: Any, padrao: int) -> int:
 
 
 def _limitar(texto: str) -> str:
+    """Corta o texto no teto de saída."""
     if len(texto) > LIMITE_SAIDA:
         return texto[:LIMITE_SAIDA] + f"\n...[saída truncada, {len(texto) - LIMITE_SAIDA} caracteres restantes]"
     return texto
@@ -1120,6 +1198,17 @@ def _corresponde_glob(caminho: Path, base: Path, padrao: str) -> bool:
     return False
 
 
+def _encurtar_linha(linha: str) -> str:
+    """Corta uma linha maior que o teto, como o `max_line_length` do projeto de origem.
+
+    O marcador vai no lugar do resto e com a quebra no fim: a linha seguinte não pode se
+    emendar na cortada, senão o modelo lê como se fosse uma só.
+    """
+    if len(linha) <= LIMITE_DE_LINHA:
+        return linha
+    return linha[:LIMITE_DE_LINHA] + "... [linha truncada]\n"
+
+
 def _ler_trecho(
     rota: Path, inicio: int, limite: int, recorte: bool
 ) -> tuple[list[str], int, bool]:
@@ -1130,7 +1219,7 @@ def _ler_trecho(
     enchia a RAM do app antes de o `_limitar` entrar em ação. Aqui a memória fica limitada
     ao trecho pedido (ou ao teto), e o total é contado na passagem.
     """
-    teto = LIMITE_SAIDA * 3
+    teto = LIMITE_LEITURA
     guardadas: list[str] = []
     acumulado = 0
     total = 0
@@ -1147,6 +1236,7 @@ def _ler_trecho(
             elif acumulado > teto:
                 excedeu = True
                 continue
+            linha = _encurtar_linha(linha)
             guardadas.append(linha)
             acumulado += len(linha)
             if not recorte and acumulado > teto:
@@ -1502,7 +1592,7 @@ def _git_add_seguro(workspace: Path) -> str:
 def _rodar_lista(
     argv: list[str],
     workspace: Path,
-    tempo: int = TEMPO_COMANDO,
+    tempo: float = TEMPO_COMANDO,
     env: dict[str, str] | None = None,
 ) -> str:
     """Executa um argv direto (sem shell) e devolve a saída formatada.
@@ -1516,6 +1606,11 @@ def _rodar_lista(
     (`GIT_TERMINAL_PROMPT=0`) — sem isso um `git push` num remoto que pede credencial ficava
     parado até o teto, sem nada na tela.
     """
+    restante = _restante_da_ferramenta()
+    if restante is not None:
+        if restante <= 0:
+            return "ERRO: o prazo desta chamada de ferramenta acabou antes da execução."
+        tempo = min(float(tempo), restante)
     if not _reservar_processo():
         return (
             f"ERRO: já há {LIMITE_PROCESSOS_CONCORRENTES} comandos em execução. "
@@ -1545,19 +1640,30 @@ def _rodar_lista(
     rodando = ComandoRodando(
         uuid.uuid4().hex[:8], " ".join(argv), proc, vaga_reservada=True
     )
-    if rodando.esperar(float(tempo)):
-        rodando.fechar_leitores()
-        rodando.liberar_vaga()
-        return _formatar(
-            subprocess.CompletedProcess(
-                args=argv, returncode=proc.returncode or 0, stdout=rodando.texto(), stderr=""
+    fim = time.monotonic() + float(tempo)
+    while True:
+        evento_cancelamento = _CANCELAMENTO_DA_FERRAMENTA.get()
+        if evento_cancelamento is not None and evento_cancelamento.is_set():
+            rodando.matar()
+            rodando.fechar_leitores()
+            rodando.liberar_vaga()
+            return "ERRO: a pessoa cancelou a tarefa; o processo foi interrompido."
+        restante = fim - time.monotonic()
+        if restante <= 0:
+            break
+        if rodando.esperar(min(0.2, restante)):
+            rodando.fechar_leitores()
+            rodando.liberar_vaga()
+            return _formatar(
+                subprocess.CompletedProcess(
+                    args=argv, returncode=proc.returncode or 0, stdout=rodando.texto(), stderr=""
+                )
             )
-        )
     rodando.matar()
     rodando.fechar_leitores()
     rodando.liberar_vaga()
     return (
-        f"ERRO: comando excedeu {tempo}s e foi interrompido\n"
+        f"ERRO: comando excedeu {tempo:g}s e foi interrompido\n"
         f"--- saída até a interrupção ---\n{rodando.texto()}"
     )
 
@@ -1902,7 +2008,9 @@ def _comecar(
     return rodando
 
 
-def _acompanhar(identificador: str, tempo: int) -> str:
+def _acompanhar(
+    identificador: str, tempo: int, espera_maxima: float | None = None
+) -> str:
     """Espera mais um tanto por um comando que já estava rodando."""
     rodando = _RODANDO.get(identificador)
     if rodando is None:
@@ -1912,9 +2020,12 @@ def _acompanhar(identificador: str, tempo: int) -> str:
         )
     # A espera nunca passa do que resta do teto absoluto: sem isto o `continuar` empurrava
     # o fim do processo para depois do prazo.
-    restante = INTERVALO_DE_OLHADA
+    restante = min(INTERVALO_DE_OLHADA, espera_maxima or INTERVALO_DE_OLHADA)
     if rodando.deadline is not None:
         restante = min(restante, max(0.05, rodando.deadline - time.monotonic()))
+    restante_chamada = _restante_da_ferramenta()
+    if restante_chamada is not None:
+        restante = min(restante, max(0.05, restante_chamada))
     if rodando.esperar(min(tempo, restante)):
         _RODANDO.pop(identificador, None)
         rodando.fechar_leitores()
@@ -1927,7 +2038,14 @@ def _acompanhar(identificador: str, tempo: int) -> str:
                 stderr="",
             )
         )
-    return _relatorio_de_olhada(rodando)
+    relatorio = _relatorio_de_olhada(rodando)
+    prazo_chamada = _restante_da_ferramenta()
+    if prazo_chamada is not None and prazo_chamada <= 0 and not rodando.terminou():
+        return (
+            "ERRO: o tempo desta chamada acabou; o comando continua registrado e pode ser "
+            "acompanhado ou cancelado.\n" + relatorio
+        )
+    return relatorio
 
 
 def _parar(identificador: str) -> str:
@@ -1938,7 +2056,11 @@ def _parar(identificador: str) -> str:
 
 
 def _rodar(
-    comando: str, workspace: Path, tempo: int = TEMPO_COMANDO, dono: str = ""
+    comando: str,
+    workspace: Path,
+    tempo: int = TEMPO_COMANDO,
+    dono: str = "",
+    espera_maxima: float | None = None,
 ) -> str:
     """Roda o comando e **não** o mata quando demora: devolve a olhada e segue vivo.
 
@@ -1961,6 +2083,11 @@ def _rodar(
         return f"ERRO ao rodar {comando!r}: {exc}"
 
     limite = min(tempo, INTERVALO_DE_OLHADA) if tempo else INTERVALO_DE_OLHADA
+    if espera_maxima is not None:
+        limite = min(limite, espera_maxima)
+    restante_chamada = _restante_da_ferramenta()
+    if restante_chamada is not None:
+        limite = min(limite, max(0.05, restante_chamada))
     if rodando.esperar(limite):
         _RODANDO.pop(rodando.id, None)
         rodando.fechar_leitores()
@@ -1973,7 +2100,14 @@ def _rodar(
                 stderr="",
             )
         )
-    return _relatorio_de_olhada(rodando)
+    relatorio = _relatorio_de_olhada(rodando)
+    prazo_chamada = _restante_da_ferramenta()
+    if prazo_chamada is not None and prazo_chamada <= 0 and not rodando.terminou():
+        return (
+            "ERRO: o tempo desta chamada acabou; o comando continua registrado e pode ser "
+            "acompanhado ou cancelado.\n" + relatorio
+        )
+    return relatorio
 
 
 # ---------------------------------------------------------------- web
@@ -2051,7 +2185,7 @@ def _seguir_redirects(cliente: httpx.Client, url: str) -> httpx.Response | str:
     atual = url
     resp: httpx.Response | None = None
     for _ in range(SALTOS_MAXIMOS + 1):
-        resp = cliente.get(atual)
+        resp = cliente.get(atual, timeout=_timeout_httpx(25))
         destino = resp.headers.get("location")
         if not resp.is_redirect or not destino:
             return resp
@@ -2113,12 +2247,12 @@ def _cliente_das_buscas() -> httpx.Client:
     global _cliente_web, _sessao_do_bing
     if _cliente_web is None:
         _cliente_web = httpx.Client(
-            headers=CABECALHOS_WEB, timeout=10, follow_redirects=True
+            headers=CABECALHOS_WEB, timeout=_timeout_httpx(10), follow_redirects=True
         )
     if not _sessao_do_bing:
         _sessao_do_bing = True
         try:
-            _cliente_web.get("https://www.bing.com/")
+            _cliente_web.get("https://www.bing.com/", timeout=_timeout_httpx(10))
         except httpx.HTTPError:
             pass
     return _cliente_web
@@ -2168,7 +2302,9 @@ def _busca_bing(consulta: str) -> str:
         resp = _cliente_das_buscas().get(
             "https://www.bing.com/search",
             params={"q": _consulta_sem_wiki(termo), "format": "rss"},
+            timeout=_timeout_httpx(10),
         )
+        resp.raise_for_status()
         linhas = []
         for item in re.findall(r"<item>(.*?)</item>", resp.text, re.S)[:12]:
             titulo = _texto_do_item(item, "title")
@@ -2294,7 +2430,7 @@ def _ler_pagina(url: str) -> str:
         return recusa
 
     try:
-        with httpx.Client(headers=CABECALHOS_WEB, timeout=25) as cliente:
+        with httpx.Client(headers=CABECALHOS_WEB, timeout=_timeout_httpx(25)) as cliente:
             resp = _seguir_redirects(cliente, url)
             if isinstance(resp, str):
                 return resp
@@ -2302,6 +2438,9 @@ def _ler_pagina(url: str) -> str:
             # mentiroso) enchia a memória do backend antes de o `_limitar` entrar em ação —
             # o corte tem que ser **na leitura**, não depois dela.
             corpo = resp.text[: LIMITE_SAIDA * 8]
+
+        if resp.status_code >= 400:
+            return f"ERRO: {url} respondeu HTTP {resp.status_code}."
 
         tipo = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
         cabeca = f"URL: {resp.url}\nHTTP {resp.status_code}"
@@ -2357,7 +2496,7 @@ def _raiz_git(workspace: Path) -> str | None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=20,
+            timeout=_timeout_da_ferramenta(20),
             stdin=subprocess.DEVNULL,
             env=_ambiente_do_comando(),
             **_sem_janela(),
@@ -3039,6 +3178,40 @@ def executar(
     acesso_livre: bool = False,
     dono: str = "",
     anexos: Any = None,
+    timeout_s: float | None = None,
+    cancelamento: Event | None = None,
+) -> str:
+    """Executa uma ferramenta com prazo cooperativo propagado aos seus recursos."""
+    if timeout_s is not None and timeout_s <= 0:
+        return "ERRO: o prazo da tarefa acabou antes da execução da ferramenta."
+    prazo = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    token = _PRAZO_DA_FERRAMENTA.set(prazo)
+    token_cancelamento = _CANCELAMENTO_DA_FERRAMENTA.set(cancelamento)
+    try:
+        _verificar_cancelamento()
+        return _executar_impl(
+            nome,
+            argumentos,
+            workspace,
+            negadas,
+            acesso_livre=acesso_livre,
+            dono=dono,
+            anexos=anexos,
+        )
+    finally:
+        _CANCELAMENTO_DA_FERRAMENTA.reset(token_cancelamento)
+        _PRAZO_DA_FERRAMENTA.reset(token)
+
+
+def _executar_impl(
+    nome: str,
+    argumentos: dict[str, Any],
+    workspace: Path,
+    negadas: set[str] | None = None,
+    *,
+    acesso_livre: bool = False,
+    dono: str = "",
+    anexos: Any = None,
 ) -> str:
     """Roda uma ferramenta e devolve o texto que volta para o modelo.
 
@@ -3050,6 +3223,10 @@ def executar(
     passar pelo workspace. Sem store, a ferramenta responde que os anexos não estão
     disponíveis, em vez de fingir que leu.
     """
+    _verificar_cancelamento()
+    restante = _restante_da_ferramenta()
+    if restante is not None and restante <= 0:
+        return "ERRO: o prazo desta chamada de ferramenta acabou antes da execução."
     argumentos = _sinonimos(argumentos or {})
     nome = canonico(nome)
     if negadas and nome in {canonico(item) for item in negadas}:
@@ -3074,7 +3251,11 @@ def executar(
         # rodando, e `comando` vem vazio de propósito.
         acompanhar = str(argumentos.get("continuar") or "").strip()
         if acompanhar:
-            return _acompanhar(acompanhar, tempo)
+            return _acompanhar(
+                acompanhar,
+                tempo,
+                espera_maxima=_timeout_da_ferramenta(INTERVALO_DE_OLHADA),
+            )
         interromper = str(argumentos.get("parar") or "").strip()
         if interromper:
             return _parar(interromper)
@@ -3084,7 +3265,13 @@ def executar(
                 "ERRO: informe o `comando`, ou o `continuar`/`parar` de um comando que já "
                 "está rodando"
             )
-        return _rodar(comando, workspace, tempo, dono)
+        return _rodar(
+            comando,
+            workspace,
+            tempo,
+            dono,
+            espera_maxima=_timeout_da_ferramenta(INTERVALO_DE_OLHADA),
+        )
 
     if nome == "code_interpreter":
         codigo = str(argumentos.get("codigo", "")).strip()
@@ -3453,9 +3640,12 @@ def executar(
         if rota.is_dir() or destino.endswith(("/", "\\")):
             nome_remoto = Path(urllib.parse.urlparse(url).path).name or "arquivo.baixado"
             rota = rota / nome_remoto
+        temporario = rota.with_name(f".{rota.name}.koda-{uuid.uuid4().hex[:8]}.tmp")
         try:
             with httpx.Client(
-                timeout=60, headers={"User-Agent": USER_AGENT}, follow_redirects=False
+                timeout=_timeout_httpx(60),
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=False,
             ) as cliente:
                 # Redirect resolvido **na mão e em streaming**: validar cada salto sem
                 # carregar o corpo (o `follow_redirects=True` seguia cego para o IP interno,
@@ -3490,20 +3680,29 @@ def executar(
                         return f"ERRO: {url} respondeu {resposta.status_code}"
                     rota.parent.mkdir(parents=True, exist_ok=True)
                     total = 0
-                    with rota.open("wb") as arquivo:
+                    with temporario.open("wb") as arquivo:
                         for pedaco in resposta.iter_bytes():
+                            restante = _restante_da_ferramenta()
+                            if restante is not None and restante <= 0:
+                                raise TimeoutError("prazo da chamada de ferramenta excedido")
                             total += len(pedaco)
                             if total > LIMITE_REDE:
                                 arquivo.close()
-                                rota.unlink(missing_ok=True)
+                                temporario.unlink(missing_ok=True)
                                 return (
                                     "ERRO: o arquivo passa de "
                                     f"{LIMITE_REDE // 1_000_000} MB — baixe fora do Koda"
                                 )
                             arquivo.write(pedaco)
+                    os.replace(temporario, rota)
+        except TimeoutError:
+            temporario.unlink(missing_ok=True)
+            return f"ERRO: o prazo da chamada para baixar {url} acabou; arquivo parcial descartado."
         except httpx.HTTPError as exc:
+            temporario.unlink(missing_ok=True)
             return f"ERRO ao baixar {url}: {exc}"
         except OSError as exc:
+            temporario.unlink(missing_ok=True)
             return f"ERRO ao gravar {rota}: {exc}"
         return f"ok: {total} bytes baixados de {url} para {rota}"
 
@@ -3519,7 +3718,7 @@ def executar(
         if rota.stat().st_size > LIMITE_REDE:
             return f"ERRO: {rota} passa de {LIMITE_REDE // 1_000_000} MB"
         try:
-            with httpx.Client(timeout=120) as cliente:
+            with httpx.Client(timeout=_timeout_httpx(120)) as cliente:
                 resposta = cliente.put(
                     url,
                     content=rota.read_bytes(),
@@ -3531,6 +3730,11 @@ def executar(
                 )
         except httpx.HTTPError as exc:
             return f"ERRO ao enviar {rota}: {exc}"
+        if not 200 <= resposta.status_code < 300:
+            return (
+                f"ERRO: o servidor respondeu HTTP {resposta.status_code} ao receber "
+                f"{rota.name}; o upload não foi confirmado."
+            )
         return f"ok: {rota} enviado para {url} — resposta {resposta.status_code}"
 
     if nome == "get_environment":
@@ -3614,7 +3818,7 @@ def executar(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=_timeout_da_ferramenta(60),
                 stdin=subprocess.DEVNULL,
                 env=_ambiente_do_comando(),
                 **_sem_janela(),
