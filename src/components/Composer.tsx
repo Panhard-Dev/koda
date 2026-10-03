@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChangeEvent, ReactNode } from 'react'
+import type { ChangeEvent, ClipboardEvent, ReactNode } from 'react'
 import {
   ArrowUp,
   BrainCircuit,
@@ -57,6 +57,8 @@ const COR_DO_MODO: Record<ModoPermissao, string> = {
   livre: 'text-red-500',
 }
 import { fraseDeFalha, removerAnexo, subirAnexo } from '../api/client'
+import { filtrarComandos, textoDoComando, tokenDigitado } from '../comandos'
+import type { Comando } from '../comandos'
 import type {
   ApiAnexo,
   ApiProject,
@@ -99,17 +101,10 @@ const PLUS_ACTIONS = [
   },
 ]
 
-/** Menu de comandos do "/": visual, igual ao print de referência — sem execução. */
-const COMANDOS = [
-  { nome: '/goal', descricao: 'Show or set the current session goal.' },
-  { nome: '/workflow', descricao: 'Design and launch a dynamic workflow for a task.' },
-  {
-    nome: '/compact',
-    descricao: 'Compact the current conversation with optional instructions.',
-  },
-  { nome: '/init', descricao: 'Create or update workspace AGENTS.md instructions.' },
-  { nome: '/plan', descricao: 'Switch to Plan mode and optionally send a task.' },
-]
+/**
+ * O menu do "/" vive em `../comandos` (dado puro, testável sem React): aqui só entra o que
+ * é tela — qual item está sob o cursor, o clique e as teclas.
+ */
 
 type SpeechResult = {
   isFinal: boolean
@@ -246,14 +241,32 @@ export function Composer({
   /** O motivo pelo qual um anexo foi recusado (tipo, tamanho, backend fora do ar). */
   const [erroAnexo, setErroAnexo] = useState<string | null>(null)
   const [listening, setListening] = useState(false)
+  /** Qual item do menu do "/" está sob o cursor do teclado. */
+  const [comandoAtivo, setComandoAtivo] = useState(0)
+  /** Esc fechou o menu: ele só volta quando o texto mudar. */
+  const [menuFechado, setMenuFechado] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<Recognition | null>(null)
+  /** Cada linha do menu, para o item ativo ser trazido para dentro da área visível. */
+  const itensDoMenuRef = useRef<(HTMLButtonElement | null)[]>([])
 
   const isChat = variant === 'chat'
-  /** Digitar "/" abre o menu de comandos acima da caixa (só visual). */
-  const mostrarComandos = message.startsWith('/')
+
+  /**
+   * O menu do "/" abre enquanto se digita **o nome do comando**.
+   *
+   * O espaço fecha o menu de propósito: depois dele o comando já está escolhido e o que
+   * vem é o assunto (`/plan refatorar o módulo X`). O `menuFechado` é o Esc — ele esconde
+   * o menu sem apagar o que foi digitado.
+   */
+  const token = tokenDigitado(message)
+  const mostrarComandos = token !== null && !menuFechado
+  const consulta = mostrarComandos ? token : ''
+  const comandosFiltrados = mostrarComandos ? filtrarComandos(consulta) : []
+  // O filtro pode encolher a lista por baixo do item ativo; o índice nunca passa do fim.
+  const indiceAtivo = Math.min(comandoAtivo, Math.max(comandosFiltrados.length - 1, 0))
   const micAvailable =
     typeof window !== 'undefined' &&
     Boolean(
@@ -268,6 +281,34 @@ export function Composer({
     element.style.height = 'auto'
     element.style.height = `${Math.min(element.scrollHeight, 192)}px`
   }, [message])
+
+  // Com a lista rolando, o item do teclado tem de aparecer — senão as setas andam por
+  // baixo da área visível e o menu parece travado. (O cursor voltando para o primeiro item
+  // a cada tecla é no `onChange`: é ele o evento que muda o filtro.)
+  useEffect(() => {
+    if (!mostrarComandos) return
+    itensDoMenuRef.current[indiceAtivo]?.scrollIntoView({ block: 'nearest' })
+  }, [indiceAtivo, mostrarComandos])
+
+  /**
+   * Escolhe o comando: escreve o token na caixa e devolve o cursor, para você continuar.
+   *
+   * **Não** manda nada. O menu é um completador — quem escreve a mensagem é você, e o que
+   * vai para o modelo é exatamente o que estiver na caixa. Nada de texto pré-definido.
+   */
+  const completarComando = (comando: Comando) => {
+    setMessage(textoDoComando(comando))
+    setComandoAtivo(0)
+    setMenuFechado(false)
+    // Depois do render: o React ainda não escreveu o texto novo na caixa quando este
+    // handler termina, e o cursor iria para o lugar errado.
+    requestAnimationFrame(() => {
+      const caixa = textareaRef.current
+      if (!caixa) return
+      caixa.focus()
+      caixa.setSelectionRange(caixa.value.length, caixa.value.length)
+    })
+  }
 
   const canSend =
     !busy && !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
@@ -384,15 +425,16 @@ export function Composer({
   }
 
   /**
-   * Sobe os arquivos escolhidos e guarda o que o backend devolveu.
+   * Sobe os arquivos e guarda o que o backend devolveu.
    *
    * O `File` inteiro vai no corpo (multipart) — antes daqui saía só o nome, e o conteúdo
    * nunca chegava ao modelo. O upload é para o backend local, então é rápido; mesmo assim
    * a caixa fica bloqueada enquanto sobe, para ninguém mandar a mensagem sem o anexo pronto.
+   *
+   * É o mesmo caminho para o «+» e para o Ctrl+V: colar uma captura de tela tem de virar
+   * anexo de verdade, não uma imagem presa na área de transferência.
    */
-  const addFiles = async (event: ChangeEvent<HTMLInputElement>) => {
-    const arquivos = Array.from(event.target.files ?? [])
-    event.target.value = ''
+  const subirArquivos = async (arquivos: File[]) => {
     if (arquivos.length === 0) return
     setErroAnexo(null)
     setSubindoAnexo(true)
@@ -408,6 +450,26 @@ export function Composer({
     } finally {
       setSubindoAnexo(false)
     }
+  }
+
+  const addFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const arquivos = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    await subirArquivos(arquivos)
+  }
+
+  /**
+   * Ctrl+V de imagem (ou de arquivo) sobe o anexo igual ao «+».
+   *
+   * Sem isto o textarea só aceitava texto: colar uma captura de tela não fazia nada e a
+   * imagem ficava na área de transferência. O `preventDefault` só acontece quando há
+   * arquivo — colar texto puro continua sendo colar texto.
+   */
+  const colarArquivos = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const arquivos = Array.from(event.clipboardData?.files ?? [])
+    if (arquivos.length === 0) return
+    event.preventDefault()
+    void subirArquivos(arquivos)
   }
 
   /** Tira o anexo da caixa e do store — o arquivo não vai ser usado, não fica ocupando disco. */
@@ -479,25 +541,56 @@ export function Composer({
         {mostrarComandos ? (
           <div className="mb-1">
             <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
-              Commands
+              Comandos
             </p>
-            <div className="max-h-60 overflow-y-auto">
-              {COMANDOS.map((comando, index) => (
-                <div
-                  key={comando.nome}
-                  className={[
-                    'flex items-baseline gap-2 px-1 py-2 text-[13.5px]',
-                    index === 0 ? 'bg-koda-fg/6' : '',
-                  ].join(' ')}
-                >
-                  <span className="shrink-0 font-semibold text-koda-fg">{comando.nome}</span>
-                  <span className="min-w-0 truncate text-koda-fg/45">{comando.descricao}</span>
-                </div>
-              ))}
+            <div className="max-h-60 overflow-y-auto" role="listbox" aria-label="Comandos">
+              {comandosFiltrados.length > 0 ? (
+                comandosFiltrados.map((comando, index) => {
+                  const ativo = index === indiceAtivo
+                  return (
+                    <button
+                      key={comando.nome}
+                      ref={(elemento) => {
+                        itensDoMenuRef.current[index] = elemento
+                      }}
+                      type="button"
+                      role="option"
+                      aria-selected={ativo}
+                      // `onMouseDown` e não `onClick`: o clique tira o foco do textarea
+                      // antes, e aí o menu fecharia por baixo do dedo.
+                      onMouseDown={(evento) => {
+                        evento.preventDefault()
+                        completarComando(comando)
+                      }}
+                      onMouseEnter={() => setComandoAtivo(index)}
+                      className={[
+                        'flex w-full items-baseline gap-2 rounded-lg px-2 py-2 text-left',
+                        'text-[13.5px] transition-colors duration-100',
+                        ativo ? 'bg-koda-fg/8' : 'hover:bg-koda-fg/5',
+                      ].join(' ')}
+                    >
+                      <span className="shrink-0 font-semibold text-koda-fg">
+                        {comando.nome}
+                      </span>
+                      <span className="min-w-0 truncate text-koda-fg/45">
+                        {comando.descricao}
+                      </span>
+                    </button>
+                  )
+                })
+              ) : (
+                <p className="px-2 py-2 text-[13.5px] text-koda-fg/45">
+                  Nenhum comando com «{consulta}»
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2 border-t border-koda-fg/8 pt-2.5 pb-1 text-[12.5px] text-koda-fg/45">
               <CircleDot className="h-3.5 w-3.5 shrink-0" strokeWidth={1.7} />
-              Type to search commands, skills, or agents
+              <span>
+                <span className="text-koda-fg/70">↑ ↓</span> escolhe ·{' '}
+                <span className="text-koda-fg/70">Enter</span> completa ·{' '}
+                <span className="text-koda-fg/70">Esc</span> fecha
+              </span>
             </div>
           </div>
         ) : null}
@@ -510,13 +603,53 @@ export function Composer({
           id="koda-input"
           rows={2}
           value={message}
-          onChange={(event) => setMessage(event.target.value)}
+          onChange={(event) => {
+            setMessage(event.target.value)
+            // Texto novo = filtro novo: o cursor volta ao primeiro item e o menu reabre,
+            // mesmo depois de um Esc.
+            setComandoAtivo(0)
+            setMenuFechado(false)
+          }}
+          onPaste={colarArquivos}
           onKeyDown={(event) => {
+            if (mostrarComandos) {
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                const total = comandosFiltrados.length
+                if (total === 0) return
+                const passo = event.key === 'ArrowDown' ? 1 : -1
+                setComandoAtivo((atual) => (atual + passo + total) % total)
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setMenuFechado(true)
+                return
+              }
+              if (
+                (event.key === 'Enter' && !event.shiftKey) ||
+                (event.key === 'Tab' && !event.shiftKey)
+              ) {
+                const comando = comandosFiltrados[indiceAtivo]
+                // Sem item sob o cursor, o Enter segue o caminho normal (manda o texto).
+                if (comando) {
+                  event.preventDefault()
+                  completarComando(comando)
+                  return
+                }
+              }
+            }
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
               send()
             }
           }}
+          // Sem corretor: o `/` e os comandos não são palavras, e o WebView2 pintava a
+          // linha de vermelho — parecia que a caixa estava com cor errada.
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="off"
+          autoComplete="off"
           placeholder="Message Koda"
           className={[
             'min-h-[72px] w-full resize-none overflow-y-auto bg-transparent px-1',

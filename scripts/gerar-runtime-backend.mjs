@@ -49,6 +49,11 @@ function interpretador() {
  * `_virtualenv.pth` sai porque roda na inicialização do Python e tenta reconfigurar os
  * caminhos do venv — dentro do interpretador portátil ele é corpo estranho. O `pip` sai
  * porque instalar pacote dentro da pasta de instalação não é coisa que se faça.
+ *
+ * O `pytest` e a turma dele saem porque **teste não roda no app instalado** — são ~8 MB de
+ * código morto dentro do instalador. O `pygments` entra na lista mesmo sendo dependência
+ * do `httpx`: lá ele é do extra `cli` (`Requires-Dist: pygments==2.*; extra == 'cli'`), que
+ * o backend não usa; aqui ele só serve para colorir a saída do pytest.
  */
 const FORA = [
   /[\\/]_virtualenv\.pth$/,
@@ -57,6 +62,17 @@ const FORA = [
   /[\\/]pip-[^\\/]*\.dist-info$/,
   /[\\/]__pycache__$/,
   /[\\/]\.pytest_cache$/,
+  /[\\/]_pytest$/,
+  /[\\/]pytest$/,
+  /[\\/]pytest-[^\\/]*\.dist-info$/,
+  /[\\/]pytest_asyncio$/,
+  /[\\/]pytest_asyncio-[^\\/]*\.dist-info$/,
+  /[\\/]pluggy$/,
+  /[\\/]pluggy-[^\\/]*\.dist-info$/,
+  /[\\/]iniconfig$/,
+  /[\\/]iniconfig-[^\\/]*\.dist-info$/,
+  /[\\/]pygments$/,
+  /[\\/]pygments-[^\\/]*\.dist-info$/,
 ]
 
 const incluir = (caminho) => !FORA.some((padrao) => padrao.test(caminho))

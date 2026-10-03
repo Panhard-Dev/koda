@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .. import contexto
-from . import ferramentas
+from . import ferramentas, guardas, repeticao
 
 PROMPT_FERRAMENTAS = (
     "Você é o Koda, um agente de engenharia que executa tarefas REAIS na máquina do "
@@ -52,6 +52,12 @@ PROMPT_FERRAMENTAS = (
     "vai fazer, na MESMA resposta da chamada (ex.: \"Vou ler o js/core.js para ver o motor "
     "do jogo.\"). Tarefa longa e calada parece travada: quem está olhando não sabe se você "
     "está trabalhando ou parado. Isto vale para toda ferramenta, inclusive as de leitura.\n"
+    "\n"
+    "**O seu estado interno não é assunto da resposta.** Não escreva que não houve erro, "
+    "que não há ferramenta pendente, que a tarefa está concluída, nem ofereça ação que "
+    "ninguém pediu (salvar um arquivo, mandar por e-mail, seguir para o próximo passo). "
+    "Entregue o que foi pedido e pare. Numa tarefa simples e objetiva — um checklist, uma "
+    "lista, uma frase — a resposta é o checklist, a lista, a frase, e nada em volta.\n"
     "\n"
     "**Pedido que se resolve com uma resposta NÃO usa ferramenta.** Se a pessoa só quer uma "
     "resposta — um cumprimento, um teste (\"responda com um ok\"), uma pergunta do que você "
@@ -500,13 +506,85 @@ _NEGACAO = re.compile(
     re.IGNORECASE,
 )
 
+#: **Pedido à pessoa** logo depois de uma marca de futuro: "Preciso que você cole o erro",
+#: "Falta você colar o código", "Quero que me mande o stacktrace". O agente está pedindo
+#: algo a quem está do outro lado — é fechamento, não anúncio de trabalho próprio.
+#:
+#: Sem esta regra, "Preciso que você cole o código/erro aqui pra eu trabalhar em cima" foi
+#: lido como "vou fazer" e uma rodada que **já tinha respondido tudo** fechou com o cartão
+#: "tarefa não concluída" e o botão Retomar (visto em 03/10/2026). A `_NEGACAO` não pega
+#: este caso: pedir algo não é negar nada.
+PEDIDO_A_PESSOA_DEPOIS = re.compile(
+    r"^\s*(?:que\s+)?(?:voc[êe]s?|vc|tu|contigo|com\s+voc[êe]s?"
+    r"|me\s+(?:col[ae]|manda|mande|passe|passa|d[êe]|diz|envie|envia|diga|conte|conta|"
+    r"informe|informa|mostre|mostra))\b",
+    re.IGNORECASE,
+)
 
-def _marcas_negadas(texto: str, padrao: re.Pattern[str]) -> bool:
-    """**Todas** as marcas deste padrão no texto estão negadas?"""
+#: Verbos na forma de **pedido** (imperativo/subjuntivo), não no infinitivo. É o que separa
+#: "que você **cole** o erro" (pedido) de "os testes que você **pediu**" (oração relativa,
+#: dentro de um anúncio de verdade).
+_VERBOS_DE_PEDIDO = (
+    r"col[ae]|manda|mande|envia|envie|diga|diz|passe|passa|mostre|mostra|conte|conta|"
+    r"informe|informa|escreve|escreva|posta|poste"
+)
+
+#: **Pedido à pessoa antes da marca de futuro** — o imperativo dirigido a quem lê:
+#: "**Me manda** o código ou a dúvida direto **que eu vou** nisso." (visto em 03/10/2026,
+#: o segundo fechamento que o cartão pegou). Aqui a marca de futuro é **consequência** do
+#: que a pessoa mandar, e não trabalho que o agente deixou de fazer.
+#:
+#: O verbo é exigido na forma de pedido de propósito: casar só o "que você" transformaria
+#: "Vou rodar os testes **que você pediu**" — anúncio legítimo — em fechamento.
+PEDIDO_A_PESSOA_ANTES = re.compile(
+    rf"\bme\s+(?:{_VERBOS_DE_PEDIDO})\b|\b(?:voc[êe]s?|vc|tu)\s+(?:{_VERBOS_DE_PEDIDO})\b",
+    re.IGNORECASE,
+)
+
+#: Onde uma sentença termina — para o pedido de antes valer só **dentro da mesma sentença**.
+_LIMITE_DE_SENTENCA = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _sentenca_antes(texto: str, pos: int) -> str:
+    """O pedaço da **mesma sentença** que vem antes de `pos`."""
+    partes = _LIMITE_DE_SENTENCA.split(texto[:pos])
+    return partes[-1] if partes else ""
+
+
+def _sentenca_em(texto: str, pos: int) -> str:
+    """A sentença inteira que contém `pos`."""
+    inicio = 0
+    for limite in _LIMITE_DE_SENTENCA.finditer(texto):
+        if limite.end() > pos:
+            return texto[inicio : limite.start()]
+        inicio = limite.end()
+    return texto[inicio:]
+
+
+#: Fechamento de **espera**: o agente diz que aguarda a pessoa ("Fico no aguardo", "Vou
+#: aguardar o seu retorno"). Mesma família do pedido à pessoa — a vez é de quem lê, não há
+#: trabalho a executar. Só `aguard*`: `esperar` é ambíguo ("vou esperar o build terminar" é
+#: trabalho de verdade).
+ESPERA_PELA_PESSOA = re.compile(r"\baguard\w+", re.IGNORECASE)
+
+
+def _marcas_descartadas(texto: str, padrao: re.Pattern[str]) -> bool:
+    """**Todas** as marcas deste padrão são descartáveis?
+
+    Descartável é a marca que não é anúncio de trabalho do agente: **negada** ("não vou
+    fazer mais nada"), **pedido à pessoa** ("me manda o código", "que você cole o erro") ou
+    **espera pela pessoa** ("vou aguardar seu retorno"). Nos três casos a vez é de quem lê.
+    """
     achados = list(padrao.finditer(texto))
     if not achados:
         return False
-    return all(_NEGACAO.search(texto[: achado.start()]) for achado in achados)
+    return all(
+        _NEGACAO.search(texto[: achado.start()])
+        or bool(PEDIDO_A_PESSOA_DEPOIS.match(texto[achado.end() :]))
+        or bool(PEDIDO_A_PESSOA_ANTES.search(_sentenca_antes(texto, achado.start())))
+        or bool(ESPERA_PELA_PESSOA.search(_sentenca_em(texto, achado.start())))
+        for achado in achados
+    )
 
 
 #: Frase final que **começa** com verbo no infinitivo ("Escrever a análise agora."): em
@@ -544,18 +622,18 @@ def anunciou(texto: str) -> bool:
     final começando em infinitivo, e o vocabulário de anúncio da primeira versão.
 
     O que **não** conta como anúncio: marca de futuro **negada** ("não vou fazer mais
-    nada") e o fechamento confirmado. A lista de verbos de futuro foi enxugada — `quero`,
-    `preciso` e `falta` aparecem em resposta pronta ("Feito! Não falta nada.") e forçavam
-    uma chamada de ferramenta à toa.
+    nada"), **pedido à pessoa** ("Preciso que você cole o erro") e o fechamento confirmado.
+    A lista de verbos de futuro foi enxugada — `quero`, `preciso` e `falta` aparecem em
+    resposta pronta ("Feito! Não falta nada.") e forçavam uma chamada de ferramenta à toa.
     """
     fim = FECHAMENTO_CONFIRMADO.sub("", _fim_do_texto(texto))
     if not fim.strip():
         return False
-    if _marcas_negadas(fim, ANUNCIO) and _marcas_negadas(fim, FUTURO):
+    if _marcas_descartadas(fim, ANUNCIO) and _marcas_descartadas(fim, FUTURO):
         return False
-    if ANUNCIO.search(fim) and not _marcas_negadas(fim, ANUNCIO):
+    if ANUNCIO.search(fim) and not _marcas_descartadas(fim, ANUNCIO):
         return True
-    if FUTURO.search(fim) and not _marcas_negadas(fim, FUTURO):
+    if FUTURO.search(fim) and not _marcas_descartadas(fim, FUTURO):
         return True
     return bool(INFINITIVO_NO_FIM.search(fim))
 
@@ -639,6 +717,12 @@ TAREFA_DE_ACAO = re.compile(
     r"conserta|conserte|consertar|edita|edite|editar|altera|altere|alterar|muda|mude|mudar|"
     r"move|mova|mover|renomeia|renomeie|renomear|copia|copie|copiar|apaga|apague|apagar|"
     r"escreve|escreva|escrever|grava|grave|gravar|instala|instale|instalar|desinstala|"
+    # "lista" faltava, e era o buraco do pedido mais comum de todos: "lista o que tem na
+    # pasta onde você está" não tinha verbo de ação reconhecido, a rodada virava **resposta**
+    # (sem catálogo) e o modelo respondia que não existe fisicamente — não porque escolheu
+    # não usar ferramenta, mas porque não tinha nenhuma. Medido: 2 de 3 frases do relatório
+    # do dono caíam aqui.
+    r"lista|liste|listar|"
     r"roda|rode|rodar|executa|execute|executar|testa|teste|testar|builda|compila|compile|"
     r"compilar|monta|monte|montar|converte|converta|converter|faz|fa\u00e7a|fazer|reorganiza|"
     r"termina|termine|terminar|continua|continue|continuar|"
@@ -655,13 +739,31 @@ TAREFA_DE_ACAO = re.compile(
 
 
 def pedido_do_usuario(mensagens: list[dict[str, Any]]) -> str:
-    """O último pedido da pessoa no histórico — é ele que diz se a tarefa é uma ação."""
+    """O último pedido da pessoa no histórico — **só o que ela escreveu**.
+
+    Duas coisas saem daqui, e as duas já custaram caro:
+
+    - O texto vem de `contexto.texto_do_conteudo`, e não de `str(content)`: num turno com
+      imagem o `content` é uma lista de partes, e `str()` traria o data URL inteiro dentro —
+      o pedido pareceria gigante só por causa do base64.
+    - O bloco de anexos sai por `contexto.sem_anotacoes`: ele é anotação **nossa**. A lista
+      de arquivos em itens (`- image.png (…)`) casava com a régua de plano, e "fala o que tá
+      escrito nessa foto" virava uma tarefa grande que o agente mandava a pessoa dividir em
+      itens antes de executar.
+
+    Também não é pedido o resumo de compactação: ele é contexto de fundo, não uma fala de
+    ninguém — e é longo o bastante para disparar a régua de plano sozinho.
+    """
     for mensagem in reversed(mensagens):
         if mensagem.get("role") != "user":
             continue
-        texto = str(mensagem.get("content") or "").strip()
+        texto = contexto.sem_anotacoes(
+            contexto.texto_do_conteudo(mensagem.get("content"))
+        )
         # As mensagens internas do loop (cobrança de narração, continuação, retomada pelo
         # botão) não são pedido: a régua da categoria tem de olhar a **tarefa de verdade**.
+        if texto.startswith("[contexto compactado]"):
+            continue
         if texto and texto not in (
             NARRAR,
             CONTINUAR,
@@ -735,15 +837,77 @@ SEM_FERRAMENTA_NENHUMA = re.compile(
     re.IGNORECASE,
 )
 
-#: "Não use arquivos", "não liste pastas", "não acesse o disco": as ferramentas de arquivo
-#: saem da rodada. A pessoa continua podendo pedir que você escreva código na resposta.
+#: Como a pessoa **nega**, em uma régua só, usada pelas quatro proibições abaixo.
+#:
+#: "não use", "sem usar", "não me mostre", "não nos informe" e "não quero que você leia" são
+#: a mesma instrução dita de jeitos diferentes. Antes cada régua repetia a sua própria
+#: abertura e as variantes escapavam: "não quero que você leia meus arquivos" não casava com
+#: nada e a rodada seguia com o catálogo inteiro.
+ABERTURA_DE_NEGACAO = (
+    r"(?:\b(n[ãa]o|sem)\s+"
+    r"(?:quero\s+que\s+(?:voc[êe]|vc)\s+|queria\s+que\s+(?:voc[êe]|vc)\s+)?"
+    r"(?:me\s+|nos\s+|te\s+)?)"
+)
+
+#: "Não use arquivos", "não liste pastas", "não acesse o disco", "não acesse recursos
+#: locais": **tudo o que alcança a máquina** sai da rodada (`FERRAMENTAS_LOCAIS`), e não só
+#: as ferramentas de arquivo — o mesmo conteúdo fica a um `shell` ou a um
+#: `code_interpreter` de distância.
+#:
+#: A pessoa continua podendo pedir que você escreva código na resposta.
 SEM_ARQUIVOS = re.compile(
-    r"\b(n[ãa]o|sem)\s+(us\w*|utiliz\w*|cham\w*|acion\w*|abr\w*|baix\w*|le\w*|list\w*|"
-    r"olh\w*|mex\w*|varr\w*|consult\w*)\s+(?:(?:n[oa]s?|o|a|os|as|meus?|seus?)\s+)?"
-    r"(arquivos?|pastas?|diret[óo]rios?|disco|workspace|projeto)\b"
+    ABERTURA_DE_NEGACAO
+    + r"(us\w*|utiliz\w*|cham\w*|acion\w*|acess\w*|abr\w*|baix\w*|le\w*|"
+    r"list\w*|olh\w*|mex\w*|varr\w*|consult\w*)\s+(?:(?:n[oa]s?|o|a|os|as|meus?|seus?)\s+)?"
+    r"(arquivos?|pastas?|diret[óo]rios?|disco|workspace|projeto|desktop|[áa]rea\s+de\s+trabalho|"
+    # "não acesse **recursos locais**", "não acesse a máquina", "não mexa no meu computador":
+    # a proibição de acesso local dita com estas palavras também conta. Sem elas, o pedido
+    # do dono ("não acesse recursos locais") passava batido pela régua inteira.
+    r"recursos?\s+locais?|nada\s+local|m[áa]quina|computador|sistema)\b"
     r"|\b(sem|n[ãa]o\s+consultar)\s+(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b"
     # "não use web **nem arquivos**": a segunda metade da lista negada também conta.
-    r"|\bnem\s+(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b",
+    r"|\bnem\s+(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b"
+    r"|\bnem\s+(recursos?\s+locais?|nada\s+local)\b",
+    re.IGNORECASE,
+)
+
+#: "Não use o shell", "não rode comando", "sem terminal": o grupo que executa comando sai.
+#:
+#: Régua própria, e não a de arquivo: quem proíbe o shell continua podendo pedir a leitura
+#: de um arquivo pelo caminho próprio. `code_interpreter` e os gerenciadores de pacote vão
+#: junto — os três rodam código na máquina, e deixar um de fora é deixar a porta aberta.
+SEM_SHELL = re.compile(
+    ABERTURA_DE_NEGACAO
+    + r"(us\w*|utiliz\w*|cham\w*|acion\w*|abr\w*|rod\w*|execut\w*)\s+"
+    r"(?:(?:n[oa]s?|o|a|os|as)\s+)?(shell|terminal|console|linha\s+de\s+comando|"
+    r"comandos?|bash|cmd|powershell)\b"
+    r"|\bsem\s+(shell|terminal|comandos?)\b"
+    r"|\bnem\s+(o\s+)?(shell|terminal)\b",
+    re.IGNORECASE,
+)
+
+#: "Não leia minhas variáveis de ambiente", "não veja meus processos", "não me diga o SO",
+#: "não inspecione o hardware", "não acesse informações do servidor".
+#:
+#: É a lista do QA, item por item. Cada uma dessas perguntas se responde com o **estado da
+#: máquina**, e o Koda respondia de fato: o relatório pegou SO, caminhos, shell, Python e Git
+#: devolvidos numa rodada em que o usuário tinha proibido o acesso local. Sem esta régua,
+#: "não leia minhas variáveis de ambiente" não casava com nenhuma proibição — o pedido
+#: chegava ao modelo como pergunta comum, com o catálogo inteiro na mão.
+SEM_AMBIENTE = re.compile(
+    ABERTURA_DE_NEGACAO
+    + r"(us\w*|utiliz\w*|cham\w*|acion\w*|acess\w*|abr\w*|le\w*|list\w*|"
+    r"olh\w*|varr\w*|consult\w*|inspecion\w*|investig\w*|examin\w*|detect\w*|descubr\w*|"
+    r"enxerg\w*|ver|veja|mostr\w*|inform\w*|diga|diz|fale)\s+"
+    # "não leia **minhas** variáveis", "não veja **os** processos", "sem acesso **ao** sistema".
+    r"(?:(?:n[oa]s?|aos?|à|às|o|a|os|as|meus?|minhas?|seus?|suas?|nossas?|sobre)\s+)?"
+    # "não acesse **informações do** servidor".
+    r"(?:informa[çc][õo]es\s+(?:do\s+|da\s+|de\s+)?)?"
+    r"(vari[áa]veis?\s+de\s+ambiente|ambiente|env|processos?|sistema\s+operacional|so|"
+    r"hardware|servidor|servidores|m[áa]quina|computador|sistema|"
+    r"vers[ãa]o\s+do\s+(python|node|git)|configura[çc][õo]es\s+do\s+sistema)\b"
+    r"|\bsem\s+(ver|olhar|ler)\s+(o\s+)?(ambiente|sistema|processos?)\b"
+    r"|\bnem\s+(as\s+)?(vari[áa]veis?\s+de\s+ambiente|processos?|o\s+sistema)\b",
     re.IGNORECASE,
 )
 
@@ -793,7 +957,11 @@ def restricoes_do_pedido(mensagens: list[dict[str, Any]]) -> tuple[set[str], boo
         return set(), True
     proibidas: set[str] = set()
     if SEM_ARQUIVOS.search(pedido):
-        proibidas.update(ferramentas.FERRAMENTAS_DE_ARQUIVO)
+        proibidas.update(ferramentas.FERRAMENTAS_LOCAIS)
+    if SEM_SHELL.search(pedido):
+        proibidas.update(ferramentas.FERRAMENTAS_DE_SHELL)
+    if SEM_AMBIENTE.search(pedido):
+        proibidas.update(ferramentas.FERRAMENTAS_DO_AMBIENTE)
     if SEM_WEB.search(pedido):
         proibidas.update(ferramentas.FERRAMENTAS_WEB)
     return proibidas, False
@@ -814,11 +982,29 @@ def _explicar_restricoes(
     if not historico or historico[0].get("role") != "system":
         return
 
+    # A segunda causa do furo, e a mais insidiosa: o prompt de ferramentas continuava no
+    # sistema mandando o agente **chamar ferramenta** ("Nunca responda de memória o que uma
+    # ferramenta responde. Chame a ferramenta: read_file, shell…") numa rodada em que o
+    # catálogo estava vazio. O modelo recebia as duas ordens contraditórias e resolvia a
+    # favor da primeira: emitia a chamada assim mesmo — e o loop executava. Tirar o prompt
+    # junto com o catálogo é o que faz "sem ferramenta" ser uma rodada sem ferramenta de
+    # verdade, e não uma rodada com o manual na mão e as ferramentas escondidas.
+    if sem_ferramentas:
+        conteudo = str(historico[0].get("content", ""))
+        if PROMPT_FERRAMENTAS in conteudo:
+            historico[0] = {
+                **historico[0],
+                "content": conteudo.replace(PROMPT_FERRAMENTAS, "").strip(),
+            }
+
     if sem_ferramentas:
         aviso = (
             "NESTA RODADA NÃO HÁ FERRAMENTA NENHUMA. A pessoa pediu uma resposta direta: "
             "responda com o que você já sabe, em português do Brasil, e não pergunte se "
-            "deve usar ferramenta nem peça permissão para isso."
+            "deve usar ferramenta nem peça permissão para isso. Qualquer chamada de "
+            "ferramenta é recusada pelo próprio serviço — não insista e não tente outro "
+            "caminho. Se você não tem a informação, diga que **não tem acesso**; não "
+            "estime, não suponha e não invente."
         )
     elif modo == MODO_RESPOSTA:
         aviso = (
@@ -831,21 +1017,34 @@ def _explicar_restricoes(
         )
     elif proibidas:
         grupos: list[str] = []
-        if proibidas >= ferramentas.FERRAMENTAS_DE_ARQUIVO:
+        if proibidas >= ferramentas.FERRAMENTAS_LOCAIS:
+            grupos.append(
+                "tudo o que alcança a máquina dela — arquivos (read_file, write_file, "
+                "list_dir…), shell, code_interpreter, get_environment e git"
+            )
+        elif proibidas >= ferramentas.FERRAMENTAS_DE_ARQUIVO:
             grupos.append(
                 "as ferramentas de arquivo (read_file, write_file, edit_file, list_dir, "
                 "search_files…)"
             )
         if proibidas >= ferramentas.FERRAMENTAS_WEB:
             grupos.append("as ferramentas de web (web_search, url_reader, browser)")
-        restantes = proibidas - ferramentas.FERRAMENTAS_DE_ARQUIVO - ferramentas.FERRAMENTAS_WEB
+        restantes = (
+            proibidas
+            - ferramentas.FERRAMENTAS_LOCAIS
+            - ferramentas.FERRAMENTAS_DE_ARQUIVO
+            - ferramentas.FERRAMENTAS_WEB
+        )
         if restantes:
             grupos.append(", ".join(sorted(restantes)))
         aviso = (
             "A pessoa pediu para **não** usar "
             + "; ".join(grupos)
             + " nesta rodada. Elas não estão disponíveis: não as chame, não ofereça e não "
-            "peça permissão para usá-las. Resolva com o que resta ou responda sem elas."
+            "peça permissão para usá-las — e não tente chegar no mesmo lugar por outra "
+            "ferramenta (o shell não substitui a leitura de arquivo, o interpretador de "
+            "código não substitui o shell). Responda com o que você já sabe e, quando não "
+            "souber, diga que **não tem acesso** em vez de estimar."
         )
     else:
         return
@@ -896,33 +1095,48 @@ def pedido_de_acao(mensagens: list[dict[str, Any]]) -> bool:
 #: Vocabulário do trabalho. Tocar em qualquer um destes tira o pedido da categoria de
 #: resposta avulsa: a pessoa está falando do projeto, e aí ler/listar arquivo é o pedido —
 #: não trabalho extra.
+#:
+#: **O que é colado na conversa não entra aqui.** Imagem, foto, vídeo, áudio, pdf e anexo
+#: são coisas que a pessoa traz para a conversa, e a rodada de resposta já mantém a
+#: `read_attachment` de pé justamente para lê-las (`FERRAMENTAS_DE_RESPOSTA`). Marcá-las
+#: como projeto era o que dava catálogo completo — shell, escrita de arquivo — para
+#: "fala o que tá escrito nessa foto": pergunta de uma linha que se responde com palavras,
+#: e que o agente respondia pedindo plano e mexendo na máquina.
 MARCADORES_DE_PROJETO = re.compile(
     r"(?:\b(arquivos?|pastas?|diret[óo]rios?|projetos?|reposit[óo]rios?|repo|workspace|"
     r"c[óo]digos?|programas?|scripts?|fun[çc][ãa]o|fun[çc][õo]es|classes?|componentes?|"
     r"m[óo]dulos?|testes?|build|compil\w*|git|commit|branch|merge|deploy|servidores?|"
     r"apis?|bancos?\s+de\s+dados|instala\w*|depend[êe]ncias?|pacotes?|npm|node|python|"
     r"typescript|javascript|terminal|shell|comandos?|logs?|erros?|bugs?|refator\w*|"
-    r"migra\w*|docker|json|ya?ml|csv|xml|zip|anexos?|download|upload|planilha|"
-    r"readme|configura\w*|vari[áa]veis?|imagem|foto|v[íi]deo|áudio|pdf)\b"
+    r"migra\w*|docker|json|ya?ml|csv|xml|zip|download|upload|planilha|"
+    r"readme|configura\w*|vari[áa]veis?)\b"
     # Nome de arquivo (pelo menos uma extensão conhecida) ou caminho com barra.
     r"|[\w-]+\.(py|js|ts|tsx|jsx|json|md|txt|css|html|toml|ya?ml|rs|go|java|c|cpp|h|"
     r"sh|bat|ps1|exe|lock|env)\b"
-    r"|[\w-]+[\\/][\w-]+)",
+    r"|[\w-]+[\\/][\w-]+"
+    # "onde você está" é a pasta de trabalho, dito de qualquer jeito. Sem isto, "o que tem
+    # onde você tá" era pergunta de conversa: rodada sem catálogo, e o modelo respondia que
+    # não tem lugar físico — a resposta certa para quem não tem ferramenta nenhuma.
+    r"|\b(onde\s+(?:vc|voc[êe])\s+(?:t[áa]|est[áa])|pasta\s+de\s+trabalho|"
+    r"diret[óo]rio\s+de\s+trabalho|seu\s+ambiente|sua\s+pasta)\b)",
     re.IGNORECASE,
 )
 
-#: O pedido aponta para um artefato de verdade — nome de arquivo com extensão conhecida,
-#: caminho com barra, ou a própria palavra arquivo/pasta.
+#: Um **arquivo nomeado** — extensão conhecida ou caminho com barra.
 #:
-#: É o que separa "responda apenas: restrições registradas" (resposta) de "responda apenas:
-#: quantas linhas tem o app.py?" (trabalho: quem escreve isso quer o número, não uma
-#: recusa). Quando a pessoa cita um arquivo, a ferramenta continua de pé mesmo com o
-#: pedido pedindo só a resposta.
-ARTEFATO_DE_PROJETO = re.compile(
+#: Antes esta régua incluía as palavras soltas "arquivos", "pastas" e "diretórios", e era
+#: ela que reabria o catálogo para quem tinha acabado de proibi-lo: em "não use ferramentas,
+#: não leia arquivos", a palavra **arquivos** — que faz parte da proibição — casava aqui e
+#: cancelava a restrição. O pedido voltava ao modo trabalho, com o catálogo inteiro, e o
+#: agente lia a máquina da pessoa (achado do dono, 02/10/2026).
+#:
+#: O que a régua precisa separar é outra coisa: "responda apenas: quantas linhas tem o
+#: app.py?" (nomeia um arquivo de verdade — a ferramenta continua de pé, quem escreve isso
+#: quer o número) de "responda apenas: restrições registradas" (não nomeia nada).
+ARQUIVO_NOMEADO = re.compile(
     r"[\w-]+\.(py|js|ts|tsx|jsx|json|md|txt|css|html|toml|ya?ml|rs|go|java|c|cpp|h|"
     r"sh|bat|ps1|exe|lock|env)\b"
-    r"|[\w-]+[\\/][\w-]+"
-    r"|\b(arquivos?|pastas?|diret[óo]rios?)\b",
+    r"|[\w-]+[\\/][\w-]+",
     re.IGNORECASE,
 )
 
@@ -952,13 +1166,16 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     pedido = pedido_do_usuario(mensagens)
     if not pedido:
         return MODO_CODIGO
-    # Instrução explícita de resposta vence a heurística de assunto: a pessoa disse, com
-    # todas as letras, que quer palavras e não trabalho ("responda apenas…", "não use
-    # ferramenta nenhuma"). Continua valendo o pedido que aponta para um arquivo real — ver
-    # `ARTEFATO_DE_PROJETO`.
-    if (
-        SOMENTE_RESPOSTA.search(pedido) or SEM_FERRAMENTA_NENHUMA.search(pedido)
-    ) and not ARTEFATO_DE_PROJETO.search(pedido):
+    # Proibição de ferramenta é **absoluta**: nenhum arquivo citado a reabre. Se a pessoa
+    # escreveu "não use ferramenta nenhuma", a rodada é de resposta e ponto — é a forma mais
+    # honesta de honrar uma instrução negativa.
+    if SEM_FERRAMENTA_NENHUMA.search(pedido):
+        return MODO_RESPOSTA
+    # "Responda apenas…" vence a heurística de assunto: a pessoa disse, com todas as
+    # letras, que quer palavras e não trabalho. Continua valendo o pedido que **nomeia um
+    # arquivo de verdade** ("responda apenas: quantas linhas tem o app.py?"), porque aí a
+    # ferramenta é o caminho para o número pedido.
+    if SOMENTE_RESPOSTA.search(pedido) and not ARQUIVO_NOMEADO.search(pedido):
         return MODO_RESPOSTA
     if MARCADORES_DE_PROJETO.search(pedido):
         return MODO_CODIGO
@@ -1213,6 +1430,9 @@ PARADA_TEMPO = "time_limit"
 PARADA_CHAMADAS = "tool_limit"
 PARADA_PASSOS = "step_limit"
 PARADA_REPETICAO = "repeated_tool"
+#: O modelo degenerou em eco: o mesmo trecho repetido até gastar o orçamento de saída.
+#: Motivo próprio porque a resposta que sai é o aviso, não o eco — e a rodada é retomável.
+PARADA_LOOP_DE_TEXTO = "text_repetition"
 PARADA_VAZIO = "empty_response"
 PARADA_PROVEDOR = "provider_error"
 PARADA_CONTEXTO = "context_overflow"
@@ -1427,6 +1647,10 @@ async def executar(
         )
     else:
         tools = ferramentas.catalogo(set(negadas or ()) | proibidas)
+    # A porteira do despacho (porta do Koda — ver `guardas.py`): só o que foi **oferecido**
+    # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
+    # chama assim mesmo recebe o conteúdo da máquina, e a restrição vira decorativa.
+    guarda = guardas.do_catalogo(tools)
     historico = [dict(item) for item in mensagens]
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
     passos: list[ToolStep] = []
@@ -1668,6 +1892,16 @@ async def executar(
         historico.append(_mensagem_assistente(resultado))
 
         if resultado.truncado:
+            # Eco degenerado: o modelo gastou o orçamento repetindo o mesmo trecho. Empurrar a
+            # continuação aqui costura o eco na resposta final — é assim que a mesma coisa
+            # aparece duas vezes na tela (achado 8 do QA) com dezenas de milhares de tokens
+            # (achado 11). O mecanismo vem de `DUP-repetition_guard.py` do Koda, portado em
+            # `repeticao.py`; o laço não decide mais isso sozinho.
+            if repeticao.dominada_por_repeticao(resultado.text):
+                motivo = PARADA_LOOP_DE_TEXTO
+                texto_final = repeticao.AVISO_DE_REPETICAO
+                await emit("delta", {"text": f"\n\n{repeticao.AVISO_DE_REPETICAO}\n\n"})
+                break
             # O provedor cortou a resposta no teto de tokens: o texto e/ou os argumentos das
             # ferramentas podem ter vindo pela metade. O aviso é explícito em vez de aceitar
             # uma chamada quebrada como se fosse válida.
@@ -1918,6 +2152,41 @@ async def executar(
                 )
                 historico.append(
                     {"role": "tool", "tool_call_id": chamada.id, "content": problema_de_json}
+                )
+                continue
+
+            # A porteira do despacho (porta do Koda — ver `guardas.py`): o que a rodada
+            # **não ofereceu**, não roda. Vem antes do cartão de permissão de propósito —
+            # não faz sentido pedir autorização para uma ferramenta que a própria pessoa
+            # proibiu. Fail-closed: sem nome, guarda quebrada ou comparação que estoure
+            # terminam em recusa.
+            recusa = guarda.nega(chamada.name)
+            if recusa is not None:
+                bloqueios += 1
+                passos.append(
+                    ToolStep(
+                        name=chamada.name,
+                        arguments=argumentos,
+                        output=recusa,
+                        duration_ms=0,
+                        call_id=chamada.id,
+                        ok=False,
+                    )
+                )
+                await emit(
+                    "tool_result",
+                    {
+                        "id": chamada.id,
+                        "name": chamada.name,
+                        "output": recusa,
+                        "duration_ms": 0,
+                        "ok": False,
+                        "step": numero,
+                        "negado": True,
+                    },
+                )
+                historico.append(
+                    {"role": "tool", "tool_call_id": chamada.id, "content": recusa}
                 )
                 continue
 
@@ -2253,6 +2522,13 @@ async def executar(
         if not motivo:
             motivo = PARADA_PASSOS if teto is not None else PARADA_PROVEDOR
         texto_final = _aviso_de_fechamento(ferramentas_ok, "")
+
+    # Última barreira antes de entregar: nenhuma resposta sai com o eco do modelo dentro. Vale
+    # para qualquer caminho que tenha preenchido `texto_final` — o aviso é melhor do que
+    # 30 mil caracteres repetidos na tela.
+    if texto_final and repeticao.descontrolada(texto_final):
+        texto_final = repeticao.AVISO_DE_REPETICAO
+        motivo = motivo or PARADA_LOOP_DE_TEXTO
 
     return Resultado(
         texto=texto_final,

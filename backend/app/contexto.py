@@ -22,6 +22,7 @@ mensagem `tool` órfã (ver `_limite_seguro`).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from typing import Any
@@ -87,9 +88,81 @@ def estimar_tokens(texto: str) -> int:
     return int(len(texto) / CARACTERES_POR_TOKEN) + 1
 
 
+#: Custo estimado de **uma imagem** no contexto, em tokens. Não é o tamanho do base64: o
+#: provedor cobra pela resolução, não pelos bytes (a fórmula da OpenAI dá ~1.100 tokens
+#: para 1024×1024). Contar o data URL como texto inflaria a conta em mais de dez vezes e
+#: faria a compactação disparar sem motivo.
+TOKENS_POR_IMAGEM = 1_500
+
+
+def texto_do_conteudo(conteudo: Any) -> str:
+    """O texto de um `content` que pode ser string **ou** lista de partes (visão).
+
+    Com imagem, o `content` do turno é `[{type: text}, {type: image_url}, …]`. Passar essa
+    lista por `str()` (como se fazia antes) devolveria o `repr` com o base64 inteiro dentro
+    — a conta de tokens sairia errada e o corte de contexto escreveria lixo na conversa.
+    Aqui só o que é texto conta; a imagem é medida por `TOKENS_POR_IMAGEM`.
+    """
+    if isinstance(conteudo, list):
+        return " ".join(
+            str(parte.get("text") or "")
+            for parte in conteudo
+            if isinstance(parte, dict) and parte.get("type") == "text"
+        )
+    return str(conteudo or "")
+
+
+#: Como começa o bloco de anexos que o Koda acrescenta ao turno do usuário (ver
+#: `routers/chat._bloco_de_anexos`). É **anotação nossa**, não fala da pessoa.
+MARCA_DE_ANEXOS = "[anexos desta mensagem"
+
+
+def sem_anotacoes(texto: str) -> str:
+    """O turno sem os blocos que o **próprio Koda** acrescentou — só o que a pessoa escreveu.
+
+    Toda régua que lê o pedido (categoria da tarefa, tamanho, plano, restrições) tem de ler
+    isto, e não o turno cru. A anotação não é pedido, e tratá-la como pedido já custou caro:
+    o bloco de anexos lista os arquivos em **itens** (`- image.png (…)`), e a linha de item
+    casava com a régua de plano — então "fala o que tá escrito nessa foto" fazia o agente
+    pedir que a pessoa dividisse a tarefa em itens antes de executar. O nome do bloco
+    ("anexos") ainda batia na régua de vocabulário de projeto e forçava o catálogo inteiro
+    de ferramentas numa pergunta que se responde com palavras.
+
+    O bloco vem sempre no fim do turno, então basta cortar da marca para frente.
+    """
+    corte = texto.find(MARCA_DE_ANEXOS)
+    return (texto[:corte] if corte >= 0 else texto).strip()
+
+
+def _reduzir(mensagem: dict[str, Any], limite: int, sufixo: str = "") -> None:
+    """Encolhe o **texto** da mensagem, preservando as partes que não são texto.
+
+    Com visão, trocar o `content` inteiro por uma string cortada apagaria a imagem do meio
+    do histórico — e o modelo perderia a visão dela no meio da tarefa.
+    """
+    conteudo = mensagem.get("content")
+    if isinstance(conteudo, list):
+        for parte in conteudo:
+            if isinstance(parte, dict) and parte.get("type") == "text":
+                texto = str(parte.get("text") or "")
+                if len(texto) > limite:
+                    parte["text"] = _cortar(texto, limite) + sufixo
+        return
+    atual = str(conteudo or "")
+    if len(atual) > limite:
+        mensagem["content"] = _cortar(atual, limite) + sufixo
+
+
 def tokens_de_mensagem(mensagem: dict[str, Any]) -> int:
     """Custo de uma mensagem do histórico do modelo, já com o overhead do envelope."""
-    total = estimar_tokens(str(mensagem.get("content") or ""))
+    conteudo = mensagem.get("content")
+    total = estimar_tokens(texto_do_conteudo(conteudo))
+    if isinstance(conteudo, list):
+        total += TOKENS_POR_IMAGEM * sum(
+            1
+            for parte in conteudo
+            if isinstance(parte, dict) and parte.get("type") == "image_url"
+        )
     for chamada in mensagem.get("tool_calls") or []:
         if not isinstance(chamada, dict):
             continue
@@ -134,7 +207,7 @@ def _ultimo_texto(historico: list[dict[str, Any]], papel: str) -> str:
     for mensagem in reversed(historico):
         if mensagem.get("role") != papel:
             continue
-        texto = str(mensagem.get("content") or "").strip()
+        texto = texto_do_conteudo(mensagem.get("content")).strip()
         if texto:
             return _cortar(texto, LIMITE_TRECHO)
     return ""
@@ -185,15 +258,15 @@ def _encolher(historico: list[dict[str, Any]], ate: int, limite: int = LIMITE_TR
             continue
         mensagem = historico[indice]
         papel = mensagem.get("role")
-        atual = str(mensagem.get("content") or "")
+        atual = texto_do_conteudo(mensagem.get("content"))
         if len(atual) <= limite:
             continue
         if papel == "tool":
-            mensagem["content"] = atual[:limite] + "\n...[saída antiga encurtada]"
+            _reduzir(mensagem, limite, "\n...[saída antiga encurtada]")
         elif papel == "assistant":
-            mensagem["content"] = _cortar(atual, limite)
+            _reduzir(mensagem, limite)
         elif indice > 1 and not atual.startswith("[contexto compactado]"):
-            mensagem["content"] = _cortar(atual, limite)
+            _reduzir(mensagem, limite)
     return None
 
 
@@ -281,9 +354,8 @@ def compactar_historico(
             # O pedido atual fica **inteiro**: cortá-lo aqui era o que fazia o agente
             # perder a especificação no meio da tarefa.
             continue
-        atual = str(mensagem.get("content") or "")
-        if len(atual) > fatia:
-            mensagem["content"] = _cortar(atual, fatia)
+        if len(texto_do_conteudo(mensagem.get("content"))) > fatia:
+            _reduzir(mensagem, fatia)
     return (antes, tokens_do_historico(historico))
 
 
@@ -351,13 +423,22 @@ def compactar_turnos(
 
 
 def _com_texto(turno: Any, texto: str) -> Any:
-    """Mesmo turno, com o texto cortado — sem depender do tipo concreto do provedor."""
+    """Mesmo turno, com o texto cortado — sem depender do tipo concreto do provedor.
+
+    Preserva os **outros** campos (as imagens de um turno, por exemplo): recriar o turno só
+    com `role`/`text` jogaria fora a imagem anexada, e o modelo perderia a visão dela no
+    meio da conversa.
+    """
     trocar = getattr(turno, "model_copy", None)
     if callable(trocar):
         try:
             return trocar(update={"text": texto})
-        except Exception:  # noqa: BLE001 — cópia falhou: cai no replacement simples
+        except Exception:  # noqa: BLE001 — cópia falhou: tenta os outros caminhos
             pass
+    try:
+        return dataclasses.replace(turno, text=texto)
+    except Exception:  # noqa: BLE001 — não é dataclass: cai no replacement simples
+        pass
     try:
         novo = type(turno)(role=getattr(turno, "role"), text=texto)
     except Exception:  # noqa: BLE001 — tipo exótico: devolve o original

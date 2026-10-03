@@ -19,7 +19,7 @@ from .base import (
     system_prompt,
 )
 from .local import LocalProvider
-from .openai_compat import HostProvider, OpenAICompatibleProvider
+from .openai_compat import HostProvider, OpenAICompatibleProvider, conteudo_do_turno
 
 __all__ = [
     "ChatOptions",
@@ -31,6 +31,7 @@ __all__ = [
     "ProviderError",
     "TransientProviderError",
     "build_provider",
+    "conteudo_do_turno",
     "host_disponivel",
     "system_prompt",
 ]

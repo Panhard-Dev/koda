@@ -14,9 +14,10 @@ from typing import Any
 
 import httpx
 
-from .. import host_auth
+from .. import contexto, host_auth
 from ..config import Settings
 from ..identidade import FiltroIdentidade, limpar_identidade, pergunta_identidade
+from ..tools import pensamento
 from ..tools.loop import StepResult, ToolCall
 from .base import (
     ChatOptions,
@@ -79,10 +80,37 @@ def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
 
 
 def _texto_do_usuario(turno: Any) -> str:
-    """O conteúdo do usuário, que chega ora como `ChatTurn`, ora como mensagem crua."""
+    """O conteúdo do usuário, que chega ora como `ChatTurn`, ora como mensagem crua.
+
+    Usa `contexto.texto_do_conteudo`: com imagem, o `content` é uma lista de partes, e
+    `str()` traria o base64 dentro — a pergunta de identidade seria testada contra o data
+    URL inteiro em vez da frase da pessoa.
+    """
     if isinstance(turno, dict):
-        return str(turno.get("content") or "")
+        return contexto.texto_do_conteudo(turno.get("content"))
     return str(getattr(turno, "text", "") or "")
+
+
+def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
+    """O turno no formato do provedor: `content` string, ou lista de partes com imagem.
+
+    Sem imagem o corpo é idêntico ao de antes (uma string) — o caminho de visão não pode
+    mexer no que já funciona para todo o resto. Com imagem, `content` vira a lista
+    `[{type: text}, {type: image_url}, …]`, que é o formato OpenAI para visão.
+    """
+    if not turno.imagens:
+        return {"role": turno.role, "content": turno.text}
+    partes: list[dict[str, Any]] = []
+    if turno.text:
+        partes.append({"type": "text", "text": turno.text})
+    partes += [
+        {"type": "image_url", "image_url": {"url": url}} for url in turno.imagens
+    ]
+    if not partes:
+        # Só chega aqui um turno sem texto e sem imagem que escapou do filtro: um `content`
+        # vazio é recusado por parte dos provedores.
+        partes.append({"type": "text", "text": " "})
+    return {"role": turno.role, "content": partes}
 
 
 def _identidade_pedida(historico: Iterable[Any]) -> bool:
@@ -146,6 +174,24 @@ def esforco_valido(pedido: str, suportados: frozenset[str] | None) -> str:
     return abaixo[-1] if abaixo else ESFORCO_SEGURO
 
 
+def sobe_ate_o_piso(nivel: str, piso: str | None) -> str:
+    """O nível, ou o piso do modelo quando o nível está abaixo dele.
+
+    O host publica `reasoningFloor` por modelo: o menor esforço em que o modelo **de
+    fato** emite raciocínio. Abaixo dele a resposta sai sem pensar nada. Medido no
+    `liz-4` (o modelo padrão) e no `layze-2`, que com `minimal` devolveram
+    `reasoning_content` vazio em 3 de 3 chamadas cada e só a partir de `high` disseram
+    alguma coisa — ou seja, o botão **Reasoning ligado** não produzia raciocínio nenhum
+    nesses dois, porque o esforço ligado é o `minimal`.
+
+    Só vale para o caminho "o botão decide": quando a pessoa escolhe um nível no seletor,
+    a escolha dela manda, inclusive se for para pensar menos.
+    """
+    if not piso or piso not in NIVEIS_ESFORCO or nivel not in NIVEIS_ESFORCO:
+        return nivel
+    return piso if NIVEIS_ESFORCO.index(nivel) < NIVEIS_ESFORCO.index(piso) else nivel
+
+
 class OpenAICompatibleProvider:
     name = "openai"
     #: Manda `reasoning_effort` no corpo? Só o host entende o campo — OpenAI, Groq e o
@@ -190,7 +236,7 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt(options)}
         ]
-        messages += [{"role": turn.role, "content": turn.text} for turn in turns]
+        messages += [conteudo_do_turno(turn) for turn in turns]
         return messages
 
     def _erro(self, status: int, detalhe: str) -> ProviderError:
@@ -235,6 +281,10 @@ class OpenAICompatibleProvider:
         # A apresentação que o host injeta é tirada aqui, antes do primeiro pedaço chegar
         # à tela (ver `app/identidade.py`).
         filtro = FiltroIdentidade(options.assistente, _identidade_pedida(turns))
+        # Achado 7: o raciocínio que o modelo escreve dentro do próprio texto (entre
+        # marcações) não pode chegar à tela. O limpador segura a marcação partida entre
+        # pedaços — é o que a limpeza por expressão regular, feita pedaço a pedaço, erra.
+        raciocinio = pensamento.LimpaRaciocinio()
         motivo_de_fim = ""
 
         try:
@@ -275,7 +325,7 @@ class OpenAICompatibleProvider:
                         yield Piece(str(razao), reasoning=True)
                     piece = delta.get("content")
                     if piece:
-                        limpo = filtro.push(str(piece))
+                        limpo = raciocinio.alimentar(filtro.push(str(piece)))
                         if limpo:
                             yield Piece(limpo)
         except httpx.HTTPError as error:  # rede, DNS, timeout
@@ -283,7 +333,7 @@ class OpenAICompatibleProvider:
 
         # O que ficou preso na cabeça sai agora; se era só apresentação, sai a resposta
         # padrão — nunca uma resposta vazia.
-        resto = filtro.fechar()
+        resto = raciocinio.alimentar(filtro.fechar()) + raciocinio.despejar()
         if resto:
             yield Piece(resto)
         if motivo_de_fim == "length":
@@ -412,6 +462,8 @@ class OpenAICompatibleProvider:
         uso: dict[str, Any] = {}
         motivo_de_fim = ""
         filtro = FiltroIdentidade(self.settings.assistente, _identidade_pedida(messages))
+        # Mesmo limpador do outro fluxo: o raciocínio não vai para a resposta visível.
+        raciocinio = pensamento.LimpaRaciocinio()
 
         try:
             async with self._cliente().stream(
@@ -451,7 +503,7 @@ class OpenAICompatibleProvider:
                         yield Piece(str(razao), reasoning=True)
                     pedaco = delta.get("content")
                     if pedaco:
-                        limpo = filtro.push(str(pedaco))
+                        limpo = raciocinio.alimentar(filtro.push(str(pedaco)))
                         if limpo:
                             texto.append(limpo)
                             yield Piece(limpo)
@@ -480,7 +532,7 @@ class OpenAICompatibleProvider:
 
         # O que estava preso na cabeça entra no texto do passo — e na tela — antes de o
         # passo terminar, senão o que a tela mostrava e o que ficava gravado divergiam.
-        resto = filtro.fechar()
+        resto = raciocinio.alimentar(filtro.fechar()) + raciocinio.despejar()
         if resto:
             texto.append(resto)
             yield Piece(resto)
@@ -533,6 +585,9 @@ class HostProvider(OpenAICompatibleProvider):
         self.model = settings.host_model
         self.ready = True
         self._esforcos: dict[str, frozenset[str]] | None = None
+        #: Piso de raciocínio por modelo, do mesmo `/v1/models` (ver `sobe_ate_o_piso`).
+        self._pisos: dict[str, str] = {}
+        self._esforcos_em = 0.0
 
     def headers(self) -> dict[str, str]:
         """O que vai em todo pedido ao host: a sessão da conta, ou a chave de serviço.
@@ -553,9 +608,9 @@ class HostProvider(OpenAICompatibleProvider):
         """Níveis de esforço que cada modelo aceita, direto do `/v1/models` do host.
 
         O host publica `efforts` por modelo, e é a única fonte confiável: `koda-1` não tem
-        `minimal` e recusa com 400. O `targetFormat` entra por cima porque a lista
-        publicada é generosa demais — `liz-4` e `layze-2` anunciam `none` e mesmo assim
-        recusam o campo (medido).
+        `minimal` e recusa com 400. O mesmo payload traz `reasoningFloor`, o menor esforço
+        em que o modelo realmente pensa — guardado em `self._pisos` e usado por
+        `sobe_ate_o_piso` (ver `esforco`).
 
         Lido uma vez e guardado — o catálogo não muda em execução. Catálogo fora do ar
         devolve `{}`, e aí todo mundo cai no valor seguro.
@@ -578,12 +633,16 @@ class HostProvider(OpenAICompatibleProvider):
             return {}
 
         suportados: dict[str, frozenset[str]] = {}
+        pisos: dict[str, str] = {}
         for item in itens:
             if not isinstance(item, dict):
                 continue
             identificador = str(item.get("id", "")).split("/")[-1]
             if not identificador:
                 continue
+            piso = item.get("reasoningFloor")
+            if isinstance(piso, str) and piso.lower() in NIVEIS_ESFORCO:
+                pisos[identificador] = piso.lower()
             publicados = item.get("efforts")
             niveis = {
                 str(nivel).lower()
@@ -593,24 +652,30 @@ class HostProvider(OpenAICompatibleProvider):
             # Modelo que não publica a lista aceita qualquer nível: nenhuma restrição.
             if not niveis:
                 niveis = set(NIVEIS_ESFORCO)
-            # O gateway recusa `none` com 400 em **todos** os modelos, com e sem
-            # ferramentas no corpo (medido no serve-liz, set/2026) — a lista publicada
-            # anuncia `none`, mas o campo não passa. Tirar daqui faz o arredondamento
-            # subir para `minimal`, que é o nível que de fato responde.
+            # O gateway recusa `none` com 400 em parte do catálogo, com e sem ferramentas
+            # no corpo (medido no serve-liz, out/2026). O host já não anuncia `none` nos
+            # modelos que o recusam; tirar aqui também é o que faz o arredondamento subir
+            # para `minimal` — o nível que de fato responde.
             niveis.discard(ESFORCO_DESLIGADO)
             suportados[identificador] = frozenset(niveis)
         self._esforcos = suportados
+        self._pisos = pisos
         self._esforcos_em = time.monotonic()
         return suportados
 
     async def esforco(self, reasoning: bool, modelo: str, escolha: str | None = None) -> str:
         """O seletor da interface manda; sem ele, quem decide é o botão Reasoning.
 
-        O valor sai ajustado ao catálogo do host — é o que evita o 400 na tela.
+        O valor sai ajustado ao catálogo do host — é o que evita o 400 na tela — e, no
+        caminho do botão, subido até o piso do modelo (`sobe_ate_o_piso`): sem isso o
+        "Reasoning ligado" não produzia raciocínio nenhum no `liz-4` e no `layze-2`.
         """
         escolhido = escolha or (ESFORCO_LIGADO if reasoning else ESFORCO_DESLIGADO)
         catalogo = await self._catalogo_de_esforcos()
-        return esforco_valido(escolhido, catalogo.get(modelo))
+        ajustado = esforco_valido(escolhido, catalogo.get(modelo))
+        if reasoning and not escolha:
+            ajustado = sobe_ate_o_piso(ajustado, self._pisos.get(modelo))
+        return ajustado
 
     #: Nomes decorativos do seletor antigo. Conversa gravada antes do serviço atual ainda
     #: manda um desses; melhor cair no padrão do que virar um 400 lá.

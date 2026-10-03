@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
@@ -114,8 +115,44 @@ function IconesHarness() {
   )
 }
 
+/**
+ * A caixa com o menu do "/" e o que ela manda ao agente.
+ *
+ * Existe para conferir o menu sem passar pelo login: o que o Enter escolhe aparece na lista
+ * de baixo, e dá para ver que o comando vira pedido de verdade em vez de sair cru para o
+ * modelo.
+ */
+function ComandosHarness() {
+  const [enviados, setEnviados] = useState<string[]>([])
+
+  return (
+    <div className="bg-koda-bg p-5">
+      <p className="mb-2 text-[11px] tracking-wider text-koda-fg/35 uppercase">
+        menu de comandos do "/"
+      </p>
+      <Composer
+        variant="chat"
+        model="liz-4"
+        onSend={(payload) => setEnviados((atual) => [...atual, payload.text])}
+      />
+      <ul className="mt-4 flex flex-col gap-2">
+        {enviados.map((texto, indice) => (
+          <li
+            key={indice}
+            data-enviado=""
+            className="rounded-lg bg-koda-fg/6 p-3 text-[12.5px] whitespace-pre-wrap text-koda-fg/80"
+          >
+            {texto}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 createRoot(document.getElementById('root')!).render(
   <div>
+    <ComandosHarness />
     <ComposerHarness />
     <IconesHarness />
     <Harness />

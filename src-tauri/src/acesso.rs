@@ -17,16 +17,22 @@
 //! nonce e confere o HMAC que volta. Só adota o que provar conhecer o token desta execução;
 //! o resto é sobra e sai da frente. Como o token é por execução, um backend de execução
 //! anterior **nunca** prova — e matar e subir outro é o comportamento esperado, não erro.
+//!
+//! **As duas portas do app nascem aqui** (a da API e a do host). A do host também era fixa
+//! (21128) e isso não se sustentou: numa máquina onde **outro programa** já ocupa a 21128 o
+//! app antigo ou não subia o host, ou — pior — tratava o estranho como se fosse o host e
+//! mandava a sessão da conta para ele. Endereço fixo em máquina que não é nossa não é
+//! endereço, é aposta.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::log;
-use crate::servicos::PORTA_API;
+use crate::servicos::{PORTA_API, PORTA_HOST};
 
 /// Quantos bytes de aleatoriedade tem o token (256 bits).
 const BYTES_DO_TOKEN: usize = 32;
@@ -49,17 +55,31 @@ pub struct Credenciais {
 
 /// As credenciais desta execução, vivas enquanto o app estiver aberto.
 ///
-/// A porta começa na de dev e é fixada no `setup`, depois de o app saber se é o instalado
-/// ou o do projeto — daí o átomo, e não um campo comum.
+/// As portas começam nas de dev e são fixadas no `setup`, depois de o app saber se é o
+/// instalado ou o do projeto — daí os átomos, e não campos comuns.
 pub struct Acesso {
     porta: AtomicU16,
+    /// A porta do host (`c-host.exe`) **desta execução**.
+    ///
+    /// Mora aqui, e não numa constante, pelo mesmo motivo da porta da API: no app instalado
+    /// ela é sorteada a cada abertura. A 21128 fixa era uma aposta de que ninguém mais na
+    /// máquina do cliente estaria usando aquela porta — e essa aposta se perde com
+    /// frequência suficiente para ter virado relatório de campo.
+    porta_host: AtomicU16,
+    /// O app é o instalado? É o que decide se as portas são sorteadas ou as fixas de dev.
+    empacotado: AtomicBool,
     token: String,
 }
 
 impl Acesso {
     /// Sorteia o token desta execução. Chamado uma vez, na abertura do app.
     pub fn novo() -> Acesso {
-        Acesso { porta: AtomicU16::new(PORTA_API), token: sortear(BYTES_DO_TOKEN) }
+        Acesso {
+            porta: AtomicU16::new(PORTA_API),
+            porta_host: AtomicU16::new(PORTA_HOST),
+            empacotado: AtomicBool::new(false),
+            token: sortear(BYTES_DO_TOKEN),
+        }
     }
 
     pub fn fixar_porta(&self, porta: u16) {
@@ -70,38 +90,72 @@ impl Acesso {
         self.porta.load(Ordering::SeqCst)
     }
 
+    /// Troca a porta do host. Usada no `setup` e, de novo, se a sorteada for tomada por
+    /// outra coisa entre a escolha e a subida (ver `iniciar_host`).
+    pub fn fixar_porta_host(&self, porta: u16) {
+        self.porta_host.store(porta, Ordering::SeqCst);
+    }
+
+    pub fn porta_host(&self) -> u16 {
+        self.porta_host.load(Ordering::SeqCst)
+    }
+
+    pub fn fixar_empacotado(&self, empacotado: bool) {
+        self.empacotado.store(empacotado, Ordering::SeqCst);
+    }
+
+    pub fn empacotado(&self) -> bool {
+        self.empacotado.load(Ordering::SeqCst)
+    }
+
     pub fn token(&self) -> &str {
         &self.token
     }
 }
 
-/// A porta em que o backend deve subir nesta execução.
+/// As portas desta execução, na ordem `(api, host)`.
 ///
-/// `KODA_API_PORT` manda (é o gancho de teste e o de quem sobe o backend à mão). Sem ela,
-/// o instalado sorteia uma porta livre e o dev fica na 8787 — que é a que o Vite espera.
-pub fn escolher_porta(empacotado: bool) -> u16 {
-    if let Some(porta) = std::env::var("KODA_API_PORT").ok().and_then(|valor| valor.parse().ok()) {
+/// `KODA_API_PORT`/`KODA_HOST_PORT` mandam (são os ganchos de teste e de quem sobe o serviço
+/// à mão). Sem elas, o dev fica nas fixas — 8787 e 21128, que é o que o Vite e o
+/// `backend/.env` esperam — e o instalado sorteia as duas.
+///
+/// **As duas sorteadas são diferentes entre si**, e é por isso que a segunda recebe a
+/// primeira como exclusão: `porta_livre` abre e fecha o soquete na hora, então duas chamadas
+/// seguidas podem devolver a mesma porta — e aí o host e o backend brigariam por ela.
+pub fn escolher_portas(empacotado: bool) -> (u16, u16) {
+    let api = escolher("KODA_API_PORT", PORTA_API, empacotado, &[]);
+    let host = escolher("KODA_HOST_PORT", PORTA_HOST, empacotado, &[api]);
+    (api, host)
+}
+
+fn escolher(variavel: &str, padrao: u16, empacotado: bool, excluir: &[u16]) -> u16 {
+    if let Some(porta) = std::env::var(variavel).ok().and_then(|valor| valor.parse().ok()) {
         return porta;
     }
     if !empacotado {
-        return PORTA_API;
+        return padrao;
     }
-    porta_livre()
+    porta_livre(excluir).unwrap_or(padrao)
 }
 
 /// Deixa o sistema escolher uma porta livre em loopback e a devolve.
 ///
-/// O soquete fecha na saída da função, então há uma janela mínima entre escolher e o
-/// backend subir. Numa faixa de portas efêmeras isso é praticamente impossível de acertar
-/// por acaso — e se acertar, o handshake abaixo percebe e o serviço não é adotado.
-fn porta_livre() -> u16 {
-    match TcpListener::bind("127.0.0.1:0") {
-        Ok(soquete) => match soquete.local_addr() {
-            Ok(endereco) => endereco.port(),
-            Err(_) => PORTA_API,
-        },
-        Err(_) => PORTA_API,
+/// O soquete fecha na saída da função, então há uma janela mínima entre escolher e o serviço
+/// subir. Numa faixa de portas efêmeras isso é praticamente impossível de acertar por acaso
+/// — e se acertar, o handshake abaixo percebe e o serviço não é adotado.
+///
+/// `excluir` existe para as duas portas do app não saírem iguais (ver `escolher_portas`).
+/// `None` = o sistema não tinha porta para dar, que é o caso em que o chamador cai no
+/// padrão e diz no log o que aconteceu.
+pub fn porta_livre(excluir: &[u16]) -> Option<u16> {
+    for _ in 0..8 {
+        let soquete = TcpListener::bind("127.0.0.1:0").ok()?;
+        let endereco = soquete.local_addr().ok()?;
+        if !excluir.contains(&endereco.port()) {
+            return Some(endereco.port());
+        }
     }
+    None
 }
 
 /// `n` bytes aleatórios em hexadecimal.
@@ -220,9 +274,12 @@ pub fn acesso(acesso: tauri::State<'_, Acesso>) -> Credenciais {
 
 /// Escreve o token na entrada padrão do backend e fecha o canal.
 ///
-/// É por aqui, e não pelo ambiente: o ambiente dos processos filhos é montado a partir de
-/// uma allowlist justamente para o agente não ler segredo nenhum, e o token seria o
-/// primeiro da lista.
+/// É por aqui, e não pelo ambiente, porque o ambiente é herdado por **todo** processo que o
+/// backend abrir — e é o backend que roda o shell e o Python do agente. Um token em variável
+/// de ambiente ficaria ao alcance de qualquer comando que o próprio agente executasse.
+///
+/// (Não existe allowlist de ambiente no launcher: o filho herda o ambiente inteiro. Se um
+/// dia ela existir, este é o comentário que descreve o que ela protegeria.)
 pub fn entregar_token(filho: &mut std::process::Child, token: &str) -> bool {
     let Some(mut entrada) = filho.stdin.take() else {
         log("backend subiu sem canal de entrada — não consegui entregar o token");
@@ -301,28 +358,39 @@ mod tests {
         assert!(!iguais("", "a"));
     }
 
-    /// A porta do dev é a de sempre; a do instalado tem que ser uma porta que aceita
-    /// conexão agora — e não a 8787, senão a efêmera não valeria de nada.
+    /// As duas portas do instalado saem livres e **diferentes** entre si.
+    ///
+    /// Livres: nenhuma delas aceita conexão agora (a efêmera não valeria nada se caísse numa
+    /// porta ocupada). Diferentes: é o que impede o host e o backend de brigarem pela mesma
+    /// — `porta_livre` abre e fecha o soquete na hora, então duas chamadas seguidas podiam
+    /// devolver o mesmo número.
     #[test]
-    fn a_porta_do_instalado_e_livre_e_nao_e_a_fixa() {
-        let porta = escolher_porta(true);
-        assert!(TcpStream::connect_timeout(
-            &format!("127.0.0.1:{porta}").parse().expect("endereço"),
-            Duration::from_millis(200)
-        )
-        .is_err());
-        // `escolher_porta(true)` sem `KODA_API_PORT` no ambiente sorteia.
+    fn as_duas_portas_do_instalado_sao_livres_e_diferentes() {
+        let (api, host) = escolher_portas(true);
+        assert_ne!(api, host, "o host e o backend não podem ficar na mesma porta");
+        for porta in [api, host] {
+            let endereco = format!("127.0.0.1:{porta}").parse().expect("endereço");
+            assert!(
+                TcpStream::connect_timeout(&endereco, Duration::from_millis(200)).is_err(),
+                "a porta {porta} já estava ocupada"
+            );
+        }
+        // Sem os ganchos de ambiente, o instalado sorteia em vez de usar as fixas.
         if std::env::var("KODA_API_PORT").is_err() {
-            assert_ne!(porta, PORTA_API);
+            assert_ne!(api, PORTA_API);
+        }
+        if std::env::var("KODA_HOST_PORT").is_err() {
+            assert_ne!(host, PORTA_HOST);
         }
     }
 
+    /// O dev continua nas duas portas fixas — é o que o Vite e o `backend/.env` esperam.
     #[test]
-    fn a_variavel_de_ambiente_manda_na_porta() {
-        // Não mexemos no ambiente do processo de teste: só confirmamos que o dev fica na
-        // porta fixa quando ninguém pediu outra.
-        if std::env::var("KODA_API_PORT").is_err() {
-            assert_eq!(escolher_porta(false), PORTA_API);
+    fn o_dev_fica_nas_portas_fixas() {
+        // Não mexemos no ambiente do processo de teste: só confirmamos que, sem ninguém
+        // pedir outra porta, o dev não sorteia.
+        if std::env::var("KODA_API_PORT").is_err() && std::env::var("KODA_HOST_PORT").is_err() {
+            assert_eq!(escolher_portas(false), (PORTA_API, PORTA_HOST));
         }
     }
 
@@ -337,7 +405,7 @@ mod tests {
 
     #[test]
     fn porta_vazia_nao_passa_no_handshake() {
-        let porta = porta_livre();
+        let porta = porta_livre(&[]).expect("o sistema tem porta livre");
         assert!(!confere_handshake(porta, "qualquer"));
     }
 

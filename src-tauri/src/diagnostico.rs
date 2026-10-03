@@ -21,7 +21,6 @@ use serde::Serialize;
 use tauri::Manager;
 
 use crate::acesso::Acesso;
-use crate::servicos::Papel;
 use crate::{achar_backend, log, log_do_backend, pasta_de_dados, porta_no_ar};
 
 /// Quantas linhas do log do backend a tela mostra.
@@ -56,11 +55,11 @@ pub struct Diagnostico {
 
 impl Diagnostico {
     /// Usado quando nem a checagem foi possível.
-    fn vazio(versao: String, backend_porta: u16) -> Self {
+    fn vazio(versao: String, backend_porta: u16, host_porta: u16) -> Self {
         Diagnostico {
             versao,
             empacotado: false,
-            host_porta: Papel::Host.porta(),
+            host_porta,
             host_no_ar: false,
             backend_porta,
             backend_no_ar: false,
@@ -111,9 +110,12 @@ fn rodar(python: &Path, argumentos: &[&str]) -> Option<String> {
 pub fn coletar(versao: String, app: &tauri::AppHandle) -> Diagnostico {
     let backend = achar_backend(app);
     let caminho_python = backend.as_ref().map(|backend| backend.python.clone());
-    // A porta do backend é a **desta execução** (efêmera no app instalado): perguntar à
-    // 8787 aqui daria "não responde" num serviço que está no ar.
-    let backend_porta = app.state::<Acesso>().porta();
+    // As duas portas são as **desta execução** (efêmeras no app instalado): perguntar à
+    // 8787 ou à 21128 aqui daria "não responde" num serviço que está no ar — e é justamente
+    // este relatório que a gente lê quando desconfia que algo não subiu.
+    let estado = app.state::<Acesso>();
+    let backend_porta = estado.porta();
+    let host_porta = estado.porta_host();
 
     let (python_versao, python_modulos) = match caminho_python.as_deref() {
         Some(python) if python.is_file() => {
@@ -127,8 +129,8 @@ pub fn coletar(versao: String, app: &tauri::AppHandle) -> Diagnostico {
     let mut diagnostico = Diagnostico {
         versao,
         empacotado: backend.as_ref().is_some_and(|backend| backend.empacotado),
-        host_porta: Papel::Host.porta(),
-        host_no_ar: porta_no_ar(Papel::Host.porta()),
+        host_porta,
+        host_no_ar: porta_no_ar(host_porta),
         backend_porta,
         backend_no_ar: porta_no_ar(backend_porta),
         python: caminho_python.map(|caminho| caminho.display().to_string()),
@@ -167,8 +169,12 @@ pub async fn diagnostico(app: tauri::AppHandle) -> Diagnostico {
         }
         Err(erro) => {
             log(&format!("diagnóstico falhou: {erro}"));
-            let porta = app.state::<Acesso>().porta();
-            Diagnostico::vazio(app.package_info().version.to_string(), porta)
+            let estado = app.state::<Acesso>();
+            Diagnostico::vazio(
+                app.package_info().version.to_string(),
+                estado.porta(),
+                estado.porta_host(),
+            )
         }
     }
 }

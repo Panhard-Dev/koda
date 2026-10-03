@@ -80,10 +80,10 @@ o host no ar, ele cai na lista da casa, que é esta:
   roda com o catálogo completo, e o trabalho é para ser feito por inteiro. Instrução negativa
   explícita — "não use arquivos", "responda apenas" — tira a ferramenta da rodada de verdade,
   e não é só uma frase que o modelo pode ignorar.
-- **Raciocínio é bastidor.** Por padrão a conversa mostra a resposta: o rascunho do modelo e
-  os detalhes de cada ferramenta (caminho, tempo, saída) ficam atrás de *Ajustes →
-  Preferências → "Mostrar raciocínio e passos das ferramentas"*, e as ferramentas aparecem
-  como uma linha — quantas rodaram e quanto levou — que abre no detalhe por um clique.
+- **Raciocínio à vista.** O pensamento do modelo aparece na conversa enquanto ele trabalha:
+  é ele que mostra que tem alguém ali dentro numa tarefa longa. Quem preferir a conversa mais
+  limpa desliga em *Ajustes → Preferências → "Mostrar raciocínio do modelo"*. As ferramentas
+  aparecem como uma linha — quantas rodaram e quanto levou — que abre no detalhe por um clique.
 - **Tempo em escala humana.** Nada de `2725 ms` ou `314s` lado a lado: a régua sobe sozinha
   (`47 ms` → `1,4 s` → `2,7 min` → `1,2 h`), a mesma para a ficha de resposta, para cada
   ferramenta e para o relógio da resposta em curso.

@@ -25,6 +25,12 @@ class TransientProviderError(ProviderError):
 class ChatTurn:
     role: str  # 'user' | 'assistant' | 'system'
     text: str
+    #: Imagens que vão **junto** deste turno, como `data:` URLs (`data:image/png;base64,…`).
+    #:
+    #: Ficam no turno e não no texto porque imagem não é texto: quem as leva ao modelo é o
+    #: campo `image_url` do pedido, e só o turno do usuário carrega alguma. Vazio (o caso
+    #: normal) manda o pedido exatamente como antes — `content` continua sendo uma string.
+    imagens: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -34,6 +40,10 @@ class ChatOptions:
     web: bool = False
     project: str | None = None
     attachments: list[str] = field(default_factory=list)
+    #: As imagens desta conversa foram anexadas ao contexto (modelo que enxerga imagem)?
+    #: Muda só o que o prompt de sistema diz sobre os anexos — sem isto ele mandaria o
+    #: modelo chamar `read_attachment` para uma imagem que já está na frente dele.
+    visao_ativa: bool = False
     #: Nome com que o assistente se identifica (o host injeta uma persona própria).
     assistente: str = NOME
     #: Quem está logado (`Nome (email)`), quando há conta. `None` = não fala de identidade.
@@ -102,13 +112,25 @@ def system_prompt(options: ChatOptions) -> str:
     if options.resumo:
         parts.append(options.resumo)
     if options.attachments:
-        parts.append(
-            "Nesta conversa há anexos do usuário: "
-            + ", ".join(options.attachments)
-            + ". O conteúdo deles NÃO está na pasta de trabalho: para ler, use a ferramenta "
-            "`read_attachment` com o id que aparece no bloco «[anexos desta mensagem]». "
-            "Não tente abrir o anexo com `read_file` pelo nome — ele não está no workspace."
-        )
+        if options.visao_ativa:
+            parts.append(
+                "Nesta conversa há anexos do usuário: "
+                + ", ".join(options.attachments)
+                + ". Os arquivos NÃO estão na pasta de trabalho. As **imagens** já estão "
+                "anexadas ao turno em que foram enviadas: você as enxerga, então descreva e "
+                "responda sobre elas direto, sem chamar ferramenta. Para texto, código ou "
+                "pdf, use a ferramenta `read_attachment` com o id que aparece no bloco "
+                "«[anexos desta mensagem]». Não tente abrir o anexo com `read_file` pelo "
+                "nome — ele não está no workspace."
+            )
+        else:
+            parts.append(
+                "Nesta conversa há anexos do usuário: "
+                + ", ".join(options.attachments)
+                + ". O conteúdo deles NÃO está na pasta de trabalho: para ler, use a ferramenta "
+                "`read_attachment` com o id que aparece no bloco «[anexos desta mensagem]». "
+                "Não tente abrir o anexo com `read_file` pelo nome — ele não está no workspace."
+            )
     # Quem está do outro lado. Sem isto o assistente responde "não tenho acesso aos dados
     # da sua conta" — tecnicamente verdade, e uma péssima primeira impressão para quem
     # acabou de entrar. O e-mail é o da conta no painel, e vai só para o provedor da

@@ -185,6 +185,21 @@ class Settings(BaseSettings):
     )
     """Modelo padrão do serviço, para id que ele não reconheça (ou vazio)."""
 
+    host_modelos_com_visao: str = Field(
+        default="liz-4,liz-3-flash,koda-1,layze-2",
+        validation_alias=AliasChoices("KODA_HOST_VISAO", "HOST_VISAO"),
+    )
+    """Ids do host que **enxergam imagem**, separados por vírgula.
+
+    A lista é necessária porque o host **não publica** a capacidade em `/v1/models` (só
+    `efforts` e `reasoningFloor`): sem ela não há como saber se a imagem pode ir no corpo
+    do pedido ou se o provedor vai recusar. Modelo fora da lista recebe o anexo do mesmo
+    jeito que antes — pelos metadados —, em vez de o pedido inteiro falhar.
+
+    Ajustável por `KODA_HOST_VISAO`: quando o host passar a publicar a capacidade, é aqui
+    que ela entra até virar campo do catálogo.
+    """
+
     host_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("HOST_KEY", "KODA_HOST_KEY"),
@@ -262,6 +277,16 @@ class Settings(BaseSettings):
     def resolve_model(self, model: str, padrao: str | None = None) -> str:
         """Modelo da interface (liz-nano, koda-1…) para o nome do provedor."""
         return self.model_aliases.get(model, padrao or self.openai_model)
+
+    def aceita_imagem(self, model: str) -> bool:
+        """O modelo enxerga imagem? Decide se o anexo de imagem vai **no corpo** do pedido.
+
+        Compara pelo id do host e também pelo alias: a interface manda o id do catálogo
+        (`liz-4`), e o `model_map` pode traduzi-lo antes de o pedido subir. Um id vazio cai
+        no modelo padrão do host, que é o que o provider vai usar de verdade.
+        """
+        alvo = self.model_aliases.get(model, model) or self.host_model
+        return alvo in {item.strip() for item in self.host_modelos_com_visao.split(",") if item.strip()}
 
     @property
     def workspace_path(self) -> Path:
