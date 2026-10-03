@@ -39,6 +39,7 @@ backend/tests/
 backend/testar_*.py
 backend/probe_*.py
 backend/diagnostico_anexos.py
+backend/diagnostico-*.py
 
 # Bancada e relatório de QA: saída de teste, não código do produto. Os HTML de relatório
 # não são frontend — o único HTML do produto é o do app (`index.html` e os harnesses).
