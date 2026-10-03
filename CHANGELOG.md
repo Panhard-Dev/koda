@@ -35,7 +35,7 @@ versão fecha isso e os outros achados do relatório.
   dele não vão mais no instalador). O material de referência fica em
   `backend/material-referencia/`, fora do pacote e do repositório.
 
-Detalhe parte por parte: `MUDANCAS-0.6.0.md`.
+Detalhe parte por parte: `RELEASE-0.6.0.md`.
 
 ## [0.5.2] — 2026-10-02
 
