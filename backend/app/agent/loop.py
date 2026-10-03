@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..tools import ferramentas, registry
+from .. import mcp
 from ..policy import guards
 from . import contexto, repeticao
 from ..limits import LIMITES
@@ -1056,6 +1057,31 @@ def _explicar_restricoes(
     }
 
 
+def _explicar_mcp(historico: list[dict[str, Any]], ferramentas_mcp: list[dict[str, Any]]) -> None:
+    """Diz ao modelo, no prompt de sistema, que existem ferramentas de servidores MCP.
+
+    Sem isto, o modelo vê um nome como `mcp__arquivos__ler` no catálogo e não tem como saber
+    o que é: ele trata como mais uma ferramenta do Koda, inventa que a ferramenta "não
+    existe" quando falha, ou pior — promete ao usuário um resultado que o servidor não dá.
+    O aviso é curto de propósito: o que cada uma faz está na descrição dela, e a descrição
+    já carrega o servidor de origem.
+    """
+    if not ferramentas_mcp or not historico or historico[0].get("role") != "system":
+        return
+    nomes = ", ".join(item["function"]["name"] for item in ferramentas_mcp)
+    aviso = (
+        "FERRAMENTAS DE SERVIDORES MCP nesta rodada (nome começando com `mcp__`): "
+        f"{nomes}. Elas rodam **fora** do Koda, no servidor MCP correspondente — o prefixo "
+        "`mcp__<servidor>__<ferramenta>` diz de qual servidor cada uma vem. Use-as como "
+        "qualquer ferramenta; se uma falhar, o erro do servidor volta no resultado — leia-o "
+        "e siga, sem inventar que a ferramenta não existe."
+    )
+    historico[0] = {
+        **historico[0],
+        "content": f"{historico[0].get('content', '')}\n\n{aviso}",
+    }
+
+
 #: Pedido de resposta pura **com** restrição explícita ("responda apenas com o que sabe,
 #: sem usar arquivos"). Sem a restrição, "responda apenas: x" já é atendido pela régua de
 #: pedido de resposta e não precisa desligar o catálogo — o modelo pode ter de ler algo
@@ -1583,6 +1609,20 @@ async def executar(
     `dono` identifica a tarefa: vai junto dos processos que ela começar, para o cancelamento
     derrubar só os dela.
     """
+    # Todo evento de ferramenta sai com o **endereço de origem**, quando é de servidor MCP:
+    # a interface mostra o nome real do servidor e da ferramenta (`[MCP · eco-server]`), e
+    # não o nome normalizado que o modelo vê. Fica num envoltório só, e não espalhado pelos
+    # ~10 pontos que emitem `tool_call`/`tool_result` — assim um caminho novo (orçamento
+    # estourado, argumento inválido, chamada negada) já nasce com o detalhe.
+    emit_bruto = emit
+
+    async def emit(evento: str, dados: dict[str, Any]) -> None:
+        if evento in ("tool_call", "tool_result"):
+            detalhe = mcp.detalhar(str(dados.get("name") or ""))
+            if detalhe:
+                dados = {**dados, "mcp": detalhe}
+        await emit_bruto(evento, dados)
+
     # Duas regras decidem o catálogo **antes** do primeiro passo, e não no meio do caminho:
     # a categoria do pedido (resposta avulsa x trabalho no projeto — "faça exatamente o que
     # foi pedido, nada além") e a instrução negativa da pessoa ("não use arquivos"), que
@@ -1590,6 +1630,7 @@ async def executar(
     proibidas, sem_ferramentas = restricoes_do_pedido(mensagens)
     modo = classificar_pedido(mensagens)
     todas = {item["function"]["name"] for item in registry.DEFINICOES}
+    ferramentas_mcp: list[dict[str, Any]] = []
     if sem_ferramentas:
         tools: list[dict[str, Any]] = []
     elif modo == MODO_RESPOSTA:
@@ -1597,13 +1638,27 @@ async def executar(
             set(negadas or ()) | (todas - FERRAMENTAS_DE_RESPOSTA)
         )
     else:
-        tools = registry.catalogo(set(negadas or ()) | proibidas)
+        proibidas_todas = set(negadas or ()) | proibidas
+        tools = registry.catalogo(proibidas_todas)
+        # Ferramentas dos servidores MCP conectados. Entram no **mesmo** catálogo que vai ao
+        # modelo e à porteira — é o que garante que "ofereci" e "deixo chamar" não divirjam.
+        # Só na rodada de trabalho: uma ferramenta MCP executa coisa no mundo, e a rodada de
+        # resposta existe justamente para não fazer isso. Sem servidor conectado, a lista é
+        # vazia e nada muda.
+        proibidas_canonicas = {registry.canonico(item) for item in proibidas_todas}
+        ferramentas_mcp = [
+            item
+            for item in mcp.catalogo()
+            if item["function"]["name"] not in proibidas_canonicas
+        ]
+        tools = tools + ferramentas_mcp
     # A porteira do despacho (porta do Koda — ver `guards.py`): só o que foi **oferecido**
     # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
     # chama assim mesmo recebe o conteúdo da máquina, e a restrição vira decorativa.
     guarda = guards.do_catalogo(tools)
     historico = [dict(item) for item in mensagens]
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
+    _explicar_mcp(historico, ferramentas_mcp)
     passos: list[ToolStep] = []
     uso = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     texto_final = ""
@@ -2481,6 +2536,14 @@ async def executar(
     if texto_final and repeticao.descontrolada(texto_final):
         texto_final = repeticao.AVISO_DE_REPETICAO
         motivo = motivo or PARADA_LOOP_DE_TEXTO
+
+    # O que é de servidor MCP ganha o endereço de origem **aqui**, num lugar só: a interface
+    # mostra o nome real do servidor e da ferramenta, e o que fica gravado na mensagem é o
+    # mesmo que a tela viu — reabrir a conversa mostra o servidor, e não o nome normalizado
+    # (`eco_server`) que não existe no `mcps.json`.
+    for passo in passos:
+        if passo.mcp is None:
+            passo.mcp = mcp.detalhar(passo.name)
 
     return Resultado(
         texto=texto_final,
