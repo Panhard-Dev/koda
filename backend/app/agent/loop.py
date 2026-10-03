@@ -1143,9 +1143,11 @@ ARQUIVO_NOMEADO = re.compile(
 
 #: Ferramentas que continuam disponíveis na rodada de **resposta**.
 #:
-#: Só o anexo: ler o PDF que a pessoa colou na conversa faz parte de responder o que ela
-#: perguntou. Arquivo da pasta, shell, web e código saem — é o "nada além" levado a sério.
-FERRAMENTAS_DE_RESPOSTA = frozenset({"read_attachment"})
+#: Só o anexo e a skill: ler o PDF que a pessoa colou na conversa faz parte de responder o
+#: que ela perguntou, e uma skill é um pacote de **instruções** — aplicá-la a uma pergunta
+#: é responder melhor, não mexer na máquina. Arquivo da pasta, shell, web e código saem — é
+#: o "nada além" levado a sério.
+FERRAMENTAS_DE_RESPOSTA = frozenset({"read_attachment", "use_skill"})
 
 
 def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
@@ -1570,6 +1572,7 @@ async def executar(
     tool_call_timeout_s: float | None = 120.0,
     cancelamento: threading.Event | None = None,
     anexos: Any = None,
+    skills: Any = None,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -2316,6 +2319,7 @@ async def executar(
                         acesso_livre=liberado,
                         dono=dono,
                         anexos=anexos,
+                        skills=skills,
                         timeout_s=prazo_tool,
                         cancelamento=cancelamento,
                     )

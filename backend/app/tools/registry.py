@@ -232,6 +232,7 @@ from .domains.files.schema import DEFINICOES as _ARQUIVOS
 from .domains.git.schema import DEFINICOES as _GIT
 from .domains.plano.schema import DEFINICOES as _PLANO
 from .domains.shell.schema import DEFINICOES as _EXECUCAO
+from .domains.skills.schema import DEFINICOES as _SKILLS
 from .domains.web.schema import DEFINICOES as _WEB
 
 #: O catálogo inteiro, na ordem em que o modelo o recebe.
@@ -241,6 +242,7 @@ DEFINICOES: list[dict[str, Any]] = [
     *_GIT,
     *_WEB,
     *_PLANO,
+    *_SKILLS,
 ]
 #: Todas as ferramentas que executam algo no disco ou na máquina.
 ESCRITA = {
