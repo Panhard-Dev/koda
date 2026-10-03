@@ -50,6 +50,8 @@ import {
   definirSessaoDoHost,
   fetchUsage,
   fraseDeFalha,
+  createMcp,
+  createSkill,
   getConversation,
   health,
   listConversations,
@@ -81,6 +83,8 @@ import type {
   DecisaoPermissao,
   Health,
   ModoPermissao,
+  NovoMcp,
+  NovoSkill,
   PedidoPermissao,
   ProjectsEstado,
   ToolStep,
@@ -687,15 +691,17 @@ function App() {
   /** Números da rodada (uso, tempo, hora) na ficha no fim de cada resposta. */
   const [mostrarRodape, setMostrarRodape] = useState(true)
   /**
-   * Raciocínio e passos das ferramentas abertos na conversa.
+   * Raciocínio e passos das ferramentas abertos na conversa. **Ligado por padrão.**
    *
-   * Desligado por padrão: quem usa o app quer a resposta, e o rascunho do modelo, os
-   * caminhos das pastas lidas e o tempo de cada ferramenta são diagnóstico — não conversa.
+   * O pensamento do modelo é parte do que está acontecendo: ele mostra o que está sendo
+   * considerado antes da conclusão, e numa tarefa longa é ele que prova que tem alguém
+   * trabalhando ali dentro. Esconder isso foi um engano — o interruptor existe para quem
+   * preferir a conversa mais limpa, mas **não** como padrão.
+   *
    * Desligado, as ferramentas ainda aparecem como **uma linha** (quantas rodaram e quanto
-   * levou), com o detalhe atrás de um clique. Ligado, é o comportamento de antes: tudo
-   * aberto, do jeito que quem está depurando o agente precisa.
+   * levou), com o detalhe atrás de um clique.
    */
-  const [mostrarTraces, setMostrarTraces] = useState(false)
+  const [mostrarTraces, setMostrarTraces] = useState(true)
   const [history, setHistory] = useState<Conversation[]>([])
   const [view, setView] = useState<'chat' | 'settings'>('chat')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
@@ -737,6 +743,27 @@ function App() {
   /** Resultado da consulta que a tela faz à nuvem ao abrir (além do resumo do health). */
   const [nuvemDetalhe, setNuvemDetalhe] = useState<ApiCloudUpdate | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  /** A caixa que rola a conversa — é dela que sai a posição real do usuário. */
+  const listaRef = useRef<HTMLDivElement>(null)
+  /**
+   * A rolagem automática só entra quando a pessoa **já está** no fim da conversa.
+   *
+   * Antes, cada pedaço de texto que chegava chamava `scrollIntoView`: quem subia para reler
+   * uma resposta antiga era puxado de volta para baixo a cada token e não conseguia ler
+   * nada enquanto o modelo escrevia. Agora, subir desliga o acompanhamento; voltar ao fim
+   * liga de novo.
+   */
+  const seguirOFimRef = useRef(true)
+
+  /**
+   * O usuário está colado no fim? A folga de 80 px cobre o arredondamento do zoom e a
+   * última linha meio cortada — sem ela, a rolagem automática se desligaria sozinha.
+   */
+  const aoRolar = () => {
+    const caixa = listaRef.current
+    if (!caixa) return
+    seguirOFimRef.current = caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight < 80
+  }
   /** Último sinal de vida vindo do backend (pensamento, palavra, ferramenta). */
   const ultimoSinalRef = useRef(0)
   /** Quando a resposta em curso começou (a linha de trabalho conta a partir daqui). */
@@ -819,13 +846,6 @@ function App() {
    * mesma linha de trabalho aparece solta na conversa.
    */
   const waiting = busy && viva === null
-  /**
-   * Faz mais de 800 ms que nenhum sinal chega do backend. Pensar, falar e rodar ferramenta
-   * deixam rastro; o silêncio é justamente o buraco em que a tela parecia parada — o modelo
-   * lendo o resultado da ferramenta, montando o próximo passo, ou pensando antes da
-   * primeira palavra.
-   */
-  const quieto = busy && agora - ultimoSinalRef.current > 800
   /** Ferramenta anunciada e ainda sem resultado: a coisa mais concreta a dizer na linha. */
   const passoEmCurso =
     viva === null
@@ -875,7 +895,11 @@ function App() {
 
   const lastText = messages.at(-1)?.text
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (!seguirOFimRef.current) return
+    // Sem `behavior: 'smooth'` de propósito: a rolagem suave fica **atrás** do texto que
+    // chega, e a distância medida durante a animação parecia "saiu do fim" — o
+    // acompanhamento se desligava sozinho no meio da resposta.
+    bottomRef.current?.scrollIntoView({ block: 'end' })
   }, [messages.length, busy, lastText])
 
   // Enquanto a resposta está em curso, um relógio de 400 ms move a linha de trabalho: os
@@ -1503,6 +1527,21 @@ function App() {
   }
 
   /**
+   * Cadastra uma skill e a põe na lista na hora. Devolve a promessa para o formulário
+   * saber se deu certo (e mostrar o motivo quando não deu — nome repetido, backend fora).
+   */
+  const handleAddSkill = async (skill: NovoSkill) => {
+    const criada = await createSkill(skill)
+    setSkills((current) => [criada, ...current])
+  }
+
+  /** Mesma régua do cadastro de skill, para servidores MCP. */
+  const handleAddMcp = async (mcp: NovoMcp) => {
+    const criado = await createMcp(mcp)
+    setMcps((current) => [...current, criado])
+  }
+
+  /**
    * O que a interface precisa saber das pastas e da permissão, vindo sempre do backend.
    *
    * Nada de pasta inventada na tela: a lista e a pasta aberta são as que estão salvas no
@@ -1619,6 +1658,9 @@ function App() {
 
   const handleSend = async (payload: PayloadDeEnvio) => {
     setInterrupted(false)
+    // Mandar (ou retomar) é dizer "me mostre isto": o acompanhamento volta a valer mesmo
+    // que a pessoa estivesse lendo algo mais acima na conversa.
+    seguirOFimRef.current = true
     // Retomar **não** é uma mensagem da pessoa: o backend continua o histórico e não grava
     // turno de usuário, então desenhar uma bolha aqui criaria na tela uma fala que não
     // existe no banco. Era o defeito antigo: o botão virava uma bolha com "continue".
@@ -1819,11 +1861,22 @@ function App() {
             void refreshUsage()
             void refreshHistory()
           },
-          onError: (message) =>
+          onError: (message) => {
             patchAssistant((current) => ({
               ...current,
               text: current.text ? `${current.text}\n\n${message}` : message,
-            })),
+            }))
+            // Achado 9: o erro encerra a rodada, e a tela tem de sair de "Pensando" /
+            // "Trabalhando…". Antes só o `done` desbloqueava, e o `done` não sai quando o
+            // provedor falha — a interface ficava presa para sempre.
+            setBusy(false)
+            setPermissaoPendente(null)
+          },
+          // Contrato de vivacidade: fluxo fechado sem terminal é rodada encerrada.
+          onClosed: () => {
+            setBusy(false)
+            setPermissaoPendente(null)
+          },
         },
       )
     } catch (error) {
@@ -2028,6 +2081,8 @@ function App() {
           modelosBloqueados={modelosBloqueados}
           skills={skills}
           mcps={mcps}
+          onAddSkill={handleAddSkill}
+          onAddMcp={handleAddMcp}
           mostrarRodape={mostrarRodape}
           onToggleRodape={() => setMostrarRodape((value) => !value)}
           mostrarTraces={mostrarTraces}
@@ -2043,6 +2098,8 @@ function App() {
       ) : (
         <main className="flex min-h-0 flex-1 flex-col">
         <div
+          ref={listaRef}
+          onScroll={aoRolar}
           className={[
             'min-h-0 overflow-y-auto transition-all duration-500',
             EASE,
@@ -2055,12 +2112,6 @@ function App() {
               const blocos = message.blocos ?? []
               /** A resposta sendo escrita agora: é nela que a linha de trabalho aparece. */
               const ehViva = message.id === viva?.id
-              /**
-               * O raciocínio aberto no fim da resposta **é** o indicador: um card com arco
-               * girando e "pensando" ao lado. A linha de trabalho entra só quando ele não
-               * está ali — senão a tela teria dois sinais dizendo a mesma coisa.
-               */
-              const pensando = mostrarTraces && blocos.at(-1)?.tipo === 'raciocinio' && ehViva
               // O plano já não conta como conteúdo da bolha: ele mora no menu acima da
               // caixa agora. Mensagem que só tinha to-dos não vira bolha vazia na conversa.
               const semConteudo =
@@ -2095,7 +2146,7 @@ function App() {
                   ].join(' ')}
                 >
                   {message.steps && message.steps.length > 0 && blocos.length === 0 ? (
-                    <ToolSteps steps={message.steps} resumido={!mostrarTraces} />
+                    <ToolSteps steps={message.steps} resumido />
                   ) : null}
                   {mostrarTraces && message.reasoning && blocos.length === 0 ? (
                     // Caminho de exceção: pensamento sem nenhum bloco (mensagem antiga).
@@ -2107,16 +2158,10 @@ function App() {
                     blocos.map((bloco, indice) => {
                       const ultimo = indice === blocos.length - 1
                       if (bloco.tipo === 'passo') {
-                        if (mostrarTraces) {
-                          return (
-                            <ToolSteps
-                              key={`passo-${bloco.passo.call_id || indice}`}
-                              steps={[bloco.passo]}
-                            />
-                          )
-                        }
-                        // Modo resumido: os passos seguidos viram **uma** linha na posição do
-                        // primeiro deles. Os seguintes não desenham nada (o grupo já está lá).
+                        // Os passos seguidos viram **uma** linha na posição do primeiro deles
+                        // ("2 ferramentas", com a duração somada), e o detalhe de cada
+                        // chamada abre no clique. Mostrar o passo cru um embaixo do outro
+                        // empurrava a conversa para baixo e escondia a resposta.
                         if (blocos[indice - 1]?.tipo === 'passo') return null
                         let fim = indice
                         while (blocos[fim + 1]?.tipo === 'passo') fim += 1
@@ -2156,10 +2201,11 @@ function App() {
                   {/*
                    * O fim da resposta viva: enquanto o modelo trabalha, a última coisa
                    * depois do que já apareceu é o sinal de que ele continua ali — e do que
-                   * está fazendo. Sem conteúdo ainda ele aparece na hora; com conteúdo, só
-                   * depois do silêncio (enquanto as palavras chegam, elas são o sinal).
+                   * está fazendo. Aparece **sempre** enquanto a resposta está viva, e não só
+                   * quando a tela fica calada: com o passo da ferramenta logo acima, a
+                   * linha logo abaixo é o que mostra que a tarefa não parou ali.
                    */}
-                  {ehViva && !pensando && (semConteudo || quieto) ? (
+                  {ehViva ? (
                     <WorkingLine passo={passoEmCurso} segundos={segundosDaResposta} />
                   ) : null}
                   {/* A ficha fecha a resposta: só quando ela terminou de verdade. */}

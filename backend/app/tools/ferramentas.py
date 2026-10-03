@@ -34,6 +34,8 @@ from typing import Any
 
 import httpx
 
+from . import limites_de_saida
+
 _PRAZO_DA_FERRAMENTA: ContextVar[float | None] = ContextVar(
     "prazo_da_ferramenta", default=None
 )
@@ -710,8 +712,9 @@ DEFINICOES: list[dict[str, Any]] = [
         "Lê o conteúdo de um arquivo que o usuário **anexou nesta conversa**. O anexo NÃO "
         "está na pasta de trabalho: passe o `id` que vem no bloco «[anexos desta mensagem]». "
         "Não passe o nome nem um caminho — `read_file` não acha o anexo, e o nome não é "
-        "caminho. Devolve o texto para texto/código e para pdf; para imagem, devolve os "
-        "metadados (não há texto a ler).",
+        "caminho. Devolve o texto para texto/código e para pdf. Para imagem, devolve os "
+        "metadados: a imagem já vai anexada ao seu contexto quando o modelo enxerga "
+        "imagens — não precisa desta ferramenta para vê-la.",
         {
             "id": {
                 "type": "string",
@@ -973,6 +976,56 @@ FERRAMENTAS_DE_ARQUIVO = {
     "upload_file",
 }
 
+#: Tudo o que **alcança a máquina da pessoa**: os arquivos, o shell, o interpretador de
+#: código, o ambiente e o git.
+#:
+#: "Não leia meus arquivos" tem de tirar o grupo inteiro, não só `read_file`: o mesmo
+#: conteúdo fica a um `shell` (`cat`, `dir`) ou a um `code_interpreter` (`os.environ`,
+#: `pathlib`) de distância. Antes, `SEM_ARQUIVOS` tirava só `FERRAMENTAS_DE_ARQUIVO` e o
+#: agente ainda respondia "que informações internas eu consigo saber" com o ambiente da
+#: máquina lido por outra porta — foi assim que uma proibição explícita de acesso local
+#: terminou em acesso local (achado do dono, 02/10/2026).
+FERRAMENTAS_LOCAIS = frozenset(
+    set(FERRAMENTAS_DE_ARQUIVO)
+    | {
+        "apply_patch",
+        "shell",
+        "terminal",
+        "code_interpreter",
+        "get_environment",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
+        "git_push",
+        "git_pull",
+        "install_package",
+        "uninstall_package",
+        "grep",
+        "search_codebase",
+        "regex_search",
+        "vector_search",
+    }
+)
+
+#: O que executa **comando** na máquina. "Não use o shell" tira este grupo — e não os 33,
+#: porque quem proíbe o shell continua podendo pedir a leitura de um arquivo pelo caminho
+#: próprio. `code_interpreter` e os gerenciadores de pacote entram junto: os três rodam
+#: código na máquina, e deixar qualquer um deles de fora transforma a proibição em enfeite
+#: (um `os.environ` no interpretador lê o mesmo que o shell leria).
+FERRAMENTAS_DE_SHELL = frozenset(
+    {"shell", "terminal", "code_interpreter", "install_package", "uninstall_package"}
+)
+
+#: O que lê o **estado da máquina**: ambiente, versões, caminhos e o que está rodando.
+#: É o grupo do `get_environment` — o que responde "qual o SO", "quais as variáveis de
+#: ambiente", "quais processos". `shell` e `code_interpreter` entram porque respondem a
+#: mesma pergunta por outra porta (o QA viu exatamente isso: o Koda devolveu SO, caminhos,
+#: shell e Python depois de o usuário proibir o acesso local).
+FERRAMENTAS_DO_AMBIENTE = frozenset(
+    {"get_environment", "shell", "terminal", "code_interpreter"}
+)
+
 #: Ferramentas de arquivo com **dois** caminhos na chamada: os dois passam pela checagem
 #: de pasta, senão mover para fora do projeto passaria batido.
 CAMINHOS_EXTRA: dict[str, tuple[str, ...]] = {
@@ -1142,10 +1195,15 @@ def _inteiro(valor: Any, padrao: int) -> int:
 
 
 def _limitar(texto: str) -> str:
-    """Corta o texto no teto de saída."""
-    if len(texto) > LIMITE_SAIDA:
-        return texto[:LIMITE_SAIDA] + f"\n...[saída truncada, {len(texto) - LIMITE_SAIDA} caracteres restantes]"
-    return texto
+    """Corta o texto no teto de saída, mantendo cabeça **e cauda**.
+
+    Antes era `texto[:LIMITE_SAIDA]`: a cauda sumia, e num comando longo é nela que está o
+    que interessa (resultado do build, erro do teste, último log). Sem o fim, o modelo
+    repetia o comando para ver o que faltou — o mesmo custo em tokens, duas vezes (achado 11
+    do QA). O corte com cabeça e cauda vem do material de referência, em
+    `limites_de_saida.py`.
+    """
+    return limites_de_saida.cortar_cabeca_e_cauda(texto, LIMITE_SAIDA)
 
 
 def _percorrer_pasta(base: Path, visitar: Any) -> tuple[int, str | None]:
@@ -1272,7 +1330,9 @@ def _ler_anexo(anexo: Any, inicio: int, limite: int) -> str:
         return (
             f"[anexo de imagem] {anexo.nome} · {anexo.mime} · {anexo.tamanho} bytes · "
             f"id {anexo.id}\n"
-            "O conteúdo é uma imagem — não há texto para ler aqui."
+            "O conteúdo é uma imagem. Se o seu modelo enxerga imagens, ela já está anexada "
+            "à mensagem em que foi enviada — olhe a imagem e responda, sem depender desta "
+            "ferramenta. Se não enxerga, não há texto para ler aqui."
         )
     if not anexo.caminho.exists():
         return f"ERRO: o conteúdo do anexo {anexo.nome} não está mais no store"

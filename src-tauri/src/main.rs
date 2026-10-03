@@ -5,31 +5,34 @@
 //! A interface é a mesma do navegador (Vite → `dist`). Ao abrir, o app sobe as duas
 //! peças que a conversa precisa, nesta ordem:
 //!
-//! 1. **host** (`host/c-host.exe`, porta 21128) — o serviço de modelos oficial (Liz);
-//! 2. **backend** (`backend/python/python.exe`) — a API FastAPI que a interface fala. A
-//!    porta é escolhida na abertura (efêmera no app instalado, 8787 em dev) e o **token**
-//!    da execução vai junto: os dois são entregues à interface por `invoke` (ver `acesso`).
+//! 1. **host** (`host/c-host.exe`) — o serviço de modelos oficial (Liz);
+//! 2. **backend** (`backend/python/python.exe`) — a API FastAPI que a interface fala.
 //!
-//! Os dois vão **dentro do instalador** e o app os encontra ao lado do exe; no dev são os
-//! do projeto (`host/c-host.exe` e `backend/.venv`). O backend empacotado leva o próprio
-//! interpretador Python, porque na máquina do cliente não existe projeto nem `uv` — e o
-//! banco vai para a pasta de dados do app, que é gravável mesmo com o programa instalado.
+//! As **duas** portas são escolhidas na abertura e vivem em `acesso`: efêmeras no app
+//! instalado, as fixas de sempre (21128 e 8787) em dev. O **token** da execução vai junto
+//! e os três são entregues à interface por `invoke`.
 //!
 //! Nada é reutilizado às cegas: se a porta estiver ocupada, o dono dela é identificado
-//! (ver `portas`) e, sendo sobra de uma execução que morreu — um host antigo, por exemplo,
-//! que não conhece a autorização remota —, ele sai da frente para o nosso subir. Só fica
-//! no ar o que pertence a **outra janela do Koda**, que aí é ela quem manda. Sem host ou
-//! sem backend, a interface cai no modo offline dela — nada quebra, só responde menos.
+//! (ver `portas`) e só **outra janela do Koda** é reutilizada — sobra de execução morta sai
+//! da frente, e um programa estranho não é tocado nem consultado. O host é a razão de isso
+//! estar escrito: com a 21128 fixa, um estranho ouvindo lá era tratado como "host já no ar"
+//! e o backend mandava a sessão da conta para ele. Sem host ou sem backend, a interface cai
+//! no modo offline dela — nada quebra, só responde menos.
 //!
 //! E os dois **nascem e morrem com o app** (ver `servicos`): o encerramento explícito na
 //! saída, mais a job object do Windows, que derruba os serviços até quando o Koda morre sem
 //! passar por aqui. Enquanto a janela estiver aberta, um vigia confere as portas e reergue
 //! o que o próprio app subiu — a conversa não pode ficar sem serviço no meio do uso.
 //!
-//! As portas podem ser trocadas por `KODA_HOST_PORT`/`KODA_API_PORT` — o app instalado nunca
-//! define essas variáveis, elas existem para exercitar este ciclo de vida em teste sem
-//! encostar no Koda que o desenvolvedor está usando (a interface continua falando com a
-//! 8787, então com a variável ligada é só o ciclo de vida que faz sentido).
+//! As portas podem ser fixadas por `KODA_HOST_PORT`/`KODA_API_PORT`, e o endereço do host
+//! por `KODA_HOST_URL` — os ganchos de teste e de quem sobe um serviço à mão. O app
+//! instalado não define nenhum deles.
+//!
+//! Os dois serviços vão **dentro do instalador** e o app os encontra ao lado do exe; no dev
+//! são os do projeto (`host/c-host.exe` e `backend/.venv`). O backend empacotado leva o
+//! próprio interpretador Python, porque na máquina do cliente não existe projeto nem `uv` —
+//! e o banco vai para a pasta de dados do app, que é gravável mesmo com o programa
+//! instalado.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -46,7 +49,7 @@ mod servicos;
 
 use acesso::Acesso;
 use portas::Ocupante;
-use servicos::{Papel, Servicos, PORTA_HOST};
+use servicos::{Papel, Servicos};
 
 /// Endereço do painel (Koda Cloud) que o host consulta para saber se quem está falando
 /// pode — e com qual conta.
@@ -86,12 +89,12 @@ pub(crate) fn porta_no_ar(porta: u16) -> bool {
 
 /// A porta em que um serviço está atendendo **nesta execução**.
 ///
-/// O host tem porta fixa (21128) e é isso mesmo: ele é um serviço à parte, com endereço
-/// conhecido. A do backend é escolhida na abertura — efêmera no app instalado — e vive no
-/// estado `Acesso`, porque não dá para deduzi-la de `Papel`.
+/// As duas vêm do estado `Acesso`, e não de uma constante: no app instalado elas são
+/// sorteadas na abertura (efêmeras), porque uma porta fixa na máquina de outra pessoa é uma
+/// aposta — e a 21128 em particular já perdeu essa aposta em campo mais de uma vez.
 fn porta_de(papel: Papel, acesso: &Acesso) -> u16 {
     match papel {
-        Papel::Host => Papel::Host.porta(),
+        Papel::Host => acesso.porta_host(),
         Papel::Backend => acesso.porta(),
     }
 }
@@ -170,21 +173,34 @@ fn spawn_oculto(comando: &mut Command) -> std::io::Result<Child> {
 
 // ----------------------------------------------------------------- portas
 
-/// Deixa a porta livre para subirmos o nosso serviço.
+/// O estado de uma porta depois de tentarmos liberá-la.
 ///
-/// Devolve `false` quando quem está na porta **não** deve ser mexido — outra janela do
-/// Koda viva (os serviços são dela) ou um programa que não é nosso —, e nesse caso o
-/// chamador reutiliza o que está lá, como sempre fez.
-fn liberar_porta(porta: u16, imagem: &str, assinatura: Option<&str>) -> bool {
+/// Antes isto era um `bool` — "deu para subir?" — e o `false` misturava duas coisas muito
+/// diferentes: *outra janela do Koda está viva e os serviços são dela* (reutilizar é o
+/// certo) e *tem um programa estranho aqui* (reutilizar é o defeito). O host tratava as
+/// duas como reutilização, e era assim que a sessão da conta acabava enviada a quem
+/// estivesse ouvindo na 21128. Com o motivo separado, cada caso recebe a resposta certa.
+enum Porta {
+    /// Livre: pode subir o nosso serviço (já estava livre, ou a sobra saiu da frente).
+    Livre,
+    /// Outra janela do Koda está viva: os serviços são dela, e reutilizá-los é o certo.
+    OutraJanela,
+    /// Ocupada por quem **não** é nosso. Não se fala com ele e não se mata: o motivo vai
+    /// para o log e quem chamou decide (sortear outra porta, ou desistir).
+    Estranha(String),
+}
+
+/// Tenta deixar a porta livre para subirmos o nosso serviço.
+fn liberar_porta(porta: u16, imagem: &str, assinatura: Option<&str>) -> Porta {
     match portas::dono_da_sobra(porta, imagem, assinatura) {
-        Ocupante::Ninguem => true,
+        Ocupante::Ninguem => Porta::Livre,
         Ocupante::OutraJanela => {
             log(&format!("porta {porta} é de outra janela do Koda — reutilizando"));
-            false
+            Porta::OutraJanela
         }
         Ocupante::Alheio(motivo) => {
             log(&format!("porta {porta} ocupada por {motivo} — deixando quieto"));
-            false
+            Porta::Estranha(motivo)
         }
         Ocupante::Sobra(pid) => {
             log(&format!(
@@ -192,13 +208,13 @@ fn liberar_porta(porta: u16, imagem: &str, assinatura: Option<&str>) -> bool {
             ));
             if !portas::encerrar(pid) {
                 log(&format!("não consegui encerrar o pid {pid} — mantendo o que está no ar"));
-                return false;
+                return Porta::Estranha(format!("sobra nossa que não sai (pid {pid})"));
             }
             if portas::esperar_fechar(porta, 5) {
-                true
+                Porta::Livre
             } else {
                 log(&format!("a porta {porta} continuou ocupada depois de encerrar o pid {pid}"));
-                false
+                Porta::Estranha(format!("sobra nossa que não soltou a porta (pid {pid})"))
             }
         }
     }
@@ -250,35 +266,96 @@ fn achar_host(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// O erro de subida foi o **antivírus** bloqueando o arquivo?
+///
+/// `225` é `ERROR_VIRUS_INFECTED` e `1260` é "bloqueado por política": nos dois casos o
+/// Windows recusou executar o binário — e, no caso do 225, costuma removê-lo logo depois (o
+/// log seguinte passa a dizer "c-host.exe ausente", e aí não há o que reerguer).
+///
+/// Não é falha do app, da porta nem do backend: é o `c-host.exe` sendo tratado como ameaça.
+/// O caminho de saída é excluir a pasta de instalação da verificação em tempo real. Dito por
+/// extenso porque a mensagem crua do Windows ("Não foi possível concluir a operação com
+/// êxito…") não diz a ninguém o que fazer.
+fn antivirus_bloqueou(erro: &std::io::Error) -> bool {
+    matches!(erro.raw_os_error(), Some(225) | Some(1260))
+}
+
+/// A linha do log para quando o antivírus barra o host.
+fn aviso_de_antivirus(caminho: &Path) -> String {
+    format!(
+        "o ANTIVÍRUS bloqueou o host: o Windows recusou executar {} e costuma removê-lo em \
+         seguida (ERROR_VIRUS_INFECTED). Não é falha do Koda: exclua a pasta do Koda da \
+         verificação em tempo real (Segurança do Windows → Proteção contra vírus e ameaças \
+         → Exclusões → pasta) e reabra o app.",
+        caminho.display()
+    )
+}
+
 /// Sobe o host. `false` = a porta não respondeu (o vigia tenta de novo).
 fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
-    let porta = Papel::Host.porta();
-    // Qualquer `c-host.exe` nesta porta é nosso — inclusive o de uma versão anterior, que
-    // não conhece a autorização remota e recusaria a sessão da conta com 401.
-    if porta_no_ar(porta) && !liberar_porta(porta, "c-host.exe", None) {
-        log(&format!("host já está no ar em 127.0.0.1:{porta} — reutilizando"));
-        // Reutilizado ou não, o host é serviço do Koda: se ele cair, quem sobrou é que
-        // levanta — inclusive quando o que subiu foi outra janela do app.
-        servicos.cuidar_de(Papel::Host);
-        return true;
+    let acesso = app.state::<Acesso>();
+    let mut porta = acesso.porta_host();
+
+    // Quem está nesta porta?
+    //
+    // No dev é a 21128 de sempre: pode ser o host do desenvolvedor (aí reutilizamos), uma
+    // sobra de execução que morreu (sai da frente) ou um programa qualquer (não subimos).
+    // No instalado a porta acabou de ser sorteada, então não deveria ter ninguém: se tiver,
+    // é corrida — e o certo é sortear outra.
+    //
+    // O que **não** se faz, em nenhum dos casos, é conversar com quem não prova ser nosso
+    // host. Era exatamente isso que o ramo antigo fazia: um estranho na 21128 virava "host
+    // já está no ar — reutilizando", e o backend mandava o `Authorization: Bearer <sessão
+    // da conta>` para ele a cada conversa.
+    match liberar_porta(porta, "c-host.exe", None) {
+        Porta::Livre => {}
+        Porta::OutraJanela => {
+            log(&format!("host já está no ar em 127.0.0.1:{porta} — reutilizando"));
+            servicos.cuidar_de(Papel::Host);
+            return true;
+        }
+        Porta::Estranha(motivo) => {
+            if !acesso.empacotado() {
+                // No dev quem manda na 21128 é o desenvolvedor. Subir por cima do que está
+                // lá seria brigar pela porta de alguém; falhar e dizer é o honesto.
+                log(&format!(
+                    "a porta {porta} está ocupada por {motivo} — não vou subir o host por cima \
+                     dela (use KODA_HOST_PORT para escolher outra)"
+                ));
+                return false;
+            }
+            let Some(nova) = acesso::porta_livre(&[acesso.porta(), porta]) else {
+                log("não consegui sortear outra porta para o host — seguindo sem ele");
+                return false;
+            };
+            log(&format!(
+                "porta {porta} estava com {motivo} — subindo o host em 127.0.0.1:{nova}"
+            ));
+            acesso.fixar_porta_host(nova);
+            porta = nova;
+        }
     }
 
     // Daqui para baixo vamos subir o nosso: se ele morrer, o vigia sobe de novo.
     servicos.cuidar_de(Papel::Host);
 
     let Some(host) = achar_host(app) else {
-        log("host (c-host.exe) não encontrado — confira a quarentena do antivírus ou repare/reinstale o Koda");
+        // A ausência do arquivo é, quase sempre, o **depois** do bloqueio acima: o antivírus
+        // recusou a execução e removeu o binário. Sem dizer isso, "não encontrado" parece
+        // instalação quebrada — e a pessoa reinstala para o antivírus comer de novo.
+        log(
+            "host (c-host.exe) não encontrado no disco — na maioria das vezes é o antivírus \
+             que o removeu. Exclua a pasta do Koda da verificação em tempo real (Segurança do \
+             Windows → Proteção contra vírus e ameaças → Exclusões) e repare/reinstale o Koda.",
+        );
         return false;
     };
     log(&format!("iniciando host: {}", host.display()));
 
     let mut comando = Command::new(&host);
-    // A porta do host, explícita, só quando ela não é a padrão (o gancho de teste). O host
-    // aceita `-port`; o app instalado continua subindo sem argumento nenhum, exatamente
-    // como sempre subiu.
-    if porta != PORTA_HOST {
-        comando.args(["-port", &porta.to_string()]);
-    }
+    // A porta vai **sempre** explícita. O host aceita `-port` desde sempre (o default dele é
+    // que era o problema): no dev o valor é a 21128 de sempre, e no instalado é a sorteada.
+    comando.args(["-port", &porta.to_string()]);
     // Onde o host pergunta se a chave de quem está falando vale. `KODA_CLOUD_URL` permite
     // apontar para outro painel (útil em teste) sem recompilar.
     let painel = std::env::var("KODA_CLOUD_URL").unwrap_or_else(|_| URL_DO_PAINEL.to_string());
@@ -299,7 +376,11 @@ fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
             }
         }
         Err(erro) => {
-            log(&format!("falha ao iniciar o host: {erro}"));
+            if antivirus_bloqueou(&erro) {
+                log(&aviso_de_antivirus(&host));
+            } else {
+                log(&format!("falha ao iniciar o host: {erro}"));
+            }
             false
         }
     }
@@ -390,7 +471,14 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
         // os filhos vivos, com o token velho na memória —, ele sai da frente. Era o defeito
         // que o handshake fecha: antes, o app novo adotava esse resto e a tela abria com a
         // memória do app anterior (provedor escolhido, cache da nuvem) achando que estava tudo bem.
-        if !liberar_porta(porta, "python.exe", Some(ASSINATURA_DO_BACKEND)) {
+        //
+        // `Porta::Livre` é a única resposta que permite seguir: outra janela do Koda tem
+        // serviços com **outro** token (não são nossos), e um estranho não é nosso de jeito
+        // nenhum.
+        if !matches!(
+            liberar_porta(porta, "python.exe", Some(ASSINATURA_DO_BACKEND)),
+            Porta::Livre
+        ) {
             log(&format!(
                 "a porta {porta} está com quem não prova ser o backend desta execução — deixando quieto"
             ));
@@ -425,6 +513,21 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
         .stdin(Stdio::piped())
         // Define so o padrao: KODA_PROVIDER explicito no ambiente ou .env prevalece.
         .env("KODA_BACKEND_PACKAGED", if backend.empacotado { "1" } else { "0" });
+
+    // Onde o host está **nesta execução**. O backend tem um literal compilado
+    // (`127.0.0.1:21128/v1` em `config.py`) e, sem isto, falaria com a 21128 de sempre —
+    // que no instalado pode ser de outro programa, ou simplesmente não existir. Com o host
+    // numa porta sorteada, esta variável é o que amarra os dois lados: sem ela, o app
+    // subiria o host numa porta e conversaria com outra.
+    //
+    // Um `KODA_HOST_URL` já no ambiente manda: é assim que se aponta o backend para um host
+    // remoto (ou para a 21128 de um host que o desenvolvedor subiu à mão) sem recompilar.
+    if std::env::var("KODA_HOST_URL").is_err() {
+        comando.env(
+            "KODA_HOST_URL",
+            format!("http://127.0.0.1:{}/v1", acesso.porta_host()),
+        );
+    }
 
     // A saída do backend vai para o arquivo (ver `log_do_backend`): é por onde se descobre,
     // na máquina de quem instalou, por que ele não subiu.
@@ -678,13 +781,18 @@ fn main() {
         .manage(Acesso::novo())
         .invoke_handler(tauri::generate_handler![diagnostico::diagnostico, acesso::acesso])
         .setup(|app| {
-            // A porta é decidida antes de tudo: efêmera no instalado, a 8787 no dev. A
-            // partir daqui ela não muda — quem já pediu as credenciais continua certo.
+            // As duas portas são decididas antes de tudo: efêmeras no instalado, as fixas
+            // (8787 e 21128) no dev. A partir daqui não mudam — quem já pediu as credenciais
+            // continua certo, e o host já foi subido sabendo onde escutar.
             let empacotado = achar_backend(app.handle()).is_some_and(|backend| backend.empacotado);
-            let porta = acesso::escolher_porta(empacotado);
-            app.state::<Acesso>().fixar_porta(porta);
+            let (porta, porta_host) = acesso::escolher_portas(empacotado);
+            let estado = app.state::<Acesso>();
+            estado.fixar_empacotado(empacotado);
+            estado.fixar_porta(porta);
+            estado.fixar_porta_host(porta_host);
             log(&format!(
-                "backend desta execução vai atender em 127.0.0.1:{porta}{}",
+                "backend desta execução vai atender em 127.0.0.1:{porta} e o host em \
+                 127.0.0.1:{porta_host}{}",
                 if empacotado { " (instalado)" } else { " (dev)" }
             ));
 

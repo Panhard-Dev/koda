@@ -40,6 +40,12 @@ backend/testar_*.py
 backend/probe_*.py
 backend/diagnostico_anexos.py
 
+# Material de referência: o que foi lido para escrever os portes desta versão e **não** é
+# código do produto. Saiu de `backend/app/tools/` na 0.6.0 (o pacote levava 325 arquivos, e
+# 6 eram usados). Fica na máquina, fora do pacote e fora do repositório.
+backend/trabalho/
+backend/material-referencia/
+
 # Rascunho e bancada local: nota solta, medição de disco, sandbox do pytest, relatório de
 # diagnóstico. Nada disso é código do produto.
 .agents/
@@ -52,6 +58,8 @@ backend/pytest-of-*/
 # Sandbox do pytest (symlinks e projetos temporários) — não é código
 backend/.pytest-local/
 backend/.tmp-pytest-*/
+# Diretório temporário que a suíte cria no CWD quando o pytest roda de `backend/`.
+backend/tmp*/
 
 # Backups locais de binários (o host .exe é grande e não vai para o repositório)
 backups/

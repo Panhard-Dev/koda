@@ -13,11 +13,13 @@ import {
   Loader2,
   Moon,
   Palette,
+  Plus,
   Puzzle,
   RefreshCw,
   Sliders,
   Sun,
   SunMoon,
+  X,
 } from 'lucide-react'
 import AccountSection from './AccountSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
@@ -40,7 +42,7 @@ import {
 } from '../plan'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
-import { baixarAtualizacao, cloudChangelog, cloudUpdate, statusDoDownload } from '../api/client'
+import { baixarAtualizacao, cloudChangelog, cloudUpdate, fraseDeFalha, statusDoDownload } from '../api/client'
 import type {
   ApiCloud,
   ApiCloudRelease,
@@ -49,6 +51,8 @@ import type {
   ApiMcp,
   ApiSkill,
   CloudCanal,
+  NovoMcp,
+  NovoSkill,
 } from '../api/client'
 
 export type UsageSummary = {
@@ -159,22 +163,102 @@ const SECTIONS: {
 function Card({
   title,
   description,
+  action,
   children,
 }: {
   title: string
   description: string
+  /** Botão (ou o que for) alinhado à direita do título — o "Adicionar" das listas. */
+  action?: ReactNode
   children: ReactNode
 }) {
   return (
     // Sem `overflow-hidden`: ele recortava os menus que abrem dentro do card, e a
     // parte recortada deixa de receber clique — o menu fechava sozinho ao navegar.
     <section className="rounded-2xl bg-koda-panel ring-1 ring-koda-fg/8">
-      <header className="px-5 py-4">
-        <h2 className="text-[15px] font-semibold text-koda-fg">{title}</h2>
-        <p className="mt-1 text-[13px] leading-5 text-koda-fg/45">{description}</p>
+      <header className="flex items-start gap-4 px-5 py-4">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[15px] font-semibold text-koda-fg">{title}</h2>
+          <p className="mt-1 text-[13px] leading-5 text-koda-fg/45">{description}</p>
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
       </header>
       {children}
     </section>
+  )
+}
+
+/** Botão de cadastro que abre a listinha — mesmo desenho nas duas seções. */
+function BotaoAdicionar({
+  aberto,
+  rotulo,
+  onClick,
+}: {
+  aberto: boolean
+  rotulo: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={aberto}
+      className="flex items-center gap-1.5 rounded-xl bg-koda-accent/12 px-3 py-1.5 text-[12.5px] font-medium text-koda-accent transition-colors duration-150 hover:bg-koda-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
+    >
+      {aberto ? <X className="h-3.5 w-3.5" strokeWidth={2} /> : <Plus className="h-3.5 w-3.5" strokeWidth={2} />}
+      {aberto ? 'Cancelar' : rotulo}
+    </button>
+  )
+}
+
+/** Um campo do formulário de cadastro: rótulo em cima, entrada embaixo. */
+function Campo({
+  label,
+  valor,
+  onChange,
+  placeholder,
+  obrigatorio = false,
+  multiline = false,
+  invalido = false,
+}: {
+  label: string
+  valor: string
+  onChange: (valor: string) => void
+  placeholder: string
+  obrigatorio?: boolean
+  multiline?: boolean
+  invalido?: boolean
+}) {
+  const base = [
+    'min-w-0 rounded-xl bg-koda-input px-3 text-[13px] text-koda-fg ring-1 outline-none',
+    'placeholder:text-koda-fg/30 focus:ring-2',
+    invalido
+      ? 'ring-red-400/60 focus:ring-red-400'
+      : 'ring-koda-fg/10 focus:ring-koda-accent',
+  ].join(' ')
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[11px] font-semibold tracking-wider text-koda-fg/45 uppercase">
+        {label}
+        {obrigatorio ? <span className="text-koda-accent"> *</span> : null}
+      </span>
+      {multiline ? (
+        <textarea
+          value={valor}
+          onChange={(evento) => onChange(evento.target.value)}
+          placeholder={placeholder}
+          rows={3}
+          className={`${base} resize-y py-2 leading-5`}
+        />
+      ) : (
+        <input
+          value={valor}
+          onChange={(evento) => onChange(evento.target.value)}
+          placeholder={placeholder}
+          className={`${base} h-9`}
+        />
+      )}
+    </label>
   )
 }
 
@@ -1046,6 +1130,8 @@ export function SettingsScreen({
   modelosBloqueados = [],
   skills = [],
   mcps = [],
+  onAddSkill,
+  onAddMcp,
 }: {
   onClose: () => void
   usage: UsageSummary
@@ -1080,10 +1166,14 @@ export function SettingsScreen({
    * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
    */
   modelosBloqueados?: readonly string[]
-  /** Skills instaladas, lidas do backend (projeto + máquina). */
+  /** Skills instaladas, lidas do backend (projeto + máquina + cadastradas). */
   skills?: ApiSkill[]
   /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
   mcps?: ApiMcp[]
+  /** Cadastra uma skill nova no backend e devolve quando a lista já foi atualizada. */
+  onAddSkill?: (skill: NovoSkill) => Promise<void>
+  /** Cadastra um servidor MCP novo no backend e devolve quando a lista já foi atualizada. */
+  onAddMcp?: (mcp: NovoMcp) => Promise<void>
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? 'geral')
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]
@@ -1111,6 +1201,86 @@ export function SettingsScreen({
       return
     }
     onProjectChange?.(value === 'sem-projeto' ? null : value)
+  }
+
+  // ---- cadastro de skill ----
+  const [formSkill, setFormSkill] = useState(false)
+  const [skillNome, setSkillNome] = useState('')
+  const [skillDescricao, setSkillDescricao] = useState('')
+  const [skillAcao, setSkillAcao] = useState('')
+  const [erroSkill, setErroSkill] = useState<string | null>(null)
+  const [salvandoSkill, setSalvandoSkill] = useState(false)
+  /** Só marca os campos em vermelho depois da primeira tentativa de salvar. */
+  const [tentouSkill, setTentouSkill] = useState(false)
+
+  // ---- cadastro de servidor MCP ----
+  const [formMcp, setFormMcp] = useState(false)
+  const [mcpNome, setMcpNome] = useState('')
+  const [mcpComando, setMcpComando] = useState('')
+  const [mcpParams, setMcpParams] = useState('')
+  const [erroMcp, setErroMcp] = useState<string | null>(null)
+  const [salvandoMcp, setSalvandoMcp] = useState(false)
+  const [tentouMcp, setTentouMcp] = useState(false)
+
+  const fecharFormSkill = () => {
+    setFormSkill(false)
+    setSkillNome('')
+    setSkillDescricao('')
+    setSkillAcao('')
+    setErroSkill(null)
+    setTentouSkill(false)
+  }
+
+  const fecharFormMcp = () => {
+    setFormMcp(false)
+    setMcpNome('')
+    setMcpComando('')
+    setMcpParams('')
+    setErroMcp(null)
+    setTentouMcp(false)
+  }
+
+  /** Salva a skill: valida os três obrigatórios antes de chamar o backend. */
+  const handleSalvarSkill = async () => {
+    setTentouSkill(true)
+    const nome = skillNome.trim()
+    const descricao = skillDescricao.trim()
+    const acao = skillAcao.trim()
+    if (!nome || !descricao || !acao) {
+      setErroSkill('Preencha nome, descrição e ação — os três são obrigatórios.')
+      return
+    }
+    setSalvandoSkill(true)
+    setErroSkill(null)
+    try {
+      await onAddSkill?.({ name: nome, description: descricao, action: acao })
+      fecharFormSkill()
+    } catch (erro) {
+      setErroSkill(fraseDeFalha(erro))
+    } finally {
+      setSalvandoSkill(false)
+    }
+  }
+
+  /** Salva o servidor MCP: nome e comando são obrigatórios; parâmetros não. */
+  const handleSalvarMcp = async () => {
+    setTentouMcp(true)
+    const nome = mcpNome.trim()
+    const comando = mcpComando.trim()
+    if (!nome || !comando) {
+      setErroMcp('Preencha nome e comando/endpoint — os dois são obrigatórios.')
+      return
+    }
+    setSalvandoMcp(true)
+    setErroMcp(null)
+    try {
+      await onAddMcp?.({ name: nome, command: comando, params: mcpParams.trim() })
+      fecharFormMcp()
+    } catch (erro) {
+      setErroMcp(fraseDeFalha(erro))
+    } finally {
+      setSalvandoMcp(false)
+    }
   }
 
   return (
@@ -1224,8 +1394,8 @@ export function SettingsScreen({
                 />
 
                 <Switch
-                  label="Mostrar raciocínio e passos das ferramentas"
-                  description="Abre o rascunho do modelo e os detalhes de cada ferramenta (caminhos, tempo e saída). Desligado, as ferramentas aparecem só como uma linha resumida."
+                  label="Mostrar raciocínio do modelo"
+                  description="Abre o pensamento do modelo enquanto ele trabalha — é o que mostra que tem alguém ali dentro numa tarefa longa. Desligado, a resposta chega sem o rascunho; as ferramentas continuam aparecendo como uma linha resumida."
                   checked={mostrarTraces}
                   onChange={onToggleTraces}
                 />
@@ -1484,7 +1654,72 @@ export function SettingsScreen({
             <Card
               title="Skills instaladas"
               description="Pacotes de instruções e ferramentas que entram no chat sob demanda."
+              action={
+                <BotaoAdicionar
+                  aberto={formSkill}
+                  rotulo="Adicionar Skill"
+                  onClick={() => (formSkill ? fecharFormSkill() : setFormSkill(true))}
+                />
+              }
             >
+              {formSkill ? (
+                <div className="flex flex-col gap-3.5 border-t border-koda-fg/8 px-5 py-4">
+                  <Campo
+                    label="Nome"
+                    valor={skillNome}
+                    onChange={setSkillNome}
+                    placeholder="ex.: Revisor de commit"
+                    obrigatorio
+                    invalido={tentouSkill && !skillNome.trim()}
+                  />
+                  <Campo
+                    label="Descrição"
+                    valor={skillDescricao}
+                    onChange={setSkillDescricao}
+                    placeholder="Quando o agente deve usar esta skill"
+                    obrigatorio
+                    invalido={tentouSkill && !skillDescricao.trim()}
+                  />
+                  <Campo
+                    label="Comando / ação"
+                    valor={skillAcao}
+                    onChange={setSkillAcao}
+                    placeholder="O que a skill manda o agente fazer, passo a passo"
+                    obrigatorio
+                    multiline
+                    invalido={tentouSkill && !skillAcao.trim()}
+                  />
+                  {erroSkill ? (
+                    <p className="text-[12.5px] leading-5 text-red-400">{erroSkill}</p>
+                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSalvarSkill}
+                      disabled={salvandoSkill}
+                      className="flex items-center gap-1.5 rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90 disabled:opacity-50"
+                    >
+                      {salvandoSkill ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.2} />
+                      )}
+                      Salvar skill
+                    </button>
+                    <button
+                      type="button"
+                      onClick={fecharFormSkill}
+                      className="rounded-xl px-3 py-1.5 text-[12.5px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/6 hover:text-koda-fg"
+                    >
+                      Cancelar
+                    </button>
+                    <span className="ml-auto text-[11.5px] text-koda-fg/35">
+                      Os campos com <span className="text-koda-accent">*</span> são obrigatórios
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
               {skills.length > 0 ? (
                 <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
                   {skills.map((skill) => (
@@ -1502,7 +1737,11 @@ export function SettingsScreen({
                           />
                         </span>
                         <span className="shrink-0 rounded-full bg-koda-fg/6 px-2 py-0.5 text-[10.5px] font-semibold tracking-wider text-koda-fg/55 uppercase">
-                          {skill.scope === 'projeto' ? 'Projeto' : 'Global'}
+                          {skill.scope === 'projeto'
+                            ? 'Projeto'
+                            : skill.scope === 'global'
+                              ? 'Global'
+                              : 'Cadastrada'}
                         </span>
                       </div>
                       {skill.description ? (
@@ -1510,21 +1749,23 @@ export function SettingsScreen({
                           {skill.description}
                         </p>
                       ) : null}
-                      <p className="mt-1.5 truncate font-mono text-[11.5px] text-koda-fg/35">
-                        {skill.path}
-                      </p>
+                      {skill.path ? (
+                        <p className="mt-1.5 truncate font-mono text-[11.5px] text-koda-fg/35">
+                          {skill.path}
+                        </p>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
-              ) : (
+              ) : formSkill ? null : (
                 <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
                   <Puzzle className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
                   <p className="text-[13.5px] font-medium text-koda-fg/80">
                     Nenhuma skill instalada
                   </p>
                   <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
-                    Quando uma skill estiver disponível, ela aparece aqui e o agente usa
-                    automaticamente se a conversa pedir.
+                    Cadastre uma skill em “Adicionar Skill” — ela entra nesta lista e o
+                    agente passa a usá-la quando a conversa pedir.
                   </p>
                 </div>
               )}
@@ -1535,7 +1776,69 @@ export function SettingsScreen({
             <Card
               title="Servidores MCP"
               description="Ferramentas externas que o agente usa pelo Model Context Protocol."
+              action={
+                <BotaoAdicionar
+                  aberto={formMcp}
+                  rotulo="Adicionar MCP"
+                  onClick={() => (formMcp ? fecharFormMcp() : setFormMcp(true))}
+                />
+              }
             >
+              {formMcp ? (
+                <div className="flex flex-col gap-3.5 border-t border-koda-fg/8 px-5 py-4">
+                  <Campo
+                    label="Nome"
+                    valor={mcpNome}
+                    onChange={setMcpNome}
+                    placeholder="ex.: filesystem"
+                    obrigatorio
+                    invalido={tentouMcp && !mcpNome.trim()}
+                  />
+                  <Campo
+                    label="Comando / endpoint"
+                    valor={mcpComando}
+                    onChange={setMcpComando}
+                    placeholder="ex.: npx  ou  https://meu-servidor/mcp"
+                    obrigatorio
+                    invalido={tentouMcp && !mcpComando.trim()}
+                  />
+                  <Campo
+                    label="Parâmetros"
+                    valor={mcpParams}
+                    onChange={setMcpParams}
+                    placeholder="ex.: -y @modelcontextprotocol/server-filesystem C:/tmp (opcional)"
+                  />
+                  {erroMcp ? (
+                    <p className="text-[12.5px] leading-5 text-red-400">{erroMcp}</p>
+                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSalvarMcp}
+                      disabled={salvandoMcp}
+                      className="flex items-center gap-1.5 rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90 disabled:opacity-50"
+                    >
+                      {salvandoMcp ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.2} />
+                      )}
+                      Salvar servidor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={fecharFormMcp}
+                      className="rounded-xl px-3 py-1.5 text-[12.5px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/6 hover:text-koda-fg"
+                    >
+                      Cancelar
+                    </button>
+                    <span className="ml-auto text-[11.5px] text-koda-fg/35">
+                      Os campos com <span className="text-koda-accent">*</span> são obrigatórios
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
               {mcps.length > 0 ? (
                 <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
                   {mcps.map((mcp) => (
@@ -1558,18 +1861,24 @@ export function SettingsScreen({
                           {mcp.description}
                         </p>
                       ) : null}
+                      {mcp.command ? (
+                        <p className="mt-1.5 truncate font-mono text-[11.5px] text-koda-fg/35">
+                          {mcp.command}
+                          {mcp.params ? ` ${mcp.params}` : ''}
+                        </p>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
-              ) : (
+              ) : formMcp ? null : (
                 <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
                   <Cable className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
                   <p className="text-[13.5px] font-medium text-koda-fg/80">
                     Nenhum servidor conectado
                   </p>
                   <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
-                    Conecte um servidor MCP para o agente ganhar novas ferramentas sem sair
-                    do chat.
+                    Cadastre um servidor em “Adicionar MCP” — ele entra nesta lista para o
+                    agente ganhar novas ferramentas.
                   </p>
                 </div>
               )}

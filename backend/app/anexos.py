@@ -12,6 +12,7 @@ para os binários (pdf/imagem), sem confiar no tipo declarado pelo navegador.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 import time
@@ -25,6 +26,14 @@ from .db import Database
 #: Teto de tamanho de um anexo. Maior que isto não é anexo de conversa — é arquivo que
 #: deveria estar no projeto. O erro é dito na cara, não truncado em silêncio.
 MAX_BYTES = 32 * 1024 * 1024
+
+#: Teto para mandar uma imagem **dentro** do pedido do modelo, em bytes do arquivo.
+#:
+#: O teto do store (32 MB) é para guardar; inline, o base64 infla ~33% e o provedor recusa
+#: pedido gigante — além de cada passo do agente reenviar o histórico inteiro. Acima disto a
+#: imagem continua guardada e visível na conversa, mas o turno diz que ela não foi enviada,
+#: em vez de o pedido inteiro falhar.
+MAX_IMAGEM_INLINE = 5 * 1024 * 1024
 
 #: Lista branca: extensão → mime. O que não está aqui é recusado com o motivo. Código e
 #: texto entram como texto; pdf e imagem entram com o seu mime.
@@ -172,6 +181,36 @@ class Anexo:
     @property
     def imagem(self) -> bool:
         return self.mime.startswith("image/")
+
+    @property
+    def enviar_inline(self) -> bool:
+        """Cabe no pedido do modelo? (`image_url` com data URL, base64)"""
+        return cabe_inline(self.mime, self.tamanho)
+
+
+def cabe_inline(mime: str, tamanho: int) -> bool:
+    """Uma imagem com este mime/tamanho cabe no corpo do pedido do modelo?
+
+    Vale para o `Anexo` já gravado e para os metadados que o histórico carrega (que só têm
+    mime e tamanho): a régua é uma só, senão o bloco de anexos diria "você enxerga" para
+    uma imagem que o turno não mandou.
+    """
+    return mime.startswith("image/") and tamanho <= MAX_IMAGEM_INLINE
+
+
+def data_url(anexo: Anexo) -> str | None:
+    """A imagem como `data:` URL, pronta para o campo `image_url` do pedido.
+
+    Devolve `None` quando não é imagem, passa do teto inline, ou o conteúdo sumiu do store.
+    `None` nunca é erro fatal: quem chama cai no bloco de metadados, que é o que já existia.
+    """
+    if not anexo.enviar_inline:
+        return None
+    try:
+        dados = anexo.caminho.read_bytes()
+    except OSError:
+        return None
+    return f"data:{anexo.mime};base64,{base64.b64encode(dados).decode('ascii')}"
 
 
 def _linha(registro: object) -> Anexo:

@@ -247,12 +247,36 @@ class SkillInfo(BaseModel):
 
     name: str
     description: str
-    """`projeto` = dentro do workspace (o agente consegue ler); `global` = da máquina."""
-    scope: Literal["projeto", "global"]
-    """Caminho do SKILL.md — relativo ao workspace quando for do projeto."""
+    """`projeto` = no workspace (o agente lê o arquivo); `global` = da máquina;
+    `cadastrada` = criada na própria tela e guardada pelo Koda (entra no prompt inteira)."""
+    scope: Literal["projeto", "global", "cadastrada"]
+    """Caminho do SKILL.md — relativo ao workspace quando for do projeto; vazio quando for
+    cadastrada (ela não é uma pasta em disco)."""
     path: str
     """Desligada, a skill sai do prompt do agente (o arquivo continua em disco)."""
     enabled: bool = True
+
+
+class SkillCreate(BaseModel):
+    """O que a tela manda ao cadastrar uma skill nova.
+
+    Os três campos são obrigatórios: sem nome não há como listar, sem descrição o agente
+    não sabe quando usar, e sem a ação a skill não faz nada. A validação de vazio é aqui
+    (e não só na tela) para que a rota recuse sozinha, sem depender do cliente.
+    """
+
+    name: str
+    description: str
+    """O que a skill manda o agente fazer — o miolo das instruções."""
+    action: str
+
+    @field_validator("name", "description", "action")
+    @classmethod
+    def _nao_vazio(cls, valor: str) -> str:
+        limpo = valor.strip()
+        if not limpo:
+            raise ValueError("campo obrigatório")
+        return limpo
 
 
 class McpInfo(BaseModel):
@@ -260,7 +284,32 @@ class McpInfo(BaseModel):
 
     name: str
     description: str = ""
+    """Comando (stdio) ou URL (endpoint) do servidor."""
+    command: str = ""
+    """Parâmetros extras do comando, como digitados."""
+    params: str = ""
     enabled: bool = True
+
+
+class McpCreate(BaseModel):
+    """O que a tela manda ao cadastrar um servidor MCP.
+
+    Nome e comando são obrigatórios — sem os dois não há o que conectar. Os parâmetros são
+    opcionais, porque muito servidor sobe sem nenhum.
+    """
+
+    name: str
+    command: str
+    params: str = ""
+    description: str = ""
+
+    @field_validator("name", "command")
+    @classmethod
+    def _nao_vazio(cls, valor: str) -> str:
+        limpo = valor.strip()
+        if not limpo:
+            raise ValueError("campo obrigatório")
+        return limpo
 
 
 class CloudEstado(BaseModel):

@@ -27,7 +27,12 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 
-/// Porta do host (`c-host.exe`) — a mesma que o backend usa em `KODA_HOST_URL`.
+/// Porta do host (`c-host.exe`) **em dev**. O app instalado não usa esta: ele sorteia uma
+/// porta livre a cada execução e a repassa ao backend por `KODA_HOST_URL` (ver `acesso`).
+///
+/// A 21128 fixa era uma aposta de que ninguém mais na máquina do cliente estaria usando
+/// aquela porta. Perdida a aposta, o app antigo ou não subia o host, ou conversava com o
+/// estranho que estava lá — inclusive mandando a sessão da conta no `Authorization`.
 pub const PORTA_HOST: u16 = 21128;
 /// Porta da API FastAPI **em dev**. O app instalado não usa esta: ele sorteia uma porta
 /// efêmera a cada execução e a repassa à interface (ver `src/acesso.rs`). O dev fica nela
@@ -58,21 +63,6 @@ impl Papel {
             Papel::Host => "host",
             Papel::Backend => "backend",
         }
-    }
-
-    /// A porta em que ela escuta.
-    ///
-    /// `KODA_HOST_PORT`/`KODA_API_PORT` trocam a porta padrão: é o gancho que permite
-    /// exercitar este ciclo de vida (nasce, morre, ressuscita) em teste, sem encostar nos
-    /// serviços do Koda que o desenvolvedor já está usando. O app instalado nunca define
-    /// essas variáveis — e com elas ligadas é só o ciclo de vida que faz sentido, porque a
-    /// interface continua falando com a 8787.
-    pub fn porta(self) -> u16 {
-        let (variavel, padrao) = match self {
-            Papel::Host => ("KODA_HOST_PORT", PORTA_HOST),
-            Papel::Backend => ("KODA_API_PORT", PORTA_API),
-        };
-        std::env::var(variavel).ok().and_then(|valor| valor.parse().ok()).unwrap_or(padrao)
     }
 
     /// As duas, na ordem em que o app sobe (o host primeiro).

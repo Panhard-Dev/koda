@@ -1,23 +1,24 @@
-# Código de terceiros (vendorizado)
+# Código de terceiros (atribuição)
 
-Esta pasta é uma **cópia de código de terceiros**, redistribuída sob a licença **MIT** — o
-texto completo e o titular do copyright estão em `LICENSE.koda` (o nome do arquivo segue o
-padrão do projeto; o **texto é o original, sem uma vírgula de diferença**).
+Os módulos deste pacote foram escritos a partir de **código de terceiros sob licença MIT** —
+o texto da licença e o titular do copyright estão em `LICENSE.koda` (o nome do arquivo segue
+o padrão do projeto; o **texto é o original, sem uma vírgula de diferença**).
 
-Ela existe como **referência de implementação** e **não é importada pelo Koda**. Os arquivos
-daqui dependem de um runtime que não existe neste projeto (`agent.*`, `plugins.*`,
-`model_config`, `tools.registry`), então rodá-los direto não funciona.
+A atribuição fica porque a licença exige preservar o aviso de copyright. Ela **não** aparece
+no produto: os módulos daqui são reescritos no contrato do Koda — nomes, mensagens e
+comentários em português — e nenhum deles importa código de fora do projeto.
 
-Nomes de arquivo, de módulo e de variável foram renomeados para manter a consistência do
-projeto. A **atribuição da licença não foi alterada**: o aviso de copyright e o texto da
-permissão seguem intactos em `LICENSE.koda`, como a MIT exige.
+## O que existe aqui
 
-O que o Koda realmente usa, já adaptado:
+| Arquivo | O que é |
+| --- | --- |
+| `ferramentas.py` | catálogo e handlers das ferramentas locais |
+| `loop.py` | o laço do agente: prompt, portões de parada e despacho de ferramenta |
+| `guardas.py` | a porteira do despacho — só o que a rodada ofereceu pode ser chamado |
+| `pensamento.py` | limpeza de blocos de raciocínio no texto que vai à tela |
+| `repeticao.py` | detecção de eco/degeneração da resposta |
+| `limites_de_saida.py` | corte de saída longa com cabeça e cauda |
 
-- `backend/app/tools/ferramentas.py` — catálogo e handlers (nomes, descrições "use isto em
-  vez de X no shell" e apelidos portados da referência);
-- `backend/app/tools/loop.py` — prompt do agente com o enforcement e o roteamento
-  obrigatório de ferramenta portados da referência.
-
-Ao portar qualquer coisa daqui, traga a ideia e reescreva no contrato do Koda
-(`_def`/handlers de `ferramentas.py`) — não importe os módulos desta pasta.
+Até a 0.5.2 esta pasta carregava **325 arquivos**: a cópia de referência inteira, quase toda
+sem uso e sem carregar. Na 0.6.0 o que não é usado saiu do pacote — foi para
+`backend/material-referencia/`, que fica fora do repositório e fora do instalador.

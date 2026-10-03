@@ -228,18 +228,40 @@ export type ApiModel = {
 export type ApiSkill = {
   name: string
   description: string
-  /** `projeto` = dentro do workspace (o agente consegue ler); `global` = da máquina. */
-  scope: 'projeto' | 'global'
-  /** Caminho do SKILL.md — relativo ao workspace quando for do projeto. */
+  /** `projeto` = no workspace (o agente lê o arquivo); `global` = da máquina;
+   *  `cadastrada` = criada na própria tela e guardada pelo Koda (entra no prompt inteira). */
+  scope: 'projeto' | 'global' | 'cadastrada'
+  /** Caminho do SKILL.md — relativo ao workspace quando for do projeto; vazio quando for
+   *  cadastrada (ela não é uma pasta em disco). */
   path: string
   /** Desligada, a skill sai do prompt do agente (o arquivo continua em disco). */
   enabled: boolean
 }
 
+/** O que a tela manda ao cadastrar uma skill nova. Os três campos são obrigatórios. */
+export type NovoSkill = {
+  name: string
+  description: string
+  /** O que a skill manda o agente fazer — o miolo das instruções. */
+  action: string
+}
+
 export type ApiMcp = {
   name: string
   description: string
+  /** Comando (stdio) ou URL (endpoint) do servidor. */
+  command: string
+  /** Parâmetros extras do comando, como digitados. */
+  params: string
   enabled: boolean
+}
+
+/** O que a tela manda ao cadastrar um servidor MCP. Nome e comando são obrigatórios. */
+export type NovoMcp = {
+  name: string
+  command: string
+  params?: string
+  description?: string
 }
 
 export type ApiAccount = {
@@ -529,12 +551,20 @@ export const listSkills = () => request<ApiSkill[]>('/api/skills')
 export const toggleSkill = (name: string) =>
   request<ApiSkill>(`/api/skills/${encodeURIComponent(name)}/toggle`, { method: 'POST' })
 
+/** Cadastra uma skill nova; devolve a skill criada já no formato da lista. */
+export const createSkill = (skill: NovoSkill) =>
+  request<ApiSkill>('/api/skills', { method: 'POST', body: JSON.stringify(skill) })
+
 /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
 export const listMcps = () => request<ApiMcp[]>('/api/mcps')
 
 /** Liga/desliga um servidor MCP; devolve o servidor atualizado. */
 export const toggleMcp = (name: string) =>
   request<ApiMcp>(`/api/mcps/${encodeURIComponent(name)}/toggle`, { method: 'POST' })
+
+/** Cadastra um servidor MCP; devolve o servidor criado já no formato da lista. */
+export const createMcp = (mcp: NovoMcp) =>
+  request<ApiMcp>('/api/mcps', { method: 'POST', body: JSON.stringify(mcp) })
 
 export const patchAccount = (patch: { phone?: string | null; google?: boolean }) =>
   request<ApiAccount>('/api/account', { method: 'PATCH', body: JSON.stringify(patch) })
@@ -729,6 +759,15 @@ export type StreamHandlers = {
   /** O agente precisa de permissão — o stream fica parado até a resposta. */
   onApprovalRequest?: (data: StreamData['approval_request']) => void
   onDone?: (data: StreamData['done']) => void
+  /**
+   * O fluxo fechou sem evento terminal — o `done` nunca chegou.
+   *
+   * É o contrato de vivacidade do lado do cliente: **fluxo fechado é rodada encerrada**.
+   * Sem isto, o `done` só existia no caminho de sucesso (o backend não o emite quando o
+   * provedor falha), e a tela ficava presa em "Pensando"/"Trabalhando…" para sempre — o
+   * `setBusy(false)` morava dentro do `onDone`, que nunca era chamado. Achado 9 do QA.
+   */
+  onClosed?: () => void
   onError?: (message: string) => void
   signal?: AbortSignal
 }
@@ -781,12 +820,24 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
         handlers.onTodos?.(parsed as unknown as StreamData['todos'])
       else if (event === 'approval_request')
         handlers.onApprovalRequest?.(parsed as unknown as StreamData['approval_request'])
-      else if (event === 'done') handlers.onDone?.(parsed as unknown as StreamData['done'])
-      else if (event === 'error') handlers.onError?.(String(parsed.message ?? 'erro no backend'))
+      else if (event === 'done') {
+        viuTerminal = true
+        handlers.onDone?.(parsed as unknown as StreamData['done'])
+      }
+      else if (event === 'error') {
+        // Erro também é terminal: a rodada acabou, e a tela tem de voltar ao normal.
+        viuTerminal = true
+        handlers.onError?.(String(parsed.message ?? 'erro no backend'))
+      }
     } catch {
       // Bloco ilegível: segue lendo o stream em vez de derrubar a resposta.
     }
   }
+
+  // O terminal desta rodada. `done` e `error` encerram; qualquer outra saída do fluxo
+  // (queda de rede, backend que morreu, provedor que estourou) também encerra — e a tela
+  // precisa saber, senão fica presa no estado de "trabalhando".
+  let viuTerminal = false
 
   while (true) {
     const { value, done } = await reader.read()
@@ -797,6 +848,7 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
     blocks.forEach(dispatch)
   }
   if (buffer.trim()) dispatch(buffer)
+  if (!viuTerminal) handlers.onClosed?.()
 }
 
 /**

@@ -24,7 +24,7 @@ from ..db import Database
 from ..deps import call, database, provider
 from ..identidade import regras as regras_identidade
 from ..identidade import remover_intro
-from ..providers import ChatOptions, ChatTurn, ProviderError, system_prompt
+from ..providers import ChatOptions, ChatTurn, ProviderError, conteudo_do_turno, system_prompt
 from ..repository import append_message, ensure_conversation, get_conversation, new_id
 from ..repository import usage as usage_for
 from ..schemas import (
@@ -39,7 +39,13 @@ from ..schemas import (
 from .skills import indice_para_agente
 from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas
-from ..tools.loop import CONTINUAR_TRUNCADA, RETOMAR_TAREFA, Emit, Resultado
+from ..tools.loop import (
+    CONTINUAR_TRUNCADA,
+    PARADA_PROVEDOR,
+    RETOMAR_TAREFA,
+    Emit,
+    Resultado,
+)
 
 router = APIRouter(tags=["chat"])
 
@@ -132,7 +138,8 @@ async def _texto(
     started = time.perf_counter()
     store = _store_de_anexos(request)
     anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
-    conversation_id, turns = await call(_prepare, db, store, payload, now_ms())
+    visao = _visao_ativa(request.app.state.settings, payload.model, anexos_do_pedido)
+    conversation_id, turns = await call(_prepare, db, store, payload, now_ms(), visao)
     resumo, turns, compactados = contexto.compactar_turnos(
         turns, request.app.state.settings.contexto_tokens
     )
@@ -155,6 +162,7 @@ async def _texto(
         request.app.state.settings.assistente,
         resumo,
         [item.nome for item in anexos_do_pedido],
+        visao,
     )
     # Com qual modelo o provedor realmente responde (o seletor manda o nome da interface).
     modelo = engine.resolve_model(payload.model) if hasattr(engine, "resolve_model") else options.model
@@ -207,6 +215,26 @@ async def _texto(
         )
     except ProviderError as error:
         yield sse("error", {"message": str(error)})
+        # Contrato de vivacidade (achado 9 do QA): erro **encerra a rodada**, e o cliente
+        # precisa do evento terminal para sair de "Pensando"/"Trabalhando…". Antes, o `done`
+        # só existia no caminho de sucesso — com o provedor falhando, a interface ficava
+        # presa para sempre, porque o desbloqueio da tela morava dentro do `done`.
+        yield sse(
+            "done",
+            {
+                "conversation_id": conversation_id,
+                "message_id": "",
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "steps": 0,
+                "completed": False,
+                "reason": PARADA_PROVEDOR,
+                "pending_items": [],
+                "executed": 0,
+                "resumable": False,
+                "tokens": None,
+                "usage": await call(_usage, db, payload.tz_offset_minutes),
+            },
+        )
     finally:
         # Cliente fechou no meio (botão de parar): guarda o que já veio, para o
         # histórico do banco e o da tela ficarem iguais.
@@ -228,7 +256,8 @@ async def _agente(
     started = time.perf_counter()
     store = _store_de_anexos(request)
     anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
-    conversation_id, turns = await call(_prepare, db, store, payload, now_ms())
+    visao = _visao_ativa(settings, payload.model, anexos_do_pedido)
+    conversation_id, turns = await call(_prepare, db, store, payload, now_ms(), visao)
     # Conversa longa: o que é antigo vira resumo no prompt de sistema, em vez de sair do
     # pedido inteiro. Sem isso, uma conversa de projeto grande estoura o contexto e a
     # tarefa morre no meio, com erro do provedor que nem parece ter a ver com o trabalho.
@@ -244,16 +273,21 @@ async def _agente(
     if not payload.web:
         negadas.update(ferramentas.FERRAMENTAS_WEB)
     limite = settings.tool_output_limit
-    # Skills ligadas do projeto entram no prompt: o agente fica sabendo que elas
-    # existem e lê o SKILL.md com read_file quando a tarefa combina.
+    # Skills ligadas entram no prompt: as cadastradas com as instruções inteiras, as do
+    # projeto por nome e caminho (o agente lê o SKILL.md com read_file quando a tarefa
+    # combina) e as da máquina por nome, só para não negar que existem.
     #
     # Em thread: `indice_para_agente` varre `.agents/skills` do projeto e da máquina, e
     # lê o SKILL.md de cada uma — medido em ~34 ms aqui, dezenas a mais num projeto
     # grande. Chamada direta, ela segura o laço de eventos antes de o pedido ao modelo
     # sair, e o atraso aparece inteiro na espera do primeiro passo.
-    skills_prompt = await call(indice_para_agente, settings)
+    #
+    # Vai o `workspace` da conversa (o projeto escolhido no prompt box), e não o padrão do
+    # servidor: era essa troca que fazia a skill do projeto sumir do prompt quando a
+    # conversa abria em outra pasta.
+    skills_prompt = await call(indice_para_agente, settings, workspace)
     instrucoes_base = _options(
-        payload, settings.assistente, resumo, [item.nome for item in anexos_do_pedido]
+        payload, settings.assistente, resumo, [item.nome for item in anexos_do_pedido], visao
     )
     mensagens: list[dict[str, object]] = [
         {
@@ -266,7 +300,10 @@ async def _agente(
             ),
         }
     ]
-    mensagens += [{"role": turn.role, "content": turn.text} for turn in turns]
+    # `conteudo_do_turno` e não `turn.text`: é ele que transforma o turno com imagem no
+    # `content` em partes (`text` + `image_url`) que o provedor entende como visão. O loop
+    # do agente reenvia esta lista a cada passo sem tocar nela.
+    mensagens += [conteudo_do_turno(turn) for turn in turns]
 
     pedacos: list[str] = []
     #: Última lista de tarefas que o agente registrou — vai gravada na mensagem.
@@ -421,6 +458,26 @@ async def _agente(
         )
     except ProviderError as error:
         yield sse("error", {"message": str(error)})
+        # Contrato de vivacidade (achado 9 do QA): erro **encerra a rodada**, e o cliente
+        # precisa do evento terminal para sair de "Pensando"/"Trabalhando…". Antes, o `done`
+        # só existia no caminho de sucesso — com o provedor falhando, a interface ficava
+        # presa para sempre, porque o desbloqueio da tela morava dentro do `done`.
+        yield sse(
+            "done",
+            {
+                "conversation_id": conversation_id,
+                "message_id": "",
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "steps": 0,
+                "completed": False,
+                "reason": PARADA_PROVEDOR,
+                "pending_items": [],
+                "executed": 0,
+                "resumable": False,
+                "tokens": None,
+                "usage": await call(_usage, db, payload.tz_offset_minutes),
+            },
+        )
     finally:
         # O cliente abortou (botão parar, aba fechada): sinaliza o cancelamento cooperativo,
         # cancela o loop, derruba os processos desta tarefa e espera o loop com teto. O evento
@@ -532,11 +589,13 @@ def _options(
     assistente: str,
     resumo: str = "",
     anexos: list[str] | None = None,
+    visao: bool = False,
 ) -> ChatOptions:
     """As opções do provedor. `anexos` são os **nomes** dos anexos já resolvidos no store.
 
     O id do anexo não entra aqui: quem carrega o id (para o `read_attachment`) é o bloco de
-    anexos da mensagem do usuário. O prompt de sistema só precisa saber que há anexos.
+    anexos da mensagem do usuário. O prompt de sistema só precisa saber que há anexos — e,
+    quando `visao`, que as imagens já estão no contexto do modelo.
     """
     return ChatOptions(
         model=payload.model,
@@ -545,12 +604,23 @@ def _options(
         web=payload.web,
         project=payload.project or None,
         attachments=anexos if anexos is not None else [],
+        visao_ativa=visao,
         assistente=assistente,
         # Quem está logado, quando a tela já informou a sessão. Vem da memória do processo
         # (nenhuma conta é gravada), e some ao sair.
         conta=host_auth.rotulo_da_conta(),
         effort=_effort(payload),
     )
+
+
+def _visao_ativa(settings: Settings, model: str, do_pedido: list[anexos.Anexo]) -> bool:
+    """O modelo escolhido enxerga imagem — e esta mensagem trouxe alguma?
+
+    As duas condições juntas, de propósito: sem imagem anexada não há o que mandar, e num
+    modelo que não enxerga o pedido com `image_url` no corpo é recusado inteiro. Fora deste
+    caso, o anexo segue pelos metadados, como sempre foi.
+    """
+    return settings.aceita_imagem(model) and any(item.imagem for item in do_pedido)
 
 
 def _effort(payload: ChatRequest) -> str | None:
@@ -568,7 +638,11 @@ def _conversa_existe(db: Database, conversation_id: str | None) -> bool:
 
 
 def _prepare(
-    db: Database, store: anexos.AnexoStore, payload: ChatRequest, at_ms: int
+    db: Database,
+    store: anexos.AnexoStore,
+    payload: ChatRequest,
+    at_ms: int,
+    visao: bool = False,
 ) -> tuple[str, list[ChatTurn]]:
     """Grava a mensagem do usuário e monta o histórico que vai ao provedor.
 
@@ -576,6 +650,10 @@ def _prepare(
     mensagem são os metadados (nome, tipo, tamanho), para a bolha mostrar o nome ao reabrir
     a conversa. O `text` pode vir vazio quando a mensagem é só anexo — aí o título nasce do
     nome do primeiro anexo, para a lista não mostrar "Nova conversa" para sempre.
+
+    `visao` diz se as imagens do histórico devem ir **no corpo** do pedido (data URL). É
+    decisão do modelo escolhido, e vale para o histórico inteiro: uma imagem enviada três
+    turnos atrás continua à vista enquanto o modelo que a viu estiver respondendo.
     """
     # Retomar pelo **botão**: a rodada anterior não terminou e a pessoa quer que o agente
     # siga de onde parou. Não é uma mensagem dela — nada é gravado como turno de usuário.
@@ -590,7 +668,7 @@ def _prepare(
             # Inalcançável pela rota (a checagem é feita antes do stream): se acontecer, a
             # conversa sumiu entre a checagem e a montagem do histórico.
             raise LookupError("não há conversa para retomar")
-        turns = _turns(conversa.messages)
+        turns = _turns(conversa.messages, store, visao)
         turns.append(ChatTurn(role="user", text=RETOMAR_TAREFA))
         return payload.conversation_id, turns
 
@@ -617,33 +695,71 @@ def _prepare(
         )
         # Já com a mensagem recém-gravada, para o provider ter o contexto todo.
         conversation = get_conversation(conn, conversation_id)
-        turns = _turns(conversation.messages if conversation else [])
+        turns = _turns(conversation.messages if conversation else [], store, visao)
     return conversation_id, turns
 
 
-def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo]) -> str:
+def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo], visao: bool = False) -> str:
     """Os metadados dos anexos desta mensagem, como o modelo precisa vê-los.
 
     Vai junto do turno do usuário (e não no prompt de sistema) porque anexo é **desta
     mensagem** — e é aqui que o `id` aparece para a `read_attachment`. Anexo sem id (o
     formato antigo, gravado antes do store) só aparece pelo nome: não há o que ler.
+
+    Com `visao`, a imagem que **de fato** foi anexada ao pedido é marcada como visível: sem
+    essa marca o modelo lê "use read_attachment" e vai procurar por ferramenta uma imagem
+    que já está na frente dele.
     """
     if not anexos_da_mensagem:
         return ""
-    linhas = ["[anexos desta mensagem — o conteúdo NÃO está na pasta de trabalho]"]
+    linhas = [f"{contexto.MARCA_DE_ANEXOS} — o conteúdo NÃO está na pasta de trabalho]"]
     for item in anexos_da_mensagem:
-        if item.id:
-            linhas.append(f"- {item.nome} ({item.tipo}, {item.tamanho} bytes) · id: {item.id}")
-        else:
+        if not item.id:
             linhas.append(f"- {item.nome} (anexo antigo, sem conteúdo guardado)")
+            continue
+        marca = (
+            " · imagem anexada ao seu contexto: você a enxerga"
+            if visao and anexos.cabe_inline(item.tipo, item.tamanho)
+            else ""
+        )
+        linhas.append(
+            f"- {item.nome} ({item.tipo}, {item.tamanho} bytes) · id: {item.id}{marca}"
+        )
     linhas.append(
-        "Para ler o conteúdo, use `read_attachment` com o id acima. Não use `read_file` "
-        "com o nome do anexo: ele não está no workspace."
+        "Para ler o conteúdo de texto, código ou pdf, use `read_attachment` com o id acima. "
+        "Imagem marcada como anexada não precisa de ferramenta — descreva o que você vê. "
+        "Não use `read_file` com o nome do anexo: ele não está no workspace."
     )
     return "\n".join(linhas)
 
 
-def _turns(mensagens: list[Message]) -> list[ChatTurn]:
+def _imagens_do_turno(
+    anexos_da_mensagem: list[AttachmentInfo], store: anexos.AnexoStore
+) -> list[str]:
+    """As imagens desta mensagem como `data:` URLs, na ordem em que foram anexadas.
+
+    Lê do store pelo id — o mesmo caminho do `read_attachment`, e o único que alcança o
+    conteúdo. O que não é imagem, ou passa do teto inline, simplesmente não entra: o bloco
+    de metadados já diz o que é, e o pedido não engorda à toa.
+    """
+    urls: list[str] = []
+    for info in anexos_da_mensagem:
+        if not info.id:
+            continue
+        anexo = store.buscar(info.id)
+        if anexo is None:
+            continue
+        url = anexos.data_url(anexo)
+        if url:
+            urls.append(url)
+    return urls
+
+
+def _turns(
+    mensagens: list[Message],
+    store: anexos.AnexoStore | None = None,
+    visao: bool = False,
+) -> list[ChatTurn]:
     """Histórico para o provedor, sem as apresentações que ficaram gravadas.
 
     O modelo aprende pelo próprio histórico: uma resposta antiga começando com "oii, eu
@@ -653,18 +769,26 @@ def _turns(mensagens: list[Message]) -> list[ChatTurn]:
     Anexo da conversa entra no turno do usuário como um bloco de metadados (nome, tipo,
     tamanho e **id**) — é o que diz ao modelo que o arquivo existe e como lê-lo. Sem isso
     ele só teria o nome no prompt de sistema e tentaria `read_file`, que não acha o anexo.
+
+    Com `visao` e o store à mão, as imagens do turno vão **também** como `image_url` no
+    corpo do pedido: é o que faz o modelo ver a foto em vez de ler a descrição dela.
     """
     turns: list[ChatTurn] = []
     for item in mensagens:
         texto = remover_intro(item.text) if item.role == "assistant" else item.text
-        bloco = _bloco_de_anexos(item.attachments) if item.role == "user" else ""
+        bloco = _bloco_de_anexos(item.attachments, visao) if item.role == "user" else ""
         corpo = texto.strip()
         if bloco:
             corpo = f"{corpo}\n\n{bloco}" if corpo else bloco
         if not corpo:
             # Mensagem que era só apresentação: melhor sair do histórico do que ir vazia.
             continue
-        turns.append(ChatTurn(role=item.role, text=corpo))
+        imagens = (
+            _imagens_do_turno(item.attachments, store)
+            if visao and store is not None and item.role == "user"
+            else []
+        )
+        turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens))
     return turns
 
 
