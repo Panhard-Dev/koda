@@ -40,6 +40,16 @@ backend/testar_*.py
 backend/probe_*.py
 backend/diagnostico_anexos.py
 
+# Bancada e relatório de QA: saída de teste, não código do produto. Os HTML de relatório
+# não são frontend — o único HTML do produto é o do app (`index.html` e os harnesses).
+relatorio-*.html
+backend/e2e_*.py
+backend/gerar_*_qa.py
+backend/limpar_marca_antiga.py
+scripts/print-restricoes.mjs
+scripts/testar-comandos.mjs
+scripts/verificar-menu-comandos.mjs
+
 # Material de referência: o que foi lido para escrever os portes desta versão e **não** é
 # código do produto. Saiu de `backend/app/tools/` na 0.6.0 (o pacote levava 325 arquivos, e
 # 6 eram usados). Fica na máquina, fora do pacote e fora do repositório.
