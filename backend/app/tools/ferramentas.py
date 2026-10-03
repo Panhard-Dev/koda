@@ -1688,6 +1688,7 @@ def executar(
     acesso_livre: bool = False,
     dono: str = "",
     anexos: Any = None,
+    skills: Any = None,
     timeout_s: float | None = None,
     cancelamento: Event | None = None,
 ) -> str:
@@ -1707,6 +1708,7 @@ def executar(
             acesso_livre=acesso_livre,
             dono=dono,
             anexos=anexos,
+            skills=skills,
         )
     finally:
         _CANCELAMENTO_DA_FERRAMENTA.reset(token_cancelamento)
@@ -1721,6 +1723,7 @@ def _executar_impl(
     acesso_livre: bool = False,
     dono: str = "",
     anexos: Any = None,
+    skills: Any = None,
 ) -> str:
     """Roda uma ferramenta e devolve o texto que volta para o modelo.
 
@@ -1731,6 +1734,10 @@ def _executar_impl(
     `read_attachment` usa — é por ele que o conteúdo de um anexo chega ao modelo, sem
     passar pelo workspace. Sem store, a ferramenta responde que os anexos não estão
     disponíveis, em vez de fingir que leu.
+
+    `skills` é o `app.skills.SkillStore` da conversa. Só a `use_skill` usa, e pelo mesmo
+    motivo: as skills da máquina e as cadastradas não têm caminho no workspace, então o
+    `read_file` não as alcança.
     """
     _verificar_cancelamento()
     restante = _restante_da_ferramenta()
@@ -1839,6 +1846,37 @@ def _executar_impl(
         inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
         limite = _inteiro(argumentos.get("limite"), 0)
         return _ler_anexo(anexo, inicio, limite)
+
+    if nome == "use_skill":
+        # Uma skill é **instruções**, não execução: esta ferramenta devolve o texto dela
+        # para o modelo seguir. É o que separa skill de MCP — e é o único caminho para as
+        # skills da máquina e as cadastradas, que o `read_file` não alcança (não estão no
+        # workspace / não são arquivo).
+        if skills is None:
+            return (
+                "ERRO: o índice de skills não está disponível nesta execução — "
+                "não dá para carregar a skill agora."
+            )
+        pedido = str(argumentos.get("nome", "") or "").strip()
+        if not pedido:
+            return (
+                "ERRO: informe o `nome` da skill. As disponíveis nesta conversa aparecem no "
+                "prompt de sistema."
+            )
+        try:
+            instrucoes = skills.instrucoes(pedido)
+        except Exception as exc:  # noqa: BLE001 — o store levanta os dois erros de skill
+            disponiveis = ", ".join(skills.nomes()) or "nenhuma"
+            return (
+                f"ERRO: não deu para carregar a skill '{pedido}': {exc}. "
+                f"Skills disponíveis: {disponiveis}."
+            )
+        escopo = skills.escopo_de(pedido) or "desconhecida"
+        return (
+            f"[skill '{pedido}' · origem: {escopo}]\n"
+            "Siga estas instruções no que fizer a seguir:\n\n"
+            f"{instrucoes}"
+        )
 
     if nome == "read_file":
         rota = _resolver(workspace, str(argumentos.get("caminho", "")))

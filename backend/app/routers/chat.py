@@ -39,6 +39,7 @@ from ..schemas import (
     sse,
 )
 from .skills import indice_para_agente
+from ..skills import SkillStore
 from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas, registry
 from ..agent.loop import (
@@ -368,6 +369,10 @@ async def _agente(
                 tool_call_timeout_s=settings.tool_call_timeout_s or None,
                 cancelamento=cancelamento,
                 anexos=store,
+                # As skills da conversa: é por aqui que a `use_skill` carrega as instruções
+                # de uma skill — inclusive as da máquina e as cadastradas, que o `read_file`
+                # não alcança.
+                skills=SkillStore(settings, workspace),
             )
         finally:
             await fim.put(None)
