@@ -3,6 +3,67 @@
 Todas as mudanças relevantes do Koda. O formato segue o de *Keep a Changelog*, e a
 numeração é a do `package.json` (que também é a do instalador).
 
+## [0.6.3] — 2026-10-03
+
+### O modo da rodada não fica mais preso no primeiro turno da conversa
+
+**Correção de um defeito que travava o trabalho.** Começar a conversa conversando ou
+planejando e, ao mandar executar no mesmo chat — "pode", "beleza", "agora aplica" —, o
+modelo respondia que *"nesta sessão não posso usar ferramentas"*.
+
+A causa era medida, não suposta: a régua que decide o que vai no catálogo
+(`classificar_pedido`) olhava **só o texto do pedido**. Um pedido curto de continuação não
+tem marcador de projeto nem verbo de ação reconhecido, então a rodada era classificada como
+**conversa** e o catálogo ia sem ferramenta nenhuma. O modelo não estava inventando: ele
+realmente não tinha nenhuma, e o arquivo não mudava no disco.
+
+- A régua continua sendo por pedido. O que mudou é que a **dúvida** agora olha onde ela
+  aparece: numa conversa já em andamento, "pode" é ordem de seguir; na primeira mensagem, é
+  conversa — e é isso que impede um "oi" de virar uma varredura da pasta de trabalho.
+- Texto longo, pergunta e desvio ("ok, mas me explica…") não contam como continuação.
+- O aviso da rodada de resposta passou a dizer que o recorte é **desta rodada** e a proibir
+  o anúncio de limitação de sessão — era essa frase que o modelo repetia e que ficava no
+  histórico, envenenando as rodadas seguintes.
+
+### Skills: de anunciadas a aplicadas
+
+O agente já **via** as skills no prompt e não tinha como carregar as instruções: as do
+projeto entravam por nome e caminho, as da máquina só por nome, e o `read_file` não alcança
+nenhuma das duas fora da pasta de trabalho.
+
+- **`app/skills.py`** — a descoberta e a leitura saíram de dentro da rota; é uma fonte de
+  verdade só, que a rota e a ferramenta usam.
+- **Ferramenta `use_skill`** — carrega as instruções de qualquer origem (projeto, máquina ou
+  cadastrada) e devolve o texto para o modelo seguir.
+- Ela fica disponível também na rodada de resposta: aplicar instruções a uma pergunta é
+  responder melhor, não mexer na máquina.
+
+### MCP: o cadastro deixou de ser inerte
+
+O comentário da própria rota dizia que o Koda não conversava com servidores MCP de verdade.
+O `mcps.json` era cadastro morto: a tela listava servidores e o agente não sabia que
+existiam.
+
+- **`app/mcp/`** — sobe os servidores configurados por stdio e fala JSON-RPC 2.0
+  (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`), com prazo por
+  chamada, ciclo de vida do processo e diagnóstico pelo `stderr`.
+- As ferramentas entram no **mesmo** catálogo que vai ao modelo e à porteira, como
+  `mcp__<servidor>__<ferramenta>` — oferecido e permitido não divergem.
+- `/api/mcps` devolve **estado** (`conectado`, `erro`, `ferramentas`) e reconecta quando a
+  configuração muda.
+
+### Na conversa, os dois aparecem como ferramenta
+
+Glifo próprio (peça de quebra-cabeça para skill, conector para MCP), rótulo pelo nome real,
+o **recurso acionado** na linha (`MCP eco-server · a: 2 · b: 3`, `skill tom-cordial`),
+estado, resultado e erro. A tela de Ajustes mostra "conectado · N ferramentas" ou "fora do
+ar · motivo" por servidor.
+
+**Dois defeitos reais encontrados durante a prova, e corrigidos:** o nome externo da
+ferramenta MCP saía com hífen e maiúscula e a porteira normaliza para minúsculas — a
+ferramenta seria oferecida e negada; e um `isError` do servidor voltava sem a marca `ERRO:`,
+o que faria o laço ler como sucesso.
+
 ## [0.6.2] — 2026-10-03
 
 ### O backend ganhou camadas: o monolito virou arquitetura
