@@ -26,13 +26,17 @@ despacho acontece na mesma thread. No Koda o laço roda em asyncio e a ferrament
 thread (`asyncio.to_thread`), então a lista vai como **valor explícito da rodada** — ela é
 lida antes do despacho, que é onde a decisão acontece, então o efeito é o mesmo e não há
 estado ambiente para vazar de uma rodada para a outra.
+
+**Onde isto mora:** em `policy/`, desde a 0.6.3 — é **decisão**, não execução. A ponte
+A ponte `app/tools/guardas.py` morreu na 0.6.3, quando o laço virou `app/agent/loop.py`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import ferramentas
+from ..tools import ferramentas
+from ..tools import registry
 
 #: O que o modelo recebe quando chama uma ferramenta que a rodada não ofereceu.
 #:
@@ -69,7 +73,7 @@ class Guarda:
         if self.permitidas is None:
             return None
         try:
-            canonico = ferramentas.canonico(nome)
+            canonico = registry.canonico(nome)
             if not canonico or canonico not in self.permitidas:
                 return self.mensagem.format(tool_name=nome or "(sem nome)")
             return None

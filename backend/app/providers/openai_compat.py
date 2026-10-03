@@ -14,11 +14,11 @@ from typing import Any
 
 import httpx
 
-from .. import contexto, host_auth
+from .. import host_auth
 from ..config import Settings
 from ..identidade import FiltroIdentidade, limpar_identidade, pergunta_identidade
-from ..tools import pensamento
-from ..tools.loop import StepResult, ToolCall
+from . import pensamento
+from ..contracts.turn import StepResult, ToolCall, texto_do_conteudo
 from .base import (
     ChatOptions,
     ChatTurn,
@@ -82,12 +82,12 @@ def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
 def _texto_do_usuario(turno: Any) -> str:
     """O conteúdo do usuário, que chega ora como `ChatTurn`, ora como mensagem crua.
 
-    Usa `contexto.texto_do_conteudo`: com imagem, o `content` é uma lista de partes, e
+    Usa `texto_do_conteudo`: com imagem, o `content` é uma lista de partes, e
     `str()` traria o base64 dentro — a pergunta de identidade seria testada contra o data
     URL inteiro em vez da frase da pessoa.
     """
     if isinstance(turno, dict):
-        return contexto.texto_do_conteudo(turno.get("content"))
+        return texto_do_conteudo(turno.get("content"))
     return str(getattr(turno, "text", "") or "")
 
 

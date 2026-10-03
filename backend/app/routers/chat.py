@@ -18,7 +18,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pathlib import Path
 
-from .. import anexos, approvals, contexto, host_auth, projects
+from .. import anexos, host_auth, projects
+from ..agent import contexto
+from ..policy import approvals
 from ..config import Settings
 from ..db import Database
 from ..deps import call, database, provider
@@ -37,9 +39,9 @@ from ..schemas import (
     sse,
 )
 from .skills import indice_para_agente
-from ..tools import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
-from ..tools import ferramentas
-from ..tools.loop import (
+from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
+from ..tools import ferramentas, registry
+from ..agent.loop import (
     CONTINUAR_TRUNCADA,
     PARADA_PROVEDOR,
     RETOMAR_TAREFA,
@@ -271,7 +273,7 @@ async def _agente(
     workspace = await call(_workspace, db, payload.project_path, settings.workspace_path)
     negadas = set(settings.tools_negadas)
     if not payload.web:
-        negadas.update(ferramentas.FERRAMENTAS_WEB)
+        negadas.update(registry.FERRAMENTAS_WEB)
     limite = settings.tool_output_limit
     # Skills ligadas entram no prompt: as cadastradas com as instruções inteiras, as do
     # projeto por nome e caminho (o agente lê o SKILL.md com read_file quando a tarefa

@@ -35,6 +35,7 @@ from .routers import (
 )
 from .schemas import CloudEstado, Health, HealthMinimo
 from .tools import ferramentas
+from .tools import registry
 
 #: Hosts aceitos no cabeçalho `Host`. O app desktop (Tauri/WebView2) usa `tauri.localhost`;
 #: o dev usa `localhost`/`127.0.0.1`; o IPv6 de loopback entra pela forma `[::1]`; e o
@@ -212,7 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             version=__version__,
             workspace=str(config.workspace_path),
             tools_ready=hasattr(engine, "step"),
-            tools=[item["function"]["name"] for item in ferramentas.catalogo(config.tools_negadas)],
+            tools=[item["function"]["name"] for item in registry.catalogo(config.tools_negadas)],
             contexto_tokens=config.contexto_tokens,
             cloud=_cloud(app),
         )

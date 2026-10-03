@@ -1,25 +1,9 @@
-"""Ferramentas locais do Koda (catálogo + loop agentic).
+"""Ferramentas locais do Koda: o catálogo e os handlers.
 
-Portado do projeto TOOLS do usuário: mesma lista de ferramentas, mesmas mensagens de
-erro, agora rodando dentro do backend e narrando cada passo por SSE.
+O laço do agente **não** mora mais aqui — ele é `app/agent/loop.py`. Este pacote é o
+sistema de ferramentas: catálogo, schemas e despacho.
 """
 
 from . import ferramentas
-from .loop import (
-    PROMPT_FERRAMENTAS,
-    Resultado,
-    StepResult,
-    ToolCall,
-    ToolStep,
-    executar,
-)
 
-__all__ = [
-    "PROMPT_FERRAMENTAS",
-    "Resultado",
-    "StepResult",
-    "ToolCall",
-    "ToolStep",
-    "executar",
-    "ferramentas",
-]
+__all__ = ["ferramentas"]

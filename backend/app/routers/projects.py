@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from .. import approvals, projects
+from .. import projects
+from ..policy import approvals
 from ..config import Settings
 from ..db import Database
 from ..deps import call, database

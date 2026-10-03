@@ -27,6 +27,8 @@ import json
 import re
 from typing import Any
 
+from ..contracts.turn import texto_do_conteudo
+
 #: Orçamento padrão do contexto, em tokens, quando a configuração não diz nada.
 #: É a janela dos modelos do serviço (1 milhão): compactar antes disso descartaria
 #: contexto que ainda caberia.
@@ -95,21 +97,6 @@ def estimar_tokens(texto: str) -> int:
 TOKENS_POR_IMAGEM = 1_500
 
 
-def texto_do_conteudo(conteudo: Any) -> str:
-    """O texto de um `content` que pode ser string **ou** lista de partes (visão).
-
-    Com imagem, o `content` do turno é `[{type: text}, {type: image_url}, …]`. Passar essa
-    lista por `str()` (como se fazia antes) devolveria o `repr` com o base64 inteiro dentro
-    — a conta de tokens sairia errada e o corte de contexto escreveria lixo na conversa.
-    Aqui só o que é texto conta; a imagem é medida por `TOKENS_POR_IMAGEM`.
-    """
-    if isinstance(conteudo, list):
-        return " ".join(
-            str(parte.get("text") or "")
-            for parte in conteudo
-            if isinstance(parte, dict) and parte.get("type") == "text"
-        )
-    return str(conteudo or "")
 
 
 #: Como começa o bloco de anexos que o Koda acrescenta ao turno do usuário (ver

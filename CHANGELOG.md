@@ -3,6 +3,31 @@
 Todas as mudanças relevantes do Koda. O formato segue o de *Keep a Changelog*, e a
 numeração é a do `package.json` (que também é a do instalador).
 
+## [0.6.2] — 2026-10-03
+
+### O backend ganhou camadas: o monolito virou arquitetura
+
+Sem mudança de comportamento — mesma suíte, mesma porteira. O que mudou é **onde o código
+mora**, para que ele possa crescer sem virar um arquivo de 4 mil linhas.
+
+- **`app/limits.py`** — os tetos e o corte de saída viraram infraestrutura compartilhada, e
+  viraram objeto (`RuntimeLimits`). **Correção real:** antes, `definir_limites` escrevia em
+  global de módulo e quem tinha feito `from x import LIMITE_SAIDA` ficava com o valor antigo
+  — a configuração do app só valia em parte do código. Agora vale em todo lugar.
+- **`app/execution/`** — a máquina de processo saiu de `ferramentas.py`: `tempo.py` (prazos,
+  cancelamento) e `processo.py` (subprocess, `ComandoRodando`, acompanhamento, encerramento).
+- **`app/contracts/`** — `turn.py` com os tipos do turno e `tools.py` com o construtor de
+  schema. Contrato compartilhado: o provedor **produz** `StepResult` e o agente **consome**.
+- **`app/agent/`** — o laço, o contexto e a repetição saíram de `tools/`.
+- **`app/policy/`** — a porteira do despacho e a aprovação.
+- **`app/tools/registry.py`** — o catálogo (nomes, apelidos, grupos de restrição).
+- **`app/tools/domains/`** — cada domínio é dono do **próprio schema**: `files`, `shell`,
+  `git`, `web`, `plano`.
+- **Regra verificável de dependência** (`tests/test_arquitetura.py`): nenhuma camada importa
+  quem está acima dela. As duas pontes da migração morreram; a lista de exceções está vazia.
+
+`tools/ferramentas.py`: **3.934 → 2.382 linhas**.
+
 ## [0.6.0] — 2026-10-03
 
 ### A restrição passou a ser imposta, e o pacote deixou de carregar o que não usa
