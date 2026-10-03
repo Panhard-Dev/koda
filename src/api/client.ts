@@ -147,6 +147,14 @@ export type ToolStep = {
   duration_ms: number
   call_id: string
   ok: boolean
+  /**
+   * O **recurso acionado**, quando a ferramenta vem de um servidor MCP.
+   *
+   * O nome da ferramenta que o modelo vê é normalizado (`mcp__eco_server__somar`) e não
+   * existe em lugar nenhum: o servidor é `eco-server` no `mcps.json`. É por aqui que a
+   * conversa mostra o servidor e a ferramenta reais. `null`/ausente nas ferramentas do Koda.
+   */
+  mcp?: { servidor: string; ferramenta: string } | null
 }
 
 /**
@@ -254,6 +262,17 @@ export type ApiMcp = {
   /** Parâmetros extras do comando, como digitados. */
   params: string
   enabled: boolean
+  /**
+   * O servidor está no ar **agora** — o handshake MCP já respondeu.
+   *
+   * É estado de execução, não configuração: um servidor ligado mas que não subiu aparece
+   * com `conectado: false` e o motivo em `erro`.
+   */
+  conectado: boolean
+  /** Por que não conectou, quando não conectou (o que o servidor disse no `stderr`). */
+  erro?: string | null
+  /** Quantas ferramentas o servidor publicou no `tools/list`. */
+  ferramentas: number
 }
 
 /** O que a tela manda ao cadastrar um servidor MCP. Nome e comando são obrigatórios. */
@@ -694,7 +713,14 @@ type StreamData = {
   delta: { text: string }
   /** O modelo pensando: vem antes do texto e pode durar minutos. Não é a resposta. */
   reasoning: { text: string }
-  tool_call: { id: string; name: string; arguments: Record<string, unknown>; step: number }
+  tool_call: {
+    id: string
+    name: string
+    arguments: Record<string, unknown>
+    step: number
+    /** Servidor e ferramenta reais, quando a chamada é de um servidor MCP. */
+    mcp?: { servidor: string; ferramenta: string }
+  }
   tool_result: {
     id: string
     name: string
@@ -704,6 +730,8 @@ type StreamData = {
     step: number
     /** A pessoa negou a ação: o passo nem chegou a rodar. */
     negado?: boolean
+    /** Servidor e ferramenta reais, quando a chamada é de um servidor MCP. */
+    mcp?: { servidor: string; ferramenta: string }
   }
   /**
    * O agente registrou/atualizou a lista de tarefas (o plano da tarefa grande).
