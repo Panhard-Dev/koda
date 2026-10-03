@@ -18,8 +18,10 @@ quatro mil linhas. O documento é parte por parte.
 | 6 | Registro | o catálogo separado do despacho |
 | 7 | Domínios | cada um dono do **próprio schema** |
 | 8 | Regra | dependência entre camadas virou teste, com o furo fechado |
-| 9 | Pontes | as duas da migração morreram |
+| 9 | Pontes | as três da migração morreram |
 | 10 | Números | o monolito encolheu 40% |
+| 11 | Repositório | bancadas de teste e relatórios de QA saíram do `git` |
+| 12 | Arquivos auxiliares | `main.py`, `projects.py`, `NOTICE.md` e `__init__.py` alinhados à nova árvore |
 
 ---
 
@@ -128,7 +130,7 @@ camada — `app.contracts.tools` não é camada, nome de módulo não faz camada
 Fechar o furo acusou **5 violações reais** na hora, e todas foram corrigidas movendo o `_def`
 para `contracts/tools.py` (o que também tirou um ciclo `registry ↔ domains`).
 
-## 9. Pontes: as duas morreram
+## 9. Pontes: as três morreram
 
 | Ponte | Morreu quando |
 | --- | --- |
@@ -152,15 +154,50 @@ A lista de pontes e a de pendências da regra estão **vazias**.
 | pontes na regra | — | **0** |
 | pendências na regra | — | **0** |
 
-## 11. Como validar
+## 11. Repositório limpo: bancadas e relatórios saíram do `git`
+
+Junto com a reorganização, os arquivos de teste, bancada e relatório de QA que estavam no
+repositório saíram — não são código do produto e nunca deveriam ter sido commitados. Todos
+entraram no `.gitignore` para não voltar por acidente num `git add -A`:
+
+| Arquivo | O que era |
+| --- | --- |
+| `backend/e2e_porteira.py` | prova da porteira de despacho (roda local, sem modelo) |
+| `backend/e2e_restricoes.py` | prova das restrições com agente vivo |
+| `backend/e2e_skills_mcp.py` | prova de skills e MCPs |
+| `backend/gerar_html_qa.py` | gerador do relatório de QA em HTML |
+| `backend/gerar_relatorio_qa.py` | gerador do relatório de QA em markdown |
+| `backend/limpar_marca_antiga.py` | utilitário de limpeza de marca do histórico |
+| `relatorio-qa-0.6.0.html` | relatório de QA da 0.6.0 |
+| `relatorio-restricoes.html` | relatório das restrições |
+| `scripts/print-restricoes.mjs` | impressor das restrições para HTML |
+| `scripts/testar-comandos.mjs` | testador do menu de comandos |
+| `scripts/verificar-menu-comandos.mjs` | verificador do menu de comandos |
+
+As cópias locais ficam no disco. A suíte de testes (`backend/tests/`, que já era fora do
+versionamento) continua rodando localmente com `npm run verificar`.
+
+## 12. Arquivos auxiliares alinhados à nova árvore
+
+Quatro arquivos que não são camada, mas precisaram seguir a mudança:
+
+| Arquivo | O que mudou |
+| --- | --- |
+| `backend/app/main.py` | `/api/health` lista as ferramentas de `registry.catalogo` em vez de `ferramentas.catalogo` |
+| `backend/app/routers/projects.py` | import de `approvals` mudou de `..` para `..policy` |
+| `backend/app/tools/__init__.py` | deixou de reexportar `loop`, `StepResult` etc. — o laço é `app/agent/` |
+| `backend/app/tools/NOTICE.md` | reescrito: descreve os módulos que ficaram (`ferramentas`, `registry`, `domains/`) e aponta onde mora o resto |
+
+## 13. Como validar
 
 ```bash
 cd backend
+# a porteira saiu do repositório (0.6.2) mas fica no disco local:
 .venv/Scripts/python.exe e2e_porteira.py          # a porteira, sem depender do modelo
 .venv/Scripts/python.exe -m pytest tests/ -q      # 428 testes, inclui a regra de camadas
 ```
 
-## 12. O que ficou pendente — dito com todas as letras
+## 14. O que ficou pendente — dito com todas as letras
 
 **Os handlers ainda moram em `ferramentas.py`.** O desenho está completo (as camadas, os
 contratos, os schemas por domínio), mas os ~40 ramos de despacho continuam no arquivo de
@@ -174,7 +211,7 @@ ajudante **importado por nome não enxerga `monkeypatch`**: os testes trocam
 O caminho certo é mover **cada domínio com os handlers e os ajudantes dele**, um por vez,
 com a suíte verde a cada um. Fica para a próxima versão.
 
-## 13. O que **não** mudou
+## 15. O que **não** mudou
 
 - **Nenhum teto.** Os valores são exatamente os mesmos.
 - **Nenhuma rota, nenhum contrato de API.** Nada de fora mudou de forma.
