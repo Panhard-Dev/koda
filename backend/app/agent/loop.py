@@ -24,8 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from .. import contexto
-from . import ferramentas, guardas, repeticao
+from ..tools import ferramentas, registry
+from ..policy import guards
+from . import contexto, repeticao
+from ..limits import LIMITES
+from ..contracts.turn import StepResult, ToolCall, ToolStep
 
 PROMPT_FERRAMENTAS = (
     "Você é o Koda, um agente de engenharia que executa tarefas REAIS na máquina do "
@@ -666,7 +669,7 @@ SO_LEITURA = (
 
 def _chave_da_chamada(nome: str, argumentos: dict[str, Any]) -> str:
     """Identidade canônica da chamada: nome + argumentos, com chaves em ordem."""
-    nome = ferramentas.canonico(nome)
+    nome = registry.canonico(nome)
     try:
         corpo = json.dumps(argumentos, sort_keys=True, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
@@ -699,8 +702,6 @@ def _chave_de_repeticao(
     )
     identidade = _chave_da_chamada(nome, argumentos) + "\0" + contexto_tarefa
     return hashlib.sha256(identidade.encode("utf-8")).hexdigest()
-
-
 
 
 #: Pergunta de verdade: "o que faz esse arquivo?" não precisa de ferramenta nenhuma.
@@ -957,13 +958,13 @@ def restricoes_do_pedido(mensagens: list[dict[str, Any]]) -> tuple[set[str], boo
         return set(), True
     proibidas: set[str] = set()
     if SEM_ARQUIVOS.search(pedido):
-        proibidas.update(ferramentas.FERRAMENTAS_LOCAIS)
+        proibidas.update(registry.FERRAMENTAS_LOCAIS)
     if SEM_SHELL.search(pedido):
-        proibidas.update(ferramentas.FERRAMENTAS_DE_SHELL)
+        proibidas.update(registry.FERRAMENTAS_DE_SHELL)
     if SEM_AMBIENTE.search(pedido):
-        proibidas.update(ferramentas.FERRAMENTAS_DO_AMBIENTE)
+        proibidas.update(registry.FERRAMENTAS_DO_AMBIENTE)
     if SEM_WEB.search(pedido):
-        proibidas.update(ferramentas.FERRAMENTAS_WEB)
+        proibidas.update(registry.FERRAMENTAS_WEB)
     return proibidas, False
 
 
@@ -1017,23 +1018,23 @@ def _explicar_restricoes(
         )
     elif proibidas:
         grupos: list[str] = []
-        if proibidas >= ferramentas.FERRAMENTAS_LOCAIS:
+        if proibidas >= registry.FERRAMENTAS_LOCAIS:
             grupos.append(
                 "tudo o que alcança a máquina dela — arquivos (read_file, write_file, "
                 "list_dir…), shell, code_interpreter, get_environment e git"
             )
-        elif proibidas >= ferramentas.FERRAMENTAS_DE_ARQUIVO:
+        elif proibidas >= registry.FERRAMENTAS_DE_ARQUIVO:
             grupos.append(
                 "as ferramentas de arquivo (read_file, write_file, edit_file, list_dir, "
                 "search_files…)"
             )
-        if proibidas >= ferramentas.FERRAMENTAS_WEB:
+        if proibidas >= registry.FERRAMENTAS_WEB:
             grupos.append("as ferramentas de web (web_search, url_reader, browser)")
         restantes = (
             proibidas
-            - ferramentas.FERRAMENTAS_LOCAIS
-            - ferramentas.FERRAMENTAS_DE_ARQUIVO
-            - ferramentas.FERRAMENTAS_WEB
+            - registry.FERRAMENTAS_LOCAIS
+            - registry.FERRAMENTAS_DE_ARQUIVO
+            - registry.FERRAMENTAS_WEB
         )
         if restantes:
             grupos.append(", ".join(sorted(restantes)))
@@ -1358,59 +1359,6 @@ ESPERA_BASE = 3.0
 MAX_VAZIAS = 30
 
 
-@dataclass(slots=True)
-class ToolCall:
-    """Uma chamada pedida pelo modelo."""
-
-    id: str
-    name: str
-    arguments: dict[str, Any]
-    raw_arguments: str = "{}"
-
-    def para_mensagem(self) -> dict[str, Any]:
-        """Formato OpenAI, com os argumentos intactos (o proxy casa pelo id)."""
-        return {
-            "id": self.id,
-            "type": "function",
-            "function": {"name": self.name, "arguments": self.raw_arguments or "{}"},
-        }
-
-
-@dataclass(slots=True)
-class StepResult:
-    """Um passo do modelo: texto e/ou pedidos de ferramenta."""
-
-    text: str = ""
-    calls: list[ToolCall] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
-    #: O provedor cortou a resposta no teto de tokens (`finish_reason: "length"`)? O loop usa
-    #: isso para avisar em vez de aceitar um JSON de argumentos pela metade como se fosse
-    #: uma chamada válida.
-    truncado: bool = False
-
-
-@dataclass(slots=True)
-class ToolStep:
-    """Passo de ferramenta, o que fica gravado junto da mensagem."""
-
-    name: str
-    arguments: dict[str, Any]
-    output: str
-    duration_ms: int
-    call_id: str = ""
-    ok: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "arguments": self.arguments,
-            "output": self.output,
-            "duration_ms": self.duration_ms,
-            "call_id": self.call_id,
-            "ok": self.ok,
-        }
-
-
 # ------------------------------------------------------- por que a rodada parou
 #
 # A rodada que não conclui **não escreve a explicação na resposta**. O modelo falou o que
@@ -1638,19 +1586,19 @@ async def executar(
     # não pode virar uma frase que o modelo decide ignorar.
     proibidas, sem_ferramentas = restricoes_do_pedido(mensagens)
     modo = classificar_pedido(mensagens)
-    todas = {item["function"]["name"] for item in ferramentas.DEFINICOES}
+    todas = {item["function"]["name"] for item in registry.DEFINICOES}
     if sem_ferramentas:
         tools: list[dict[str, Any]] = []
     elif modo == MODO_RESPOSTA:
-        tools = ferramentas.catalogo(
+        tools = registry.catalogo(
             set(negadas or ()) | (todas - FERRAMENTAS_DE_RESPOSTA)
         )
     else:
-        tools = ferramentas.catalogo(set(negadas or ()) | proibidas)
-    # A porteira do despacho (porta do Koda — ver `guardas.py`): só o que foi **oferecido**
+        tools = registry.catalogo(set(negadas or ()) | proibidas)
+    # A porteira do despacho (porta do Koda — ver `guards.py`): só o que foi **oferecido**
     # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
     # chama assim mesmo recebe o conteúdo da máquina, e a restrição vira decorativa.
-    guarda = guardas.do_catalogo(tools)
+    guarda = guards.do_catalogo(tools)
     historico = [dict(item) for item in mensagens]
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
     passos: list[ToolStep] = []
@@ -2155,7 +2103,7 @@ async def executar(
                 )
                 continue
 
-            # A porteira do despacho (porta do Koda — ver `guardas.py`): o que a rodada
+            # A porteira do despacho (porta do Koda — ver `guards.py`): o que a rodada
             # **não ofereceu**, não roda. Vem antes do cartão de permissão de propósito —
             # não faz sentido pedir autorização para uma ferramenta que a própria pessoa
             # proibiu. Fail-closed: sem nome, guarda quebrada ou comparação que estoure
@@ -2346,7 +2294,7 @@ async def executar(
                 # O shell tem um ciclo próprio de acompanhamento: não devolva a palavra
                 # antes da olhada configurada (240 s / 4 min por padrão), mesmo que o
                 # timeout genérico das outras ferramentas seja menor.
-                prazo_olhada = float(ferramentas.INTERVALO_DE_OLHADA)
+                prazo_olhada = float(LIMITES.intervalo_olhada)
                 prazo_tool = max(prazo_tool or 0.0, prazo_olhada)
             restante_tarefa = _faltando(limite)
             if restante_tarefa is not None:

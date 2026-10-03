@@ -12,13 +12,14 @@ comentários em português — e nenhum deles importa código de fora do projeto
 
 | Arquivo | O que é |
 | --- | --- |
-| `ferramentas.py` | catálogo e handlers das ferramentas locais |
-| `loop.py` | o laço do agente: prompt, portões de parada e despacho de ferramenta |
-| `guardas.py` | a porteira do despacho — só o que a rodada ofereceu pode ser chamado |
-| `pensamento.py` | limpeza de blocos de raciocínio no texto que vai à tela |
-| `repeticao.py` | detecção de eco/degeneração da resposta |
-| `limites_de_saida.py` | corte de saída longa com cabeça e cauda |
+| `ferramentas.py` | os handlers das ferramentas e as utilidades que eles usam |
+| `registry.py` | o catálogo: nomes, apelidos, grupos de restrição e o despacho (`executar`) |
+| `domains/` | o **schema** de cada domínio — `files`, `shell`, `git`, `web`, `plano` |
+
+O resto da arquitetura mora fora daqui: o laço é `app/agent/`, a máquina de processo é
+`app/execution/`, a decisão é `app/policy/`, os contratos são `app/contracts/` e os tetos são
+`app/limits.py`.
 
 Até a 0.5.2 esta pasta carregava **325 arquivos**: a cópia de referência inteira, quase toda
-sem uso e sem carregar. Na 0.6.0 o que não é usado saiu do pacote — foi para
+sem uso e sem carregar. Na 0.6.3 o que não é usado saiu do pacote — foi para
 `backend/material-referencia/`, que fica fora do repositório e fora do instalador.

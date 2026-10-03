@@ -15,6 +15,9 @@ ferramentas de arquivo.
 
 Quem decide *o que* uma ferramenta é mora em `tools/ferramentas.py` (`classificar`): aqui
 fica só a política — o que o modo pergunta e o que a pessoa já respondeu para sempre.
+
+**Onde isto mora:** em `policy/`, desde a 0.6.3. A camada decide; não executa e não conhece
+o laço do agente.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from __future__ import annotations
 import sqlite3
 import time
 
-from .repository import new_id
+from ..repository import new_id
 
 MODOS = ("manual", "default", "auto", "livre")
 

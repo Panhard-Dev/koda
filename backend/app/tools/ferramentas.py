@@ -34,100 +34,40 @@ from typing import Any
 
 import httpx
 
-from . import limites_de_saida
-
-_PRAZO_DA_FERRAMENTA: ContextVar[float | None] = ContextVar(
-    "prazo_da_ferramenta", default=None
+from ..limits import LIMITES, cortar_cabeca_e_cauda
+from .registry import (
+    CAMINHOS_EXTRA,
+    FERRAMENTAS_DE_ARQUIVO,
+    _sinonimos,
+    canonico,
 )
-_CANCELAMENTO_DA_FERRAMENTA: ContextVar[Event | None] = ContextVar(
-    "cancelamento_da_ferramenta", default=None
+from ..execution import processo, tempo
+from ..execution.processo import (
+    ComandoRodando,
+    encerrar_do_dono,
+    encerrar_tudo,
+    _acompanhar,
+    _ambiente_do_comando,
+    _codigo_de_saida,
+    _git_add_seguro,
+    _liberar_processo,
+    _parar,
+    _reservar_processo,
+    _rodar,
+    _rodar_lista,
+    _sem_janela,
+    _which,
+)
+from ..execution.tempo import (
+    _CANCELAMENTO_DA_FERRAMENTA,
+    _PRAZO_DA_FERRAMENTA,
+    _restante_da_ferramenta,
+    _timeout_da_ferramenta,
+    _timeout_httpx,
+    _verificar_cancelamento,
 )
 
-
-def _restante_da_ferramenta() -> float | None:
-    prazo = _PRAZO_DA_FERRAMENTA.get()
-    return None if prazo is None else prazo - time.monotonic()
-
-
-def _verificar_cancelamento() -> None:
-    evento = _CANCELAMENTO_DA_FERRAMENTA.get()
-    if evento is not None and evento.is_set():
-        raise InterruptedError("a pessoa cancelou a tarefa")
-
-
-def _timeout_da_ferramenta(padrao: float) -> float:
-    restante = _restante_da_ferramenta()
-    return padrao if restante is None else max(0.05, min(padrao, restante))
-
-
-def _timeout_httpx(padrao: float) -> httpx.Timeout:
-    return httpx.Timeout(_timeout_da_ferramenta(padrao))
-
-#: Teto do que uma ferramenta devolve ao modelo, em caracteres. 50 mil: era 12 mil, e o
-#: teto apertado cortava saída de build e de bateria de testes no meio.
-LIMITE_SAIDA = 50_000
-
-#: Teto de leitura de um arquivo (ou anexo) por vez, em caracteres — o `file_read_max_chars`
-#: do projeto de origem (100 mil). Fica **acima** do teto de saída de propósito: assim o arquivo é lido
-#: inteiro e o corte acontece num lugar só, o `_limitar`.
-LIMITE_LEITURA = 100_000
-
-#: Teto de **uma** linha só. Arquivo minificado é uma linha de megabytes: sem isto ela come
-#: o orçamento inteiro da leitura e o modelo recebe um começo de linha, sem fim e sem
-#: contexto. É 2 mil.
-LIMITE_DE_LINHA = 2_000
-
-#: Tempo padrão de um comando no terminal, em segundos. Era 120 s e cortava justamente o
-#: que a pessoa pediu: suíte de testes grande, build, instalação de dependência. O modelo
-#: pode pedir mais em `tempo_limite`, até o teto de `TEMPO_COMANDO_MAX`.
-TEMPO_COMANDO = 600
-TEMPO_COMANDO_MAX = 3600
-#: De quanto em quanto tempo o comando que não terminou devolve a palavra ao modelo.
-#:
-#: Comando de verdade (build, instalação, bateria de teste) passa de dez minutos, e antes
-#: ele era **morto** no tempo limite — trabalho perdido no meio. Agora ele continua rodando
-#: e, a cada quatro minutos, o modelo recebe a saída até agora com o id do processo: ele
-#: olha, diz que está tudo certo e continua acompanhando (`continuar`), ou para (`parar`)
-#: quando percebe que aquilo não termina sozinho — servidor, programa com janela, prévia.
-INTERVALO_DE_OLHADA = 240
-
-#: Quanto da saída de um comando longo fica guardado, em caracteres. Comando tagarela
-#: (build com milhares de linhas) não pode encher a memória do app: guarda o **fim**, que é
-#: onde está o erro, e diz quanta coisa ficou de fora.
-LIMITE_SAIDA_RODANDO = 200_000
-
-#: Quantas olhadas seguidas **sem uma linha nova** antes de considerar o comando travado.
-#:
-#: Isto é a **inatividade**, e ela é medida em segundos (ver `INATIVIDADE_MAX_S`), não em
-#: número de olhadas: o intervalo entre olhadas é escolha de quem acompanha, e amarrar o
-#: travamento a ele fazia o mesmo comando ser declarado morto em 4 min ou em 40 s,
-#: dependendo do polling. O contador continua aqui como rede de segurança.
-OLHADAS_SEM_SAIDA = 3
-
-#: Quanto tempo **sem escrever nada** (segundos) já é travamento. Um comando vivo mas mudo
-#: por cinco minutos está esperando entrada, em laço mudo ou morto por dentro — e continuar
-#: esperando não resolve. Ficou em segundos de propósito: antes eram "três olhadas", e com
-#: polling de 240 s isso dava **doze minutos** antes de o loop perceber.
-#:
-#: Quem **não** imprime por dez minutos e depois termina (compilador silencioso, download
-#: mudo) se protege pelo teto absoluto (`TEMPO_COMANDO`), que é generoso — o que não pode é
-#: o processo ficar pendurado sem ninguém decidir.
-INATIVIDADE_MAX_S = 300
-
-#: Depois de tantas olhadas, o retorno para de só oferecer `continuar` e cobra a decisão: ou
-#: o comando terminou, ou não é para terminar sozinho (servidor, programa com janela, prévia)
-#: e o certo é parar. É o antídoto do modelo que fica dizendo "vou continuar" para sempre.
-OLHADAS_ATE_COBRAR = 10
-
-#: Comandos que ficaram rodando depois de uma olhada, por id. O processo é do app: sai daqui
-#: quando termina, quando o modelo para, ou quando o app fecha (`encerrar_tudo`).
-#:
-#: Cada entrada guarda **de quem** é o processo (`dono`), **onde** ele roda (`workspace`) e
-#: **até quando** pode viver (`deadline`). Era só o id num dict global: em duas tarefas
-#: simultâneas ninguém sabia a quem pertencia cada processo, e o shutdown não tinha como
-#: achar quem matar.
-_RODANDO: dict[str, "ComandoRodando"] = {}
-
+# ---------------------------------------------------------------- utilidades
 
 def definir_limites(
     *,
@@ -144,103 +84,27 @@ def definir_limites(
     Chamado uma vez na subida (`main.py`). Os três prazos do `shell` ficam **separados**
     como o dono pediu: teto total do processo (`timeout`), tempo sem saída que caracteriza
     travamento (`inatividade`) e intervalo de acompanhamento (`olhada`). Os tetos de saída
-    (`saida`, `listagem`, `leitura`, `linha`) são os do projeto de origem, e existem
-    para o mesmo número valer no backend inteiro em vez de ficar preso numa constante.
+    (`saida`, `listagem`, `leitura`, `linha`) são os do projeto de origem, e existem para o
+    mesmo número valer no backend inteiro em vez de ficar preso numa constante.
+
+    Escreve no objeto `LIMITES`, e não em global de módulo: assim quem lê o teto enxerga o
+    valor novo, seja qual for o módulo onde ele mora.
     """
-    global LIMITE_SAIDA, LIMITE_LISTAGEM, LIMITE_LEITURA, LIMITE_DE_LINHA
-    global TEMPO_COMANDO, INATIVIDADE_MAX_S, INTERVALO_DE_OLHADA
     if timeout is not None and timeout >= 0:
-        TEMPO_COMANDO = int(timeout)
+        LIMITES.tempo_comando = int(timeout)
     if inatividade and inatividade > 0:
-        INATIVIDADE_MAX_S = int(inatividade)
+        LIMITES.inatividade_s = int(inatividade)
     if olhada and olhada > 0:
-        INTERVALO_DE_OLHADA = int(olhada)
+        LIMITES.intervalo_olhada = int(olhada)
     if saida and saida > 0:
-        LIMITE_SAIDA = int(saida)
+        LIMITES.saida = int(saida)
     if listagem and listagem > 0:
-        LIMITE_LISTAGEM = int(listagem)
+        LIMITES.listagem = int(listagem)
     if leitura and leitura > 0:
-        LIMITE_LEITURA = int(leitura)
+        LIMITES.leitura = int(leitura)
     if linha and linha > 0:
-        LIMITE_DE_LINHA = int(linha)
+        LIMITES.linha = int(linha)
 
-
-def _reservar_processo() -> bool:
-    """Reserva uma vaga sem bloquear as outras requisições do backend."""
-    global _PROCESSOS_ATIVOS
-    for rodando in list(_RODANDO.values()):
-        if rodando.terminou():
-            rodando.liberar_vaga()
-    with _TRAVA_PROCESSOS:
-        if _PROCESSOS_ATIVOS >= LIMITE_PROCESSOS_CONCORRENTES:
-            return False
-        _PROCESSOS_ATIVOS += 1
-        return True
-
-
-def _liberar_processo() -> None:
-    global _PROCESSOS_ATIVOS
-    with _TRAVA_PROCESSOS:
-        _PROCESSOS_ATIVOS = max(0, _PROCESSOS_ATIVOS - 1)
-
-
-def encerrar_tudo() -> int:
-    """Mata **todos** os comandos que ficaram rodando. Devolve quantos foram derrubados.
-
-    É o que faltava no shutdown: `_RODANDO` é um dict de processo — e um dict de processo
-    não morre junto com o app. Um `npm run dev` (ou qualquer filho dele) sobrevivia ao
-    fechamento do Koda, segurando porta e CPU, e ninguém tinha mais como achá-lo. Chamado
-    no `lifespan` do FastAPI.
-    """
-    quantos = 0
-    for rodando in list(_RODANDO.values()):
-        try:
-            rodando.matar()
-            quantos += 1
-        except Exception:  # noqa: BLE001 — encerrar é melhor esforço, nunca derruba a saída
-            continue
-    _RODANDO.clear()
-    return quantos
-
-
-def encerrar_do_dono(dono: str) -> int:
-    """Mata só os comandos **desta** tarefa. Devolve quantos foram derrubados.
-
-    É o que faz o botão Parar parar de verdade: cancelar a coroutine do loop **não** mata o
-    subprocesso que ela começou, e o `shell` continuava rodando (`npm install`, build) depois
-    de o usuário mandar parar. O `dono` é o id da tarefa (ver `routers/chat.py`), então
-    parar uma conversa não derruba o comando de outra.
-    """
-    if not dono:
-        return 0
-    quantos = 0
-    for identificador, rodando in list(_RODANDO.items()):
-        if rodando.dono != dono:
-            continue
-        _RODANDO.pop(identificador, None)
-        try:
-            rodando.matar()
-            quantos += 1
-        except Exception:  # noqa: BLE001
-            continue
-    return quantos
-
-#: Teto de tamanho para `download_file`/`upload_file`, em bytes (100 MB). Sem isto um
-#: download acidental de um arquivo enorme enche o disco do usuário sem aviso.
-LIMITE_REDE = 100_000_000
-#: Tetos do `search_files`: quantidade de caminhos e profundidade de varredura.
-LIMITE_ARQUIVOS_BUSCA = 200
-#: Orçamento de trabalho por busca, independente da quantidade de resultados.
-LIMITE_ITENS_VARREDURA = 20_000
-LIMITE_BYTES_VARREDURA = 128_000_000
-LIMITE_TEMPO_VARREDURA_S = 5.0
-#: Limite global de subprocessos concorrentes deste backend.
-LIMITE_PROCESSOS_CONCORRENTES = 4
-_TRAVA_PROCESSOS = threading.Lock()
-_PROCESSOS_ATIVOS = 0
-
-#: Ferramentas de acesso web, disponíveis somente quando a pessoa liga o botão Web.
-FERRAMENTAS_WEB = frozenset({"web_search", "url_reader", "browser", "download_file"})
 
 #: Projetos Wikipedia/Wikimedia bloqueados nas buscas e em qualquer URL aberta pelo agente.
 DOMINIOS_WIKI = frozenset(
@@ -259,12 +123,6 @@ DOMINIOS_WIKI = frozenset(
         "wikivoyage.org",
     }
 )
-
-#: Quantas entradas o `list_dir` mostra de uma pasta. Alto de propósito: pasta de projeto
-#: tem centenas de arquivos, e cortar calado faz o modelo trabalhar com meia lista na
-#: cabeça. Passando disso, o retorno diz quantas ficaram de fora. O teto é o
-#: 2 mil, o mesmo número que corta uma busca.
-LIMITE_LISTAGEM = 2_000
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -374,202 +232,6 @@ PASTAS_IGNORADAS = {
 }
 
 
-#: Nomes que um modelo costuma escrever no lugar do nome real da ferramenta. O catálogo
-#: anuncia o nome canônico; o apelido existe para a chamada **funcionar** em vez de voltar
-#: "ferramenta desconhecida" — que era o que fazia a tarefa inteira parar numa tarefa
-#: grande, com o modelo tentando `run_command`, `list_directory`, `apply_patch`.
-APELIDOS: dict[str, str] = {
-    # execução
-    "run_command": "shell",
-    "execute_command": "shell",
-    "run_terminal": "shell",
-    "terminal_command": "shell",
-    "execute_shell": "shell",
-    "bash": "shell",
-    "sh": "shell",
-    "exec": "shell",
-    "run_code": "code_interpreter",
-    "execute_code": "code_interpreter",
-    "run_python": "code_interpreter",
-    "python": "code_interpreter",
-    "eval": "code_interpreter",
-    # arquivos
-    "read": "read_file",
-    "cat": "read_file",
-    "open_file": "read_file",
-    "view_file": "read_file",
-    "read_text_file": "read_file",
-    "write": "write_file",
-    "create_file": "write_file",
-    "save_file": "write_file",
-    "write_text_file": "write_file",
-    "edit": "edit_file",
-    "replace_in_file": "edit_file",
-    "str_replace": "str_replace_editor",
-    "delete": "delete_file",
-    "remove_file": "delete_file",
-    "list_directory": "list_dir",
-    "listdir": "list_dir",
-    "list_files": "list_dir",
-    "ls": "list_dir",
-    "dir": "list_dir",
-    "mkdir": "create_directory",
-    "make_directory": "create_directory",
-    "create_dir": "create_directory",
-    "rmdir": "delete_directory",
-    "remove_directory": "delete_directory",
-    "delete_dir": "delete_directory",
-    "move": "move_file",
-    "copy": "copy_file",
-    "rename": "rename_file",
-    "search_files": "search_files",
-    "glob": "search_files",
-    "find_files": "search_files",
-    "file_search": "search_files",
-    "list_files_by_pattern": "search_files",
-    "search_code": "search_codebase",
-    "code_search": "search_codebase",
-    "search_in_files": "search_codebase",
-    "grep_search": "regex_search",
-    "search_regex": "regex_search",
-    "lint": "get_problems",
-    "check_file": "get_problems",
-    "apply_diff": "apply_patch",
-    "patch": "edit_file",  # o `patch` do Koda/OpenAI é find-and-replace, igual ao nosso edit_file
-    "apply_changes": "apply_patch",
-    # ambiente, web, git
-    "env": "get_environment",
-    "environment": "get_environment",
-    "get_env": "get_environment",
-    "system_info": "get_environment",
-    "open_url": "url_reader",
-    "fetch_url": "url_reader",
-    "read_url": "url_reader",
-    "web_fetch": "url_reader",
-    "web_extract": "url_reader",
-    "extract_url": "url_reader",
-    "visit_url": "url_reader",
-    "search_web": "web_search",
-    "websearch": "web_search",
-    "google": "web_search",
-    "status": "git_status",
-    "diff": "git_diff",
-    "git_diff_staged": "git_diff",
-    "commit": "git_commit",
-    "push": "git_push",
-    "pull": "git_pull",
-    "log": "git_log",
-    "download": "download_file",
-    "fetch_file": "download_file",
-    "upload": "upload_file",
-    "send_file": "upload_file",
-    "install": "install_package",
-    "add_package": "install_package",
-    "install_dependency": "install_package",
-    "pip_install": "install_package",
-    "npm_install": "install_package",
-    "uninstall": "uninstall_package",
-    "remove_package": "uninstall_package",
-    "uninstall_dependency": "uninstall_package",
-    # plano
-    "todo_list": "update_todos",
-    "todo_write": "update_todos",
-    "write_todos": "update_todos",
-    "set_todos": "update_todos",
-}
-
-#: Sinônimos de **argumento**: o mesmo campo escrito como o modelo lembra. Sem isso, o
-#: `write_file({"path": ..., "content": ...})` chegava sem `caminho` e a ferramenta
-#: respondia "criei /tmp/x" — ou pior, gravava no lugar errado.
-SINONIMOS: dict[str, str] = {
-    "path": "caminho",
-    "file": "caminho",
-    "filepath": "caminho",
-    "file_path": "caminho",
-    "filename": "caminho",
-    "file_name": "caminho",
-    "arquivo": "caminho",
-    "folder": "caminho",
-    "directory": "caminho",
-    # Anexo é lido por `id` — o modelo às vezes escreve o nome do campo por extenso.
-    "attachment_id": "id",
-    "attachment": "id",
-    "anexo": "id",
-    "anexo_id": "id",
-    "content": "conteudo",
-    "contents": "conteudo",
-    "text": "conteudo",
-    "new_content": "conteudo",
-    "old": "old_string",
-    "old_str": "old_string",
-    "old_text": "old_string",
-    "find": "old_string",
-    "search": "old_string",
-    "new": "new_string",
-    "new_str": "new_string",
-    "new_text": "new_string",
-    "replace": "new_string",
-    "replacement": "new_string",
-    "source": "origem",
-    "src": "origem",
-    "from": "origem",
-    "destination": "destino",
-    "dest": "destino",
-    "target": "destino",
-    "to": "destino",
-    "new_name": "novo_nome",
-    "language": "linguagem",
-    "lang": "linguagem",
-    "runtime": "linguagem",
-    "pattern": "padrao",
-    "file_pattern": "padrao",
-    "regex_pattern": "padrao",
-    "expression": "padrao",
-    "query": "termo",
-    "q": "termo",
-    "needle": "termo",
-    "busca": "termo",
-    "search_term": "termo",
-    "command": "comando",
-    "cmd": "comando",
-    "timeout": "tempo_limite",
-    "tempo": "tempo_limite",
-    "timeout_s": "tempo_limite",
-    "code": "codigo",
-    "script": "codigo",
-    "message": "mensagem",
-    "commit_message": "mensagem",
-    "msg": "mensagem",
-    "limit": "limite",
-    "max_lines": "limite",
-    "lines": "limite",
-    "start": "inicio",
-    "offset": "inicio",
-    "line": "inicio",
-    "count": "quantidade",
-    "number": "quantidade",
-    "package": "pacote",
-    "packages": "pacote",
-    "dependency": "pacote",
-    "dependencia": "pacote",
-    "manager": "gerenciador",
-    "package_manager": "gerenciador",
-    "diff": "diff",
-    "patch": "diff",
-    "unified_diff": "diff",
-    "link": "url",
-    "href": "url",
-    "endereco": "url",
-    "remote": "remoto",
-    "branch": "ramo",
-    "ramo_nome": "ramo",
-    "itens": "todos",
-    "tarefas": "todos",
-    "plan": "todos",
-    "plano": "todos",
-    "checklist": "todos",
-}
-
 #: Nomes aceitos dentro de um item da lista de tarefas, além de `texto`/`feito`/`atual`.
 SINONIMOS_DE_ITEM: dict[str, str] = {
     "text": "texto",
@@ -608,446 +270,7 @@ ESTADOS_DE_ITEM = {
 }
 
 
-def canonico(nome: str) -> str:
-    """Nome real da ferramenta, resolvendo apelidos (`run_command` → `shell`)."""
-    limpo = (nome or "").strip().lower()
-    return APELIDOS.get(limpo, limpo)
-
-
-def _sinonimos(argumentos: dict[str, Any]) -> dict[str, Any]:
-    """Renomeia os campos escritos como sinônimo, sem nunca perder o canônico."""
-    if not argumentos:
-        return {}
-    normalizado: dict[str, Any] = {}
-    for chave, valor in argumentos.items():
-        normalizado[str(chave)] = valor
-    for chave, valor in list(normalizado.items()):
-        destino = SINONIMOS.get(chave.lower())
-        if destino and destino not in normalizado:
-            normalizado[destino] = valor
-    return normalizado
-
-
-def _def(
-    nome: str, descricao: str, props: dict[str, Any], obrigatorios: list[str]
-) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": nome,
-            "description": descricao,
-            "parameters": {"type": "object", "properties": props, "required": obrigatorios},
-        },
-    }
-
-
 # ---------------------------------------------------------------- catálogo
-
-DEFINICOES: list[dict[str, Any]] = [
-    # ---- execução ----
-    _def(
-        "code_interpreter",
-        "Executa um trecho de código e devolve a saída (print etc). Use para calcular e "
-        "analisar; para rodar teste/build/programa use `shell`. Python por padrão; "
-        "com `linguagem: node` roda JavaScript — o certo num projeto JS. Para ler ou "
-        "procurar arquivo do projeto, use read_file/search_codebase.",
-        {
-            "codigo": {"type": "string", "description": "Código completo a executar"},
-            "linguagem": {
-                "type": "string",
-                "description": "python (padrão) ou node",
-            },
-        },
-        ["codigo"],
-    ),
-    _def(
-        "shell",
-        "Executa um comando no terminal (cmd) e devolve stdout+stderr. Use só para "
-        "programa de verdade (build, teste, git, install); NÃO use para ler, criar, editar, "
-        "listar, mover ou apagar arquivo — há ferramenta própria para cada um. Comando que demora "
-        "NÃO é interrompido: a cada 4 minutos ele devolve a saída até agora com um id, e "
-        'você decide — continue acompanhando com {"continuar": "<id>"} ou pare com '
-        '{"parar": "<id>"}. Comando que não termina sozinho (servidor, programa com janela, '
-        "prévia de algo) é caso de olhar a saída e parar.",
-        {
-            "comando": {"type": "string", "description": "o comando a rodar"},
-            "continuar": {
-                "type": "string",
-                "description": "id de um comando que ficou rodando: espera mais 4 minutos por ele",
-            },
-            "parar": {
-                "type": "string",
-                "description": "id de um comando que ficou rodando: interrompe agora",
-            },
-            "tempo_limite": {
-                "type": "integer",
-                "description": (
-                    "segundos de espera antes de voltar com a saída (padrão 240 = 4 min; "
-                    "acima disso continua valendo a olhada de 4 min). Não interrompe nada"
-                ),
-            },
-        },
-        [],
-    ),
-    _def("terminal", "Alias de shell: executa um comando no terminal.", {"comando": {"type": "string"}}, ["comando"]),
-    # ---- arquivos ----
-    _def(
-        "read_file",
-        "Lê um arquivo de texto inteiro. Use isto em vez de `cat`/`type`/`head`/`tail` no "
-        "shell. Não passe `limite` por hábito: o arquivo vem "
-        "completo, e é isso que evita ler o mesmo arquivo várias vezes. Use `inicio`/`limite` "
-        "só em arquivo muito grande, e aí o retorno diz o que ficou de fora.",
-        {
-            "caminho": {"type": "string"},
-            "inicio": {"type": "integer", "description": "linha inicial, 1 = primeira (padrão 1)"},
-            "limite": {
-                "type": "integer",
-                "description": "quantas linhas ler (padrão: o arquivo inteiro)",
-            },
-        },
-        ["caminho"],
-    ),
-    _def(
-        "read_attachment",
-        "Lê o conteúdo de um arquivo que o usuário **anexou nesta conversa**. O anexo NÃO "
-        "está na pasta de trabalho: passe o `id` que vem no bloco «[anexos desta mensagem]». "
-        "Não passe o nome nem um caminho — `read_file` não acha o anexo, e o nome não é "
-        "caminho. Devolve o texto para texto/código e para pdf. Para imagem, devolve os "
-        "metadados: a imagem já vai anexada ao seu contexto quando o modelo enxerga "
-        "imagens — não precisa desta ferramenta para vê-la.",
-        {
-            "id": {
-                "type": "string",
-                "description": "o id do anexo, exatamente como veio no bloco de anexos da mensagem",
-            },
-            "inicio": {"type": "integer", "description": "linha inicial, 1 = primeira (padrão 1)"},
-            "limite": {
-                "type": "integer",
-                "description": "quantas linhas ler (padrão: o anexo inteiro)",
-            },
-        },
-        ["id"],
-    ),
-    _def(
-        "write_file",
-        "Cria ou sobrescreve um arquivo de texto INTEIRO (cria subpastas). Use isto em vez "
-        "de `echo`/heredoc no shell. Substitui o conteúdo todo — para alterar um trecho use "
-        "`edit_file`.",
-        {"caminho": {"type": "string"}, "conteudo": {"type": "string"}},
-        ["caminho", "conteudo"],
-    ),
-    _def(
-        "edit_file",
-        "Substitui um trecho exato em um arquivo (old_string deve ocorrer uma única vez). "
-        "Use isto em vez de `sed`/`awk` no shell; para o arquivo inteiro use `write_file`.",
-        {
-            "caminho": {"type": "string"},
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-        },
-        ["caminho", "old_string", "new_string"],
-    ),
-    _def(
-        "str_replace_editor",
-        "Alias de edit_file: substitui old_string por new_string em um arquivo.",
-        {
-            "caminho": {"type": "string"},
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-        },
-        ["caminho", "old_string", "new_string"],
-    ),
-    _def(
-        "list_dir",
-        "Lista arquivos e subpastas de um diretório (padrão: pasta de trabalho). Use isto "
-        "em vez de `dir`/`ls` no shell.",
-        {"caminho": {"type": "string", "description": "padrão: ."}},
-        [],
-    ),
-    _def("delete_file", "Apaga um arquivo (não apaga pastas). Use isto em vez de `del`/`rm` no shell.", {"caminho": {"type": "string"}}, ["caminho"]),
-    _def(
-        "create_directory",
-        "Cria uma pasta (cria também as pastas acima dela que faltarem). Use isto em vez de `mkdir` no shell.",
-        {"caminho": {"type": "string"}},
-        ["caminho"],
-    ),
-    _def(
-        "move_file",
-        "Move um arquivo ou uma pasta para outro caminho (o destino não pode existir). Use isto em vez de `mv` no shell.",
-        {"origem": {"type": "string"}, "destino": {"type": "string"}},
-        ["origem", "destino"],
-    ),
-    _def(
-        "copy_file",
-        "Copia um arquivo ou uma pasta inteira para outro caminho. Use isto em vez de `cp` no shell.",
-        {"origem": {"type": "string"}, "destino": {"type": "string"}},
-        ["origem", "destino"],
-    ),
-    _def(
-        "rename_file",
-        "Renomeia um arquivo ou pasta dentro da mesma pasta (só o nome, sem caminho). Use isto em vez de `ren`/`mv` no shell.",
-        {"caminho": {"type": "string"}, "novo_nome": {"type": "string"}},
-        ["caminho", "novo_nome"],
-    ),
-    _def(
-        "delete_directory",
-        "Apaga uma pasta inteira, com tudo dentro dela. Nunca apaga a pasta de trabalho. Use isto em vez de `rmdir`/`rm -rf` no shell.",
-        {"caminho": {"type": "string"}},
-        ["caminho"],
-    ),
-    _def(
-        "get_environment",
-        "Informa o ambiente de trabalho: sistema, pasta do projeto, Python, git e o que há nela.",
-        {},
-        [],
-    ),
-    # ---- busca ----
-    _def(
-        "search_codebase",
-        "Busca um termo (texto ou regex) em todos os arquivos do projeto e devolve "
-        "arquivo:linha com a linha. Use isto em vez de `findstr`/`grep` no shell.",
-        {"termo": {"type": "string"}, "regex": {"type": "boolean", "description": "tratar termo como regex (padrão false)"}},
-        ["termo"],
-    ),
-    _def(
-        "vector_search",
-        "Alias de search_codebase: busca textual nos arquivos do projeto (ranking simples por ocorrências).",
-        {"termo": {"type": "string"}},
-        ["termo"],
-    ),
-    _def("grep", "Alias de regex_search: busca com expressão regular nos arquivos.", {"padrao": {"type": "string"}}, ["padrao"]),
-    _def(
-        "regex_search",
-        "Busca com expressão regular nos arquivos do projeto (arquivo:linha:trecho). Use "
-        "isto em vez de `findstr`/`grep` no shell; para buscar um texto use `search_codebase`.",
-        {"padrao": {"type": "string"}},
-        ["padrao"],
-    ),
-    _def(
-        "get_problems",
-        "Verifica problemas de sintaxe/erros em um arquivo (Python via py_compile; tenta pyflakes se instalado).",
-        {"caminho": {"type": "string"}},
-        ["caminho"],
-    ),
-    _def("linter", "Alias de get_problems.", {"caminho": {"type": "string"}}, ["caminho"]),
-    # ---- web ----
-    _def("web_search", "Pesquisa no Bing e devolve vários resultados. Use isto para descobrir na web; para ler uma página já conhecida use `url_reader`. Em pesquisa ampla, use consultas diferentes para achar fontes em mais domínios.", {"consulta": {"type": "string"}}, ["consulta"]),
-    _def("url_reader", "Baixa uma URL pública (http/https) conhecida e devolve o texto da página. Use isto para abrir uma página específica; para descobrir na web use `web_search`.", {"url": {"type": "string"}}, ["url"]),
-    _def("browser", "Alias de url_reader: abre uma URL e devolve o texto.", {"url": {"type": "string"}}, ["url"]),
-    # ---- git ----
-    _def("git_status", "Mostra o status git do projeto. Use isto em vez do shell para git.", {}, []),
-    _def("git_diff", "Mostra o diff não-commitado (staged + unstaged). Use isto em vez de `git diff` no shell.", {}, []),
-    _def("git_log", "Mostra os últimos commits (padrão 10). Use isto em vez de `git log` no shell.", {"quantidade": {"type": "integer"}}, []),
-    _def("git_commit", "Faz git add -A e commit com a mensagem dada. Use isto em vez de `git commit` no shell.", {"mensagem": {"type": "string"}}, ["mensagem"]),
-    _def(
-        "update_todos",
-        "Registra/atualiza a lista de tarefas da resposta (o plano). Marque cada item como "
-        "feito quando ele terminar de verdade, e o próximo como atual.",
-        {
-            "todos": {
-                "type": "array",
-                "description": "a lista completa, na ordem: faça x, faça y, faça z",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "texto": {"type": "string", "description": "o que fazer, curto"},
-                        "feito": {"type": "boolean", "description": "já terminou?"},
-                        "atual": {"type": "boolean", "description": "está fazendo agora"},
-                    },
-                    "required": ["texto"],
-                },
-            }
-        },
-        ["todos"],
-    ),
-    _def(
-        "search_files",
-        "Procura arquivos pelo nome ou por um padrão glob (ex.: **/*.py) e devolve os "
-        "caminhos. Use isto em vez de `find`/`ls` no shell; para procurar conteúdo use "
-        "`search_codebase`/`regex_search`.",
-        {
-            "padrao": {"type": "string", "description": "padrão glob, ex.: **/*.ts"},
-            "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"},
-        },
-        ["padrao"],
-    ),
-    _def(
-        "apply_patch",
-        "Aplica um diff unificado (formato git diff) nos arquivos do projeto, de uma vez.",
-        {
-            "diff": {
-                "type": "string",
-                "description": "diff unificado completo, com cabeçalhos ---/+++ e hunks @@",
-            }
-        },
-        ["diff"],
-    ),
-    # ---- git (remoto) ----
-    _def(
-        "git_push",
-        "Envia os commits locais para o repositório remoto (git push).",
-        {
-            "remoto": {"type": "string", "description": "nome do remoto (padrão do git: origin)"},
-            "ramo": {"type": "string", "description": "ramo a enviar"},
-        },
-        [],
-    ),
-    _def(
-        "git_pull",
-        "Baixa e integra as mudanças do repositório remoto (git pull --ff-only).",
-        {
-            "remoto": {"type": "string", "description": "nome do remoto (padrão do git: origin)"},
-            "ramo": {"type": "string", "description": "ramo a baixar"},
-        },
-        [],
-    ),
-    # ---- dependências ----
-    _def(
-        "install_package",
-        "Instala uma dependência no projeto (npm/pnpm/yarn, uv/pip ou cargo, pelo que o projeto usa). Use isto em vez de rodar `npm install`/`pip install` no shell. Chame direto: a ferramenta descobre o gerenciador sozinha — não investigue o projeto antes.",
-        {
-            "pacote": {"type": "string"},
-            "gerenciador": {
-                "type": "string",
-                "description": "npm, pnpm, yarn, uv, pip, cargo — opcional; o padrão é o do projeto",
-            },
-        },
-        ["pacote"],
-    ),
-    _def(
-        "uninstall_package",
-        "Remove uma dependência do projeto (npm/pnpm/yarn, uv/pip ou cargo).",
-        {"pacote": {"type": "string"}, "gerenciador": {"type": "string"}},
-        ["pacote"],
-    ),
-    # ---- arquivos pela rede ----
-    _def(
-        "download_file",
-        "Baixa uma URL http(s) para um arquivo dentro da pasta de trabalho.",
-        {"url": {"type": "string"}, "destino": {"type": "string"}},
-        ["url", "destino"],
-    ),
-    _def(
-        "upload_file",
-        "Envia um arquivo da pasta de trabalho para uma URL http(s) (PUT).",
-        {"caminho": {"type": "string"}, "url": {"type": "string"}},
-        ["caminho", "url"],
-    ),
-]
-
-#: Todas as ferramentas que executam algo no disco ou na máquina.
-ESCRITA = {
-    "write_file",
-    "edit_file",
-    "str_replace_editor",
-    "delete_file",
-    "create_directory",
-    "move_file",
-    "copy_file",
-    "rename_file",
-    "delete_directory",
-    "git_commit",
-    "git_push",
-    "git_pull",
-    "install_package",
-    "uninstall_package",
-    "apply_patch",
-    "download_file",
-    "upload_file",
-}
-
-#: Ferramentas que recebem um `caminho` e por isso passam pela checagem de pasta.
-FERRAMENTAS_DE_ARQUIVO = {
-    "read_file",
-    "write_file",
-    "edit_file",
-    "str_replace_editor",
-    "list_dir",
-    "search_files",
-    "delete_file",
-    "create_directory",
-    "move_file",
-    "copy_file",
-    "rename_file",
-    "delete_directory",
-    "get_problems",
-    "linter",
-    "download_file",
-    "upload_file",
-}
-
-#: Tudo o que **alcança a máquina da pessoa**: os arquivos, o shell, o interpretador de
-#: código, o ambiente e o git.
-#:
-#: "Não leia meus arquivos" tem de tirar o grupo inteiro, não só `read_file`: o mesmo
-#: conteúdo fica a um `shell` (`cat`, `dir`) ou a um `code_interpreter` (`os.environ`,
-#: `pathlib`) de distância. Antes, `SEM_ARQUIVOS` tirava só `FERRAMENTAS_DE_ARQUIVO` e o
-#: agente ainda respondia "que informações internas eu consigo saber" com o ambiente da
-#: máquina lido por outra porta — foi assim que uma proibição explícita de acesso local
-#: terminou em acesso local (achado do dono, 02/10/2026).
-FERRAMENTAS_LOCAIS = frozenset(
-    set(FERRAMENTAS_DE_ARQUIVO)
-    | {
-        "apply_patch",
-        "shell",
-        "terminal",
-        "code_interpreter",
-        "get_environment",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "git_commit",
-        "git_push",
-        "git_pull",
-        "install_package",
-        "uninstall_package",
-        "grep",
-        "search_codebase",
-        "regex_search",
-        "vector_search",
-    }
-)
-
-#: O que executa **comando** na máquina. "Não use o shell" tira este grupo — e não os 33,
-#: porque quem proíbe o shell continua podendo pedir a leitura de um arquivo pelo caminho
-#: próprio. `code_interpreter` e os gerenciadores de pacote entram junto: os três rodam
-#: código na máquina, e deixar qualquer um deles de fora transforma a proibição em enfeite
-#: (um `os.environ` no interpretador lê o mesmo que o shell leria).
-FERRAMENTAS_DE_SHELL = frozenset(
-    {"shell", "terminal", "code_interpreter", "install_package", "uninstall_package"}
-)
-
-#: O que lê o **estado da máquina**: ambiente, versões, caminhos e o que está rodando.
-#: É o grupo do `get_environment` — o que responde "qual o SO", "quais as variáveis de
-#: ambiente", "quais processos". `shell` e `code_interpreter` entram porque respondem a
-#: mesma pergunta por outra porta (o QA viu exatamente isso: o Koda devolveu SO, caminhos,
-#: shell e Python depois de o usuário proibir o acesso local).
-FERRAMENTAS_DO_AMBIENTE = frozenset(
-    {"get_environment", "shell", "terminal", "code_interpreter"}
-)
-
-#: Ferramentas de arquivo com **dois** caminhos na chamada: os dois passam pela checagem
-#: de pasta, senão mover para fora do projeto passaria batido.
-CAMINHOS_EXTRA: dict[str, tuple[str, ...]] = {
-    "move_file": ("origem", "destino"),
-    "copy_file": ("origem", "destino"),
-    "download_file": ("destino",),
-}
-
-#: Quantos redirecionamentos o `url_reader` segue antes de desistir.
-SALTOS_MAXIMOS = 5
-
-
-def catalogo(negadas: set[str] | None = None) -> list[dict[str, Any]]:
-    """Catálogo enviado ao modelo, sem as ferramentas desligadas na configuração."""
-    if not negadas:
-        return DEFINICOES
-    proibidas = {canonico(nome) for nome in negadas}
-    return [
-        item
-        for item in DEFINICOES
-        if item["function"]["name"] not in proibidas
-    ]
 
 
 # ---------------------------------------------------------------- utilidades
@@ -1197,13 +420,13 @@ def _inteiro(valor: Any, padrao: int) -> int:
 def _limitar(texto: str) -> str:
     """Corta o texto no teto de saída, mantendo cabeça **e cauda**.
 
-    Antes era `texto[:LIMITE_SAIDA]`: a cauda sumia, e num comando longo é nela que está o
+    Antes era `texto[:LIMITES.saida]`: a cauda sumia, e num comando longo é nela que está o
     que interessa (resultado do build, erro do teste, último log). Sem o fim, o modelo
     repetia o comando para ver o que faltou — o mesmo custo em tokens, duas vezes (achado 11
     do QA). O corte com cabeça e cauda vem do material de referência, em
     `limites_de_saida.py`.
     """
-    return limites_de_saida.cortar_cabeca_e_cauda(texto, LIMITE_SAIDA)
+    return cortar_cabeca_e_cauda(texto, LIMITES.saida)
 
 
 def _percorrer_pasta(base: Path, visitar: Any) -> tuple[int, str | None]:
@@ -1221,9 +444,9 @@ def _percorrer_pasta(base: Path, visitar: Any) -> tuple[int, str | None]:
             with os.scandir(pasta) as entradas:
                 for entrada in entradas:
                     visitados += 1
-                    if visitados > LIMITE_ITENS_VARREDURA:
+                    if visitados > LIMITES.itens_varredura:
                         return visitados - 1, "itens"
-                    if time.monotonic() - inicio > LIMITE_TEMPO_VARREDURA_S:
+                    if time.monotonic() - inicio > LIMITES.tempo_varredura_s:
                         return visitados, "tempo"
                     if entrada.name in PASTAS_IGNORADAS:
                         continue
@@ -1262,9 +485,9 @@ def _encurtar_linha(linha: str) -> str:
     O marcador vai no lugar do resto e com a quebra no fim: a linha seguinte não pode se
     emendar na cortada, senão o modelo lê como se fosse uma só.
     """
-    if len(linha) <= LIMITE_DE_LINHA:
+    if len(linha) <= LIMITES.linha:
         return linha
-    return linha[:LIMITE_DE_LINHA] + "... [linha truncada]\n"
+    return linha[:LIMITES.linha] + "... [linha truncada]\n"
 
 
 def _ler_trecho(
@@ -1277,7 +500,7 @@ def _ler_trecho(
     enchia a RAM do app antes de o `_limitar` entrar em ação. Aqui a memória fica limitada
     ao trecho pedido (ou ao teto), e o total é contado na passagem.
     """
-    teto = LIMITE_LEITURA
+    teto = LIMITES.leitura
     guardadas: list[str] = []
     acumulado = 0
     total = 0
@@ -1402,774 +625,6 @@ def _escrever_atomico(rota: Path, texto: str) -> None:
         temporario.unlink(missing_ok=True)
 
 
-#: Onde os programas costumam ficar no Windows. O app é aberto pelo Explorer, e o PATH que
-#: ele herda **não** é o mesmo do terminal de quem instalou: `node`, `npm`, `git` e `python`
-#: somem sem que nada esteja quebrado. Sem isto, metade dos comandos do projeto morria em
-#: "is not recognized" — e o modelo tentava de novo, de outro jeito, até gastar a tarefa.
-LUGARES_DE_PROGRAMA = (
-    r"C:\Program Files\nodejs",
-    r"C:\Program Files (x86)\nodejs",
-    r"~\AppData\Roaming\npm",
-    r"~\AppData\Local\Programs\nodejs",
-    r"C:\Program Files\Git\cmd",
-    r"C:\Program Files\Git\bin",
-    r"~\AppData\Local\Programs\Python",
-    r"~\AppData\Local\Programs\Python\Scripts",
-    r"~\AppData\Local\Microsoft\WindowsApps",
-    r"~\AppData\Roaming\Python",
-    r"C:\Python313",
-    r"C:\Python312",
-    r"C:\Python311",
-    r"C:\Python310",
-    r"~\.local\bin",
-    r"~\.cargo\bin",
-    r"~\scoop\shims",
-    r"C:\ProgramData\chocolatey\bin",
-)
-
-#: O PATH aumentado, montado uma vez por processo (a busca em disco é cara para repetir).
-_PATH_AUMENTADO: str | None = None
-
-
-def _path_com_programas() -> str:
-    """O PATH do processo **mais** os lugares conhecidos que existem de verdade.
-
-    Só entra o diretório que tem executável dentro: adivinhar caminho não resolve nada.
-    """
-    global _PATH_AUMENTADO
-    if _PATH_AUMENTADO is not None:
-        return _PATH_AUMENTADO
-
-    atual = os.environ.get("PATH", "")
-    partes = atual.split(os.pathsep) if atual else []
-    vistos = {p.rstrip("\\/").lower() for p in partes}
-
-    extras: list[str] = []
-    for bruto in LUGARES_DE_PROGRAMA:
-        base = Path(os.path.expanduser(bruto))
-        candidatos = [base]
-        if base.name == "Python":  # as versões ficam em subpastas: Python\Python311
-            candidatos = sorted(
-                (filho for filho in base.glob("Python3*") if filho.is_dir()), reverse=True
-            )
-        for pasta in candidatos:
-            if not pasta.is_dir():
-                continue
-            chave = str(pasta).rstrip("\\/").lower()
-            if chave in vistos:
-                continue
-            if not any(pasta.glob("*.exe")):
-                continue
-            vistos.add(chave)
-            extras.append(str(pasta))
-            # As ferramentas de linha de comando dos scripts ficam ao lado.
-            scripts = pasta / "Scripts"
-            if scripts.is_dir() and any(scripts.glob("*.exe")):
-                vistos.add(str(scripts).lower())
-                extras.append(str(scripts))
-
-    _PATH_AUMENTADO = os.pathsep.join([*partes, *extras]) if extras else atual
-    return _PATH_AUMENTADO
-
-
-def _ambiente_do_comando(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """O ambiente de **todo** processo filho: PATH aumentado + o que o chamador pedir.
-
-    Centralizado de propósito. Antes o `shell` usava o PATH aumentado e o git, o
-    `shutil.which("node")` e o linter usavam o PATH **cru** do processo — e quando o app é
-    aberto pelo Explorer (e não por um terminal) o PATH herdado não tem `node`, `git` nem
-    `npm`. O resultado era o modelo recebendo "não está instalado nesta máquina" para um
-    programa que existe.
-    """
-    ambiente = {**os.environ, "PATH": _path_com_programas()}
-    if extra:
-        ambiente.update(extra)
-    return ambiente
-
-
-def _which(programa: str) -> str | None:
-    """`shutil.which` no PATH **aumentado** — o mesmo que o shell enxerga."""
-    return shutil.which(programa, path=_path_com_programas())
-
-
-def _sem_janela() -> dict[str, Any]:
-    """Impede a janela de console piscando no Windows em cada subprocesso.
-
-    O backend é criado pelo Rust com `CREATE_NO_WINDOW`, mas isso **não** se propaga aos
-    netos: cada `Popen`/`subprocess.run` daqui abria um console próprio quando o app roda
-    empacotado (sem terminal na frente). No Linux/macOS devolve vazio.
-    """
-    if os.name != "nt":
-        return {}
-    return {"creationflags": subprocess.CREATE_NO_WINDOW}
-
-
-def _kwargs_de_processo(
-    *, shell: bool, workspace: Path, env: dict[str, str] | None = None
-) -> dict[str, Any]:
-    """Os argumentos comuns de criação de processo — com grupo/sessão **próprio**.
-
-    `start_new_session=True` (Unix) é o que torna `os.killpg` seguro: sem ele o filho nasce
-    no **mesmo grupo do backend**, e `killpg` matava o grupo inteiro — inclusive o próprio
-    Koda (reproduzido: o backend morria com 137 ao apertar Parar). No Windows o equivalente
-    é o `taskkill /T`, que já derruba a árvore pelo pid.
-
-    `stdin=DEVNULL` é obrigatório num agente automático: com o stdin herdado, um comando que
-    pede entrada fica pendurado esperando algo que nunca vem (o modo dev herda o terminal).
-    """
-    return {
-        "shell": shell,
-        "cwd": str(workspace),
-        "env": _ambiente_do_comando(env),
-        "stdin": subprocess.DEVNULL,
-        "start_new_session": os.name != "nt",
-        **_sem_janela(),
-    }
-
-
-def _argv_shell(comando: str) -> str:
-    """O comando como o shell do sistema espera recebê-lo.
-
-    **String, e não lista** — e isso é o conserto de metade dos comandos que falhavam. Com
-    `["cmd", "/c", comando]` o `cmd` come as aspas internas: `python -c "print(1 + 1)"`
-    chegava no Python como `print(1 + 1` e voltava `exit code: 1`. Medido com os comandos
-    que os modelos escrevem: **6 de 12 falhavam** na lista contra **0 de 12** com a string
-    (que é o `shell=True` do Python). O modelo tentava de novo, tentava de outro jeito, e
-    era isso que parecia "os modelos não conseguem rodar comando".
-    """
-    return comando
-
-
-#: Quando o shell não conhece o programa: em inglês e em português, cmd e PowerShell.
-NAO_RECONHECIDO = re.compile(
-    r"is not recognized|n[aã]o [eé] reconhecido|CommandNotFound|n[aã]o pode ser encontrado",
-    re.IGNORECASE,
-)
-
-#: Programas que o modelo mais tenta rodar. A dica abaixo responde a pergunta que ele ia
-#: fazer em três tentativas — "então o que existe nesta máquina?".
-PROGRAMAS = ("python", "python3", "py", "node", "npm", "npx", "git", "pip", "uv")
-
-
-def _dica_de_programa(saida: str) -> str:
-    """O que fazer quando o comando não existe nesta máquina.
-
-    Sem isto o modelo tentava `python`, depois `python3`, depois `py`, depois `cmd`… e
-    gastava a tarefa inteira nisso — era o "tenta tudo e não vai" que o dono descreveu. Com
-    a lista na mão ele muda de caminho na primeira tentativa.
-    """
-    if not NAO_RECONHECIDO.search(saida):
-        return ""
-    achados = []
-    for programa in PROGRAMAS:
-        caminho = _which(programa)
-        if caminho:
-            achados.append(f"{programa} → {caminho}")
-    if not achados:
-        return "\n\nDICA: nenhum destes programas está no PATH desta máquina: " + ", ".join(
-            PROGRAMAS
-        )
-    return (
-        "\n\nDICA: este programa não existe (ou não está no PATH). O que **existe** aqui: "
-        + " · ".join(achados)
-        + ". Use um destes, ou resolva por outra ferramenta (arquivo com `write_file`, "
-        "código com `code_interpreter`) em vez de insistir no mesmo nome."
-    )
-
-
-def _formatar(proc: subprocess.CompletedProcess[str]) -> str:
-    saida = f"exit code: {proc.returncode}\n"
-    if proc.stdout:
-        saida += f"--- stdout ---\n{proc.stdout}"
-    if proc.stderr:
-        saida += f"\n--- stderr ---\n{proc.stderr}"
-    return _limitar((saida.strip() or "(sem saída)") + _dica_de_programa(saida))
-
-
-#: Código de saída no começo da saída de um comando/script (`_formatar`).
-_CODIGO_DE_SAIDA = re.compile(r"^exit code:\s*(-?\d+)", re.MULTILINE)
-
-
-def _codigo_de_saida(saida: str) -> int | None:
-    """O código de retorno **real** lido do retorno formatado (`None` se não houver).
-
-    Existia só o teste `"exit code: 0" in saida` espalhado pelo código — frágil, porque
-    casa com a frase em qualquer lugar da saída. Aqui é o número.
-    """
-    achado = _CODIGO_DE_SAIDA.search(saida or "")
-    return int(achado.group(1)) if achado else None
-
-
-#: Nomes que nunca devem entrar num commit automático sem a pessoa saber: segredo,
-#: credencial, chave e afins. `git add -A` num projeto sem `.gitignore` subia tudo isso.
-_SENSIVEIS = frozenset(
-    {
-        ".env",
-        ".env.local",
-        ".env.production",
-        ".env.development",
-        ".npmrc",
-        ".pypirc",
-        "id_rsa",
-        "id_ed25519",
-        "credentials.json",
-        "secrets.json",
-        "serviceaccount.json",
-    }
-)
-
-
-def _git_add_seguro(workspace: Path) -> str:
-    """`git add -A` sem levar segredo junto — e avisando quando algo foi posto de lado.
-
-    Num projeto sem `.gitignore` o `git add -A` sobe `.env` e chave para o commit, e o
-    commit vai para o remoto. Aqui o que tem cara de segredo é **desmarcado** depois do add
-    e o retorno avisa, em vez de subir em silêncio.
-    """
-    adicionado = _rodar_lista(["git", "add", "-A"], workspace)
-    if _codigo_de_saida(adicionado) != 0:
-        return adicionado
-    listados = _rodar_lista(["git", "diff", "--cached", "--name-only"], workspace)
-    if _codigo_de_saida(listados) != 0:
-        return adicionado
-    corpo = listados.split("--- stdout ---\n", 1)[-1]
-    sensiveis = [
-        linha.strip()
-        for linha in corpo.splitlines()
-        if linha.strip() and Path(linha.strip()).name.lower() in _SENSIVEIS
-    ]
-    if not sensiveis:
-        return adicionado
-    _rodar_lista(["git", "reset", "-q", "--", *sensiveis], workspace)
-    return (
-        "AVISO: arquivo(s) com cara de segredo ficaram **fora** do commit ("
-        + ", ".join(sensiveis)
-        + "). Crie um .gitignore para silenciar isto.\n"
-        + adicionado
-    )
-
-
-def _rodar_lista(
-    argv: list[str],
-    workspace: Path,
-    tempo: float = TEMPO_COMANDO,
-    env: dict[str, str] | None = None,
-) -> str:
-    """Executa um argv direto (sem shell) e devolve a saída formatada.
-
-    Passa pelo **mesmo** caminho de criação de processo do `shell` (`_kwargs_de_processo`):
-    grupo/sessão próprio, stdin fechado, sem janela no Windows e PATH aumentado. No timeout
-    mata a **árvore** — `subprocess.run(timeout=…)` só mata o pai e deixava filho órfão
-    rodando (o `npm` morria e o `node` do build continuava vivo).
-
-    `env` é mesclado ao ambiente: é o que pede ao git para **não** abrir prompt de senha
-    (`GIT_TERMINAL_PROMPT=0`) — sem isso um `git push` num remoto que pede credencial ficava
-    parado até o teto, sem nada na tela.
-    """
-    restante = _restante_da_ferramenta()
-    if restante is not None:
-        if restante <= 0:
-            return "ERRO: o prazo desta chamada de ferramenta acabou antes da execução."
-        tempo = min(float(tempo), restante)
-    if not _reservar_processo():
-        return (
-            f"ERRO: já há {LIMITE_PROCESSOS_CONCORRENTES} comandos em execução. "
-            "Aguarde um terminar ou encerre um comando que ficou rodando."
-        )
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            # stderr **no mesmo cano** do stdout: com dois canos separados o texto era
-            # concatenado no fim e a ordem original se perdia — num log de build/teste é
-            # justamente a ordem que diz onde o erro apareceu.
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            **_kwargs_de_processo(shell=False, workspace=workspace, env=env),
-        )
-    except FileNotFoundError:
-        _liberar_processo()
-        return f"ERRO: executável não encontrado: {argv[0]}"
-    except OSError as exc:
-        _liberar_processo()
-        return f"ERRO ao rodar {argv[0]!r}: {exc}"
-
-    rodando = ComandoRodando(
-        uuid.uuid4().hex[:8], " ".join(argv), proc, vaga_reservada=True
-    )
-    fim = time.monotonic() + float(tempo)
-    while True:
-        evento_cancelamento = _CANCELAMENTO_DA_FERRAMENTA.get()
-        if evento_cancelamento is not None and evento_cancelamento.is_set():
-            rodando.matar()
-            rodando.fechar_leitores()
-            rodando.liberar_vaga()
-            return "ERRO: a pessoa cancelou a tarefa; o processo foi interrompido."
-        restante = fim - time.monotonic()
-        if restante <= 0:
-            break
-        if rodando.esperar(min(0.2, restante)):
-            rodando.fechar_leitores()
-            rodando.liberar_vaga()
-            return _formatar(
-                subprocess.CompletedProcess(
-                    args=argv, returncode=proc.returncode or 0, stdout=rodando.texto(), stderr=""
-                )
-            )
-    rodando.matar()
-    rodando.fechar_leitores()
-    rodando.liberar_vaga()
-    return (
-        f"ERRO: comando excedeu {tempo:g}s e foi interrompido\n"
-        f"--- saída até a interrupção ---\n{rodando.texto()}"
-    )
-
-
-class ComandoRodando:
-    """Um comando que passou da olhada e continua vivo, com a saída guardada.
-
-    A saída é lida por duas threads (stdout e stderr) que só **acrescentam** à lista — quem
-    espera é a thread principal, no `wait` do processo. Assim a saída parcial está sempre
-    disponível para a próxima olhada, e nada do que o comando já escreveu se perde.
-
-    O processo é **deste** comando: `dono` diz de que tarefa ele é, `workspace` diz de que
-    pasta, e `deadline` diz até quando ele pode viver. É o que permite o encerramento
-    limpo no shutdown e o teto absoluto de verdade (ver `_relatorio_de_olhada`).
-    """
-
-    def __init__(
-        self,
-        identificador: str,
-        comando: str,
-        proc: subprocess.Popen[str],
-        *,
-        dono: str = "",
-        workspace: Path | None = None,
-        deadline: float | None = None,
-        vaga_reservada: bool = False,
-    ) -> None:
-        self.id = identificador
-        self.comando = comando
-        self.proc = proc
-        self.saida: list[str] = []
-        self.erro: list[str] = []
-        self.inicio = time.monotonic()
-        #: Teto **absoluto** do processo (monotonic) ou `None`. É o que faltava: antes o
-        #: `tempo_limite` só limitava cada olhada, e o comando podia viver para sempre com
-        #: o modelo dizendo "continuar".
-        self.deadline = deadline
-        self.vaga_reservada = vaga_reservada
-        self.dono = dono
-        self.workspace = workspace
-        #: Quantos caracteres o comando já escreveu (contador, e não `len()` da lista: a
-        #: saída guardada é cortada no teto, e o corte faria um comando tagarela parecer
-        #: parado).
-        self.escrito = 0
-        #: Trava do contador: as duas threads de leitura escrevem nele ao mesmo tempo, e sem
-        #: isto um `escrito` inconsistente faria o comando parecer parado (falso "travado").
-        self._trava = threading.Lock()
-        #: Quantas olhadas já houve, e quantas seguidas não trouxeram **nada novo**.
-        self.olhadas = 0
-        self.paradas = 0
-        #: Marca d'água da última olhada que viu saída nova, e quando isso foi.
-        self._visto = 0
-        self._ultima_saida = self.inicio
-        self._leitores: list[threading.Thread] = []
-        for fluxo, destino in ((proc.stdout, self.saida), (proc.stderr, self.erro)):
-            if fluxo is not None:
-                leitor = threading.Thread(target=self._ler, args=(fluxo, destino), daemon=True)
-                leitor.start()
-                self._leitores.append(leitor)
-
-    def _ler(self, fluxo: Any, destino: list[str]) -> None:
-        try:
-            for linha in fluxo:
-                with self._trava:
-                    destino.append(linha)
-                    self.escrito += len(linha)
-                self._ultima_saida = time.monotonic()
-        except (ValueError, OSError):
-            # O processo morreu e levou o cano junto: o que já foi lido fica.
-            pass
-
-    def fechar_leitores(self, tempo: float = 5.0) -> None:
-        """Espera as threads de leitura esvaziarem os canos. Idempotente.
-
-        `proc.wait()` volta assim que o processo morre, **antes** de as threads lerem o que
-        ainda estava no buffer do cano — e a última linha do comando se perdia (medido: 2
-        falhas em 300 `echo`). A execução só é considerada encerrada depois que os leitores
-        terminaram: é isso que garante a saída completa para o modelo.
-        """
-        limite = time.monotonic() + tempo
-        for leitor in self._leitores:
-            leitor.join(max(0.05, limite - time.monotonic()))
-
-    def olhar(self) -> int:
-        """Conta a olhada e devolve quantas seguidas vieram sem saída nova.
-
-        O contador é o que diz se o comando está **trabalhando** ou **parado** — e é isso
-        que decide se ele continua vivo ou é interrompido. Tempo sozinho não decide nada:
-        build de duas horas que está imprimindo é trabalho.
-        """
-        self.olhadas += 1
-        with self._trava:
-            antes = self.escrito
-        if antes > self._visto:
-            self._visto = antes
-            self.paradas = 0
-            self._ultima_saida = time.monotonic()
-        else:
-            self.paradas += 1
-        return self.paradas
-
-    def mudo_desde(self) -> float:
-        """Segundos desde a última linha escrita — a **inatividade** de verdade."""
-        return time.monotonic() - self._ultima_saida
-
-    def decorrido(self) -> float:
-        return time.monotonic() - self.inicio
-
-    def terminou(self) -> bool:
-        return self.proc.poll() is not None
-
-    def esperar(self, segundos: float) -> bool:
-        """Espera até `segundos`. `True` quando o comando terminou nesse meio-tempo."""
-        try:
-            self.proc.wait(timeout=max(0.05, segundos))
-            return True
-        except subprocess.TimeoutExpired:
-            return False
-
-    def texto(self) -> str:
-        """O que o comando escreveu até agora — o fim da saída, que é onde está o erro."""
-        junto = "".join(self.saida)
-        if self.erro:
-            junto += ("\n--- stderr ---\n" if junto else "--- stderr ---\n") + "".join(self.erro)
-        junto = junto.strip()
-        if len(junto) > LIMITE_SAIDA_RODANDO:
-            fora = len(junto) - LIMITE_SAIDA_RODANDO
-            return (
-                f"(...{fora} caracteres anteriores descartados...)\n"
-                + junto[-LIMITE_SAIDA_RODANDO:]
-            )
-        return junto or "(sem saída até agora)"
-
-    def matar(self) -> None:
-        """Mata o processo **e a árvore dele**. Não mexe na saída já guardada."""
-        if self.terminou():
-            self.liberar_vaga()
-            return
-        _matar_arvore(self.proc.pid)
-        if not self.esperar(2):
-            # `taskkill /T` pode não ter permissão para encerrar a árvore em ambientes
-            # restritos. Ainda assim, o processo que o Koda iniciou não pode ficar vivo
-            # fora do registro: encerra o pai como fallback e espera o estado final.
-            try:
-                self.proc.kill()
-            except OSError:
-                pass
-            self.esperar(5)
-        if self.terminou():
-            self.liberar_vaga()
-
-    def liberar_vaga(self) -> None:
-        global _PROCESSOS_ATIVOS
-        with _TRAVA_PROCESSOS:
-            if self.vaga_reservada:
-                self.vaga_reservada = False
-                _PROCESSOS_ATIVOS = max(0, _PROCESSOS_ATIVOS - 1)
-
-    def parar(self) -> str:
-        """Interrompe o comando e a árvore dele, e devolve o que já tinha saído."""
-        if self.terminou():
-            self.liberar_vaga()
-            self.fechar_leitores()
-            return _formatar(
-                subprocess.CompletedProcess(
-                    args=self.comando,
-                    returncode=self.proc.returncode or 0,
-                    stdout=self.texto(),
-                    stderr="",
-                )
-            )
-        self.matar()
-        self.fechar_leitores()
-        return (
-            f"interrompido a pedido (pid {self.proc.pid})\n"
-            f"--- saída até a interrupção ---\n{self.texto()}"
-        )
-
-
-def _matar_arvore(pid: int) -> None:
-    """Mata o processo **e os filhos** dele, sem tocar no grupo do backend.
-
-    No Windows quem sabe derrubar a árvore é o `taskkill /T`. No Unix, `killpg` só é seguro
-    porque todo filho nasce com `start_new_session=True` — o grupo dele é próprio. A
-    checagem `grupo == os.getpgid(0)` é a rede de segurança: se por qualquer motivo o filho
-    tiver nascido no **grupo do Koda**, o `killpg` derrubaria o backend junto (era o bug
-    reproduzido, exit 137), então aí mata-se só o processo.
-    """
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                **_sem_janela(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-        return
-    try:
-        grupo = os.getpgid(pid)
-        if grupo == os.getpgid(0):
-            os.kill(pid, signal.SIGKILL)
-        else:
-            os.killpg(grupo, signal.SIGKILL)
-    except OSError:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-
-def _relatorio_de_olhada(rodando: "ComandoRodando") -> str:
-    """O retorno da olhada: o comando **não** morreu, e o modelo decide o que fazer.
-
-    As duas últimas linhas são o que o modelo precisa para agir — sem elas ele responde
-    texto, a conversa trava e o comando fica rodando sem ninguém olhando.
-
-    Três decisões, nesta ordem, e todas do **backend** (o modelo não é a autoridade do
-    lifecycle do processo):
-
-    1. **teto absoluto** (`deadline`): passou do tempo pedido em `tempo_limite`, é morto e
-       o resultado volta. Antes o `tempo_limite` só limitava *cada olhada*, e um comando
-       podia viver para sempre com o modelo chamando `continuar`;
-    2. **inatividade**: mudo por `INATIVIDADE_MAX_S` segundos, é travado — esperando
-       entrada, em laço mudo ou morto por dentro. Medido em segundos, não em olhadas;
-    3. caso contrário, devolve a saída e deixa o modelo decidir (continuar ou parar).
-    """
-    minutos = rodando.decorrido() / 60
-    paradas = rodando.olhar()
-    mudo = rodando.mudo_desde()
-
-    if rodando.deadline is not None and time.monotonic() >= rodando.deadline:
-        _RODANDO.pop(rodando.id, None)
-        rodando.matar()
-        rodando.fechar_leitores()
-        return (
-            f"INTERROMPIDO: o comando atingiu o tempo limite de "
-            f"{rodando.deadline - rodando.inicio:.0f}s — id={rodando.id}\n"
-            f"comando: {rodando.comando}\n"
-            f"--- saída até a interrupção ---\n{rodando.texto()}\n"
-            "--- fim da saída ---\n"
-            "O teto de tempo do processo é do backend e não se estende por `continuar`. "
-            "Isso **não** é o fim da tarefa: siga por outro caminho (comando mais direto, "
-            "`code_interpreter`, ou a ferramenta de arquivo) e diga o que ficou pronto."
-        )
-
-    if paradas >= OLHADAS_SEM_SAIDA or mudo >= INATIVIDADE_MAX_S:
-        _RODANDO.pop(rodando.id, None)
-        # Interromper é **matar**, não só tirar do registro. Sem o `parar()` aqui o processo
-        # continuava rodando e, pior, órfão: fora do registro, ninguém conseguia pará-lo pelo
-        # id. A mensagem dizia "interrompi" e era falso.
-        rodando.parar()
-        return (
-            f"INTERROMPIDO: o comando parece TRAVADO — {mudo / 60:.0f} min sem escrever "
-            f"nada — id={rodando.id}\n"
-            f"comando: {rodando.comando}\n"
-            f"--- saída até a interrupção ---\n{rodando.texto()}\n"
-            f"--- fim da saída ---\n"
-            "Comando vivo mas mudo por todo esse tempo está travado (esperando entrada, em "
-            "laço mudo, ou morto por dentro), e continuar esperando não ia resolver. "
-            "Isso **não** é o fim da tarefa: siga por outro caminho (comando mais direto, "
-            "`code_interpreter`, ou a ferramenta de arquivo) e diga o que ficou pronto."
-        )
-
-    aviso = ""
-    if rodando.olhadas >= OLHADAS_ATE_COBRAR:
-        # Sem teto por tempo, este é o freio do "vou continuar" infinito: o modelo é cobrado
-        # a decidir — mas quem decide continua sendo ele.
-        aviso = (
-            f"\nATENÇÃO: já são {rodando.olhadas} olhadas neste mesmo comando "
-            f"({minutos:.0f} min). Se ele não termina sozinho (servidor, programa com janela, "
-            "prévia), **pare agora**. Se está perto de terminar, continue — mas decida, não "
-            "fique só acompanhando."
-        )
-
-    restante = ""
-    if rodando.deadline is not None:
-        restante = (
-            f"\nTempo restante até o teto do processo: "
-            f"{max(0, rodando.deadline - time.monotonic()):.0f}s."
-        )
-
-    return (
-        f"AINDA RODANDO ({minutos:.1f} min) — id={rodando.id}\n"
-        f"comando: {rodando.comando}\n"
-        f"--- saída até agora ---\n{rodando.texto()}\n"
-        f"--- fim da saída até agora ---\n"
-        f"O comando NÃO foi interrompido: ele continua rodando.\n"
-        f"- Está indo bem e pode demorar? Continue acompanhando: "
-        f'shell com {{"continuar": "{rodando.id}"}}\n'
-        f"- Não termina sozinho (servidor, programa com janela, prévia) ou travou? Pare: "
-        f'shell com {{"parar": "{rodando.id}"}}'
-        f"{restante}{aviso}"
-    )
-
-
-def _comecar(
-    comando: str,
-    workspace: Path,
-    *,
-    tempo: int = TEMPO_COMANDO,
-    dono: str = "",
-) -> "ComandoRodando":
-    """Cria o processo com grupo/sessão próprio e o registra em `_RODANDO`.
-
-    O `deadline` é calculado **aqui**, uma vez: é o teto absoluto do processo, e não muda
-    por `continuar` (o modelo não estica o prazo do backend).
-    """
-    if not _reservar_processo():
-        raise RuntimeError(
-            f"limite global de {LIMITE_PROCESSOS_CONCORRENTES} comandos concorrentes atingido"
-        )
-    try:
-        proc = subprocess.Popen(
-            _argv_shell(comando),
-            stdout=subprocess.PIPE,
-            # Mesmo cano para stdout e stderr: preserva a ordem das linhas.
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            **_kwargs_de_processo(shell=True, workspace=workspace),
-        )
-    except BaseException:
-        _liberar_processo()
-        raise
-    identificador = uuid.uuid4().hex[:8]
-    prazo = time.monotonic() + tempo if tempo and tempo > 0 else None
-    rodando = ComandoRodando(
-        identificador,
-        comando,
-        proc,
-        dono=dono,
-        workspace=workspace,
-        deadline=prazo,
-        vaga_reservada=True,
-    )
-    _RODANDO[identificador] = rodando
-    return rodando
-
-
-def _acompanhar(
-    identificador: str, tempo: int, espera_maxima: float | None = None
-) -> str:
-    """Espera mais um tanto por um comando que já estava rodando."""
-    rodando = _RODANDO.get(identificador)
-    if rodando is None:
-        return (
-            f"ERRO: não há comando rodando com id {identificador!r} — ele já terminou ou o "
-            "id está errado. Rode o comando de novo se precisar."
-        )
-    # A espera nunca passa do que resta do teto absoluto: sem isto o `continuar` empurrava
-    # o fim do processo para depois do prazo.
-    restante = min(INTERVALO_DE_OLHADA, espera_maxima or INTERVALO_DE_OLHADA)
-    if rodando.deadline is not None:
-        restante = min(restante, max(0.05, rodando.deadline - time.monotonic()))
-    restante_chamada = _restante_da_ferramenta()
-    if restante_chamada is not None:
-        restante = min(restante, max(0.05, restante_chamada))
-    if rodando.esperar(min(tempo, restante)):
-        _RODANDO.pop(identificador, None)
-        rodando.fechar_leitores()
-        rodando.liberar_vaga()
-        return _formatar(
-            subprocess.CompletedProcess(
-                args=rodando.comando,
-                returncode=rodando.proc.returncode or 0,
-                stdout=rodando.texto(),
-                stderr="",
-            )
-        )
-    relatorio = _relatorio_de_olhada(rodando)
-    prazo_chamada = _restante_da_ferramenta()
-    if prazo_chamada is not None and prazo_chamada <= 0 and not rodando.terminou():
-        return (
-            "ERRO: o tempo desta chamada acabou; o comando continua registrado e pode ser "
-            "acompanhado ou cancelado.\n" + relatorio
-        )
-    return relatorio
-
-
-def _parar(identificador: str) -> str:
-    rodando = _RODANDO.pop(identificador, None)
-    if rodando is None:
-        return f"ERRO: não há comando rodando com id {identificador!r}."
-    return rodando.parar()
-
-
-def _rodar(
-    comando: str,
-    workspace: Path,
-    tempo: int = TEMPO_COMANDO,
-    dono: str = "",
-    espera_maxima: float | None = None,
-) -> str:
-    """Roda o comando e **não** o mata quando demora: devolve a olhada e segue vivo.
-
-    Era `subprocess.run(timeout=...)`, que interrompia o comando no limite — um build de
-    vinte minutos morria no meio e o trabalho ia junto. Agora o processo fica no registro e,
-    a cada `INTERVALO_DE_OLHADA`, o modelo recebe a saída até agora para decidir: continuar
-    acompanhando (`continuar`) ou parar (`parar`).
-
-    `tempo` é o teto **total** do processo, e agora é de verdade: ele vira `deadline` no
-    `ComandoRodando` e `continuar` não o estende. `dono` é a tarefa que começou o processo —
-    é o que permite o Parar derrubar só o que é dela.
-    """
-    try:
-        rodando = _comecar(comando, workspace, tempo=tempo, dono=dono)
-    except FileNotFoundError:
-        return f"ERRO: comando não encontrado: {comando.split()[0]}"
-    except RuntimeError as exc:
-        return f"ERRO: {exc}"
-    except OSError as exc:
-        return f"ERRO ao rodar {comando!r}: {exc}"
-
-    limite = min(tempo, INTERVALO_DE_OLHADA) if tempo else INTERVALO_DE_OLHADA
-    if espera_maxima is not None:
-        limite = min(limite, espera_maxima)
-    restante_chamada = _restante_da_ferramenta()
-    if restante_chamada is not None:
-        limite = min(limite, max(0.05, restante_chamada))
-    if rodando.esperar(limite):
-        _RODANDO.pop(rodando.id, None)
-        rodando.fechar_leitores()
-        rodando.liberar_vaga()
-        return _formatar(
-            subprocess.CompletedProcess(
-                args=comando,
-                returncode=rodando.proc.returncode or 0,
-                stdout=rodando.texto(),
-                stderr="",
-            )
-        )
-    relatorio = _relatorio_de_olhada(rodando)
-    prazo_chamada = _restante_da_ferramenta()
-    if prazo_chamada is not None and prazo_chamada <= 0 and not rodando.terminou():
-        return (
-            "ERRO: o tempo desta chamada acabou; o comando continua registrado e pode ser "
-            "acompanhado ou cancelado.\n" + relatorio
-        )
-    return relatorio
-
-
 # ---------------------------------------------------------------- web
 
 
@@ -2244,7 +699,7 @@ def _seguir_redirects(cliente: httpx.Client, url: str) -> httpx.Response | str:
     """
     atual = url
     resp: httpx.Response | None = None
-    for _ in range(SALTOS_MAXIMOS + 1):
+    for _ in range(LIMITES.saltos + 1):
         resp = cliente.get(atual, timeout=_timeout_httpx(25))
         destino = resp.headers.get("location")
         if not resp.is_redirect or not destino:
@@ -2258,7 +713,7 @@ def _seguir_redirects(cliente: httpx.Client, url: str) -> httpx.Response | str:
                 "Redirecionamento bloqueado."
             )
         atual = proximo
-    return f"ERRO: {url} redireciona em ciclo (mais de {SALTOS_MAXIMOS} saltos)"
+    return f"ERRO: {url} redireciona em ciclo (mais de {LIMITES.saltos} saltos)"
 
 
 def _limpar_texto(marcado: str) -> str:
@@ -2497,7 +952,7 @@ def _ler_pagina(url: str) -> str:
             # O corpo é lido com teto: página que responde 2 GB (ou `Content-Length`
             # mentiroso) enchia a memória do backend antes de o `_limitar` entrar em ação —
             # o corte tem que ser **na leitura**, não depois dela.
-            corpo = resp.text[: LIMITE_SAIDA * 8]
+            corpo = resp.text[: LIMITES.saida * 8]
 
         if resp.status_code >= 400:
             return f"ERRO: {url} respondeu HTTP {resp.status_code}."
@@ -3110,18 +1565,13 @@ def _ler_diff(diff: str) -> tuple[list[tuple[str, list[tuple[int, list[str], lis
     return arquivos, ""
 
 
-#: Até onde procurar o trecho de um hunk fora da linha pedida (o git aceita fuzz pequeno;
-#: aqui é generoso porque o arquivo pode ter sido editado entre o diff e a aplicação).
-TOLERANCIA_HUNK = 5000
-
-
 def _achar_bloco(linhas: list[str], esperado: int, antigas: list[str]) -> int | None:
     """Onde o trecho está de verdade: no lugar pedido, ou perto dele."""
     antigas = [item.rstrip("\r") for item in antigas]
     if not antigas:
         return min(max(esperado, 0), len(linhas))
     total = len(antigas)
-    for distancia in range(TOLERANCIA_HUNK + 1):
+    for distancia in range(LIMITES.tolerancia_hunk + 1):
         candidatos = {esperado} if distancia == 0 else {esperado - distancia, esperado + distancia}
         for posicao in candidatos:
             if posicao < 0 or posicao + total > len(linhas):
@@ -3262,7 +1712,6 @@ def executar(
         _CANCELAMENTO_DA_FERRAMENTA.reset(token_cancelamento)
         _PRAZO_DA_FERRAMENTA.reset(token)
 
-
 def _executar_impl(
     nome: str,
     argumentos: dict[str, Any],
@@ -3304,9 +1753,9 @@ def _executar_impl(
 
     if nome in ("shell", "terminal"):
         try:
-            tempo = min(int(argumentos.get("tempo_limite", TEMPO_COMANDO)), TEMPO_COMANDO_MAX)
+            tempo = min(int(argumentos.get("tempo_limite", LIMITES.tempo_comando)), LIMITES.tempo_comando_max)
         except (TypeError, ValueError):
-            tempo = TEMPO_COMANDO
+            tempo = LIMITES.tempo_comando
         # Acompanhar/parar vêm antes do comando: quem chama assim já tem um processo
         # rodando, e `comando` vem vazio de propósito.
         acompanhar = str(argumentos.get("continuar") or "").strip()
@@ -3314,7 +1763,7 @@ def _executar_impl(
             return _acompanhar(
                 acompanhar,
                 tempo,
-                espera_maxima=_timeout_da_ferramenta(INTERVALO_DE_OLHADA),
+                espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
             )
         interromper = str(argumentos.get("parar") or "").strip()
         if interromper:
@@ -3330,7 +1779,7 @@ def _executar_impl(
             workspace,
             tempo,
             dono,
-            espera_maxima=_timeout_da_ferramenta(INTERVALO_DE_OLHADA),
+            espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
         )
 
     if nome == "code_interpreter":
@@ -3473,16 +1922,16 @@ def _executar_impl(
         try:
             tudo = sorted(rota.iterdir())
             linhas = []
-            for item in tudo[:LIMITE_LISTAGEM]:
+            for item in tudo[:LIMITES.listagem]:
                 tipo = "[DIR] " if item.is_dir() else "      "
                 tamanho = "" if item.is_dir() else f"  {item.stat().st_size} B"
                 linhas.append(f"{tipo}{item.name}{tamanho}")
-            if len(tudo) > LIMITE_LISTAGEM:
+            if len(tudo) > LIMITES.listagem:
                 # Cortar calado faz o modelo achar que viu a pasta inteira e trabalhar com
                 # meia lista na cabeça. Dizer o que ficou de fora é o que ele precisa para
                 # pedir a parte que falta (ou usar `search_files`).
                 linhas.append(
-                    f"...(mostrando {LIMITE_LISTAGEM} de {len(tudo)} entradas desta pasta — "
+                    f"...(mostrando {LIMITES.listagem} de {len(tudo)} entradas desta pasta — "
                     "há mais; use search_files para achar um nome específico)"
                 )
         except OSError as exc:
@@ -3614,12 +2063,12 @@ def _executar_impl(
                 linhas.append(item.relative_to(workspace).as_posix())
             except ValueError:
                 linhas.append(item.as_posix())
-            return len(linhas) >= LIMITE_ARQUIVOS_BUSCA
+            return len(linhas) >= LIMITES.arquivos_busca
 
         visitados, parada = _percorrer_pasta(base, visitar)
         corpo = "\n".join(linhas) or "(nenhum arquivo com esse padrão)"
         if parada == "resultados":
-            corpo += f"\n...(limite de {LIMITE_ARQUIVOS_BUSCA} resultados)"
+            corpo += f"\n...(limite de {LIMITES.arquivos_busca} resultados)"
         elif parada in ("itens", "tempo"):
             corpo += (
                 f"\n...(busca limitada: {visitados} itens examinados; refine o padrão "
@@ -3712,7 +2161,7 @@ def _executar_impl(
                 # e ler tudo antes de gravar furava o teto de tamanho).
                 atual = url
                 resposta: httpx.Response | None = None
-                for _ in range(SALTOS_MAXIMOS + 1):
+                for _ in range(LIMITES.saltos + 1):
                     pedido = cliente.build_request("GET", atual)
                     resposta = cliente.send(pedido, stream=True)
                     destino_do_salto = resposta.headers.get("location")
@@ -3733,7 +2182,7 @@ def _executar_impl(
                     atual = proximo
                 else:
                     return (
-                        f"ERRO: {url} redireciona em ciclo (mais de {SALTOS_MAXIMOS} saltos)"
+                        f"ERRO: {url} redireciona em ciclo (mais de {LIMITES.saltos} saltos)"
                     )
                 with resposta:
                     if resposta.status_code >= 400:
@@ -3746,12 +2195,12 @@ def _executar_impl(
                             if restante is not None and restante <= 0:
                                 raise TimeoutError("prazo da chamada de ferramenta excedido")
                             total += len(pedaco)
-                            if total > LIMITE_REDE:
+                            if total > LIMITES.rede:
                                 arquivo.close()
                                 temporario.unlink(missing_ok=True)
                                 return (
                                     "ERRO: o arquivo passa de "
-                                    f"{LIMITE_REDE // 1_000_000} MB — baixe fora do Koda"
+                                    f"{LIMITES.rede // 1_000_000} MB — baixe fora do Koda"
                                 )
                             arquivo.write(pedaco)
                     os.replace(temporario, rota)
@@ -3775,8 +2224,8 @@ def _executar_impl(
         rota = _resolver(workspace, str(argumentos.get("caminho", "")))
         if not rota.is_file():
             return f"ERRO: arquivo não encontrado: {rota}"
-        if rota.stat().st_size > LIMITE_REDE:
-            return f"ERRO: {rota} passa de {LIMITE_REDE // 1_000_000} MB"
+        if rota.stat().st_size > LIMITES.rede:
+            return f"ERRO: {rota} passa de {LIMITES.rede // 1_000_000} MB"
         try:
             with httpx.Client(timeout=_timeout_httpx(120)) as cliente:
                 resposta = cliente.put(
@@ -3826,14 +2275,14 @@ def _executar_impl(
                 tamanho = caminho.stat().st_size
                 if tamanho > 2_000_000:
                     return False
-                if estado["bytes"] + tamanho > LIMITE_BYTES_VARREDURA:
-                    estado["motivo"] = f"{LIMITE_BYTES_VARREDURA // 1_000_000} MB lidos"
+                if estado["bytes"] + tamanho > LIMITES.bytes_varredura:
+                    estado["motivo"] = f"{LIMITES.bytes_varredura // 1_000_000} MB lidos"
                     return True
                 estado["bytes"] += tamanho
                 with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
                     for num, linha in enumerate(arquivo, 1):
-                        if time.monotonic() - inicio > LIMITE_TEMPO_VARREDURA_S:
-                            estado["motivo"] = f"{LIMITE_TEMPO_VARREDURA_S:g} s de busca"
+                        if time.monotonic() - inicio > LIMITES.tempo_varredura_s:
+                            estado["motivo"] = f"{LIMITES.tempo_varredura_s:g} s de busca"
                             return True
                         if padrao.search(linha[:2_000]):
                             rel = caminho.relative_to(workspace).as_posix()
@@ -3927,7 +2376,6 @@ def _executar_impl(
         return resultado
 
     return f"ERRO: ferramenta desconhecida: {nome}"
-
 
 def resumo(argumentos: dict[str, Any], limite: int = 120) -> str:
     """Argumentos em uma linha, para mostrar na interface."""
