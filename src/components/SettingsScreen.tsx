@@ -13,6 +13,8 @@ import {
   Loader2,
   Moon,
   Palette,
+  Plug,
+  PlugZap,
   Plus,
   Puzzle,
   RefreshCw,
@@ -1861,6 +1863,33 @@ export function SettingsScreen({
                           {mcp.description}
                         </p>
                       ) : null}
+                      {/*
+                        * O estado de **execução**: um servidor ligado mas que não subiu é a
+                        * diferença entre "tem ferramenta" e "tem a promessa de uma". Sem
+                        * esta linha, um comando errado parecia um servidor funcionando.
+                        */}
+                      {mcp.enabled ? (
+                        mcp.conectado ? (
+                          <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-emerald-400">
+                            <Plug className="h-3.5 w-3.5" strokeWidth={1.9} />
+                            conectado
+                            <span className="text-koda-fg/35">
+                              · {mcp.ferramentas}{' '}
+                              {mcp.ferramentas === 1 ? 'ferramenta' : 'ferramentas'}
+                            </span>
+                          </p>
+                        ) : (
+                          <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-4 text-amber-400/90">
+                            <PlugZap className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.9} />
+                            <span className="min-w-0 break-words">
+                              fora do ar
+                              {mcp.erro ? (
+                                <span className="text-koda-fg/35"> · {mcp.erro}</span>
+                              ) : null}
+                            </span>
+                          </p>
+                        )
+                      ) : null}
                       {mcp.command ? (
                         <p className="mt-1.5 truncate font-mono text-[11.5px] text-koda-fg/35">
                           {mcp.command}
@@ -1874,11 +1903,11 @@ export function SettingsScreen({
                 <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
                   <Cable className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
                   <p className="text-[13.5px] font-medium text-koda-fg/80">
-                    Nenhum servidor conectado
+                    Nenhum servidor configurado
                   </p>
                   <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
-                    Cadastre um servidor em “Adicionar MCP” — ele entra nesta lista para o
-                    agente ganhar novas ferramentas.
+                    Cadastre um servidor em “Adicionar MCP” — o Koda conecta nele e as
+                    ferramentas dele entram no chat.
                   </p>
                 </div>
               )}

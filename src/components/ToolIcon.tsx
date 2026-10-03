@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Wrench } from 'lucide-react'
-import { ferramentaCanonica } from '../tools'
+import { eFerramentaMcp, ferramentaCanonica } from '../tools'
 
 /**
  * Ícones das ferramentas: um desenho por ação, no mesmo traço do resto da interface
@@ -156,6 +156,21 @@ const GLYPHS: Record<string, ReactNode> = {
       <path d="M9.2 9.4h6M9.2 12.2h3.4M9.2 15h6M14.6 12.2h.6" />
     </>
   ),
+  // ---- skill: pacote de **instruções** (peça de quebra-cabeça) ----
+  quebraCabeca: (
+    <>
+      <path d="M9.4 4.3a2 2 0 0 1 4 0v.9h2.6a1.9 1.9 0 0 1 1.9 1.9v2.6h-.9a2 2 0 0 0 0 4h.9v2.6a1.9 1.9 0 0 1-1.9 1.9h-2.6v-.9a2 2 0 0 0-4 0v.9H6.8a1.9 1.9 0 0 1-1.9-1.9v-2.6h.9a2 2 0 0 0 0-4h-.9V7.1a1.9 1.9 0 0 1 1.9-1.9h2.6z" />
+    </>
+  ),
+  // ---- MCP: ferramenta que roda **fora** (conector com cabo) ----
+  conector: (
+    <>
+      <path d="M8.6 3.4v3.1M15.4 3.4v3.1" />
+      <path d="M6.4 6.5h11.2v2.3a5.6 5.6 0 0 1-11.2 0z" />
+      <path d="M12 14.4v1.9a3.6 3.6 0 0 1-3.6 3.6H6.6" />
+      <circle cx="5.6" cy="19.9" r="1.1" />
+    </>
+  ),
 }
 
 /** Ferramenta do backend -> desenho (os aliases apontam para o mesmo ícone). */
@@ -197,6 +212,7 @@ const POR_NOME: Record<string, string> = {
   git_diff: 'diff',
   git_log: 'historico',
   git_commit: 'commit',
+  use_skill: 'quebraCabeca',
 }
 
 export function ToolIcon({
@@ -206,7 +222,11 @@ export function ToolIcon({
   name: string
   className?: string
 }) {
-  const desenho = GLYPHS[POR_NOME[ferramentaCanonica(name)] ?? '']
+  // Ferramenta de servidor MCP: o nome é dinâmico (`mcp__<servidor>__<ferramenta>`), então
+  // não cabe no mapa por nome — o prefixo é que decide o desenho.
+  const desenho = eFerramentaMcp(name)
+    ? GLYPHS.conector
+    : GLYPHS[POR_NOME[ferramentaCanonica(name)] ?? '']
 
   if (!desenho) {
     return <Wrench className={className} strokeWidth={1.7} aria-hidden="true" />

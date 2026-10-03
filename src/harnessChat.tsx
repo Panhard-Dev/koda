@@ -183,6 +183,12 @@ type Cenario =
   | 'compactacao'
   | 'restricao-antes'
   | 'restricao-depois'
+  | 'skill-antes'
+  | 'skill-durante'
+  | 'skill-depois'
+  | 'mcp-antes'
+  | 'mcp-durante'
+  | 'mcp-depois'
 
 const CENARIOS: Cenario[] = [
   'prompt',
@@ -192,6 +198,12 @@ const CENARIOS: Cenario[] = [
   'compactacao',
   'restricao-antes',
   'restricao-depois',
+  'skill-antes',
+  'skill-durante',
+  'skill-depois',
+  'mcp-antes',
+  'mcp-durante',
+  'mcp-depois',
 ]
 
 /**
@@ -251,6 +263,84 @@ const FERRAMENTA_NEGADA: ToolStep[] = [
     ok: false,
   },
 ]
+
+// --------------------------------------------------- skills e MCP (0.6.3)
+
+/**
+ * Os passos de skill e de MCP, com as saídas **reais** do despacho.
+ *
+ * Copiadas da bancada (`e2e_skills_mcp_offline.py`), sem edição: o texto que a `use_skill`
+ * devolve, o `5` que o servidor MCP responde e a mensagem de falha do `isError`. Se a tela
+ * desenhar isto, desenha o que acontece de verdade — e não uma maquete bonita.
+ */
+const PEDIDO_SKILL = 'Escreve um recado curto pro time avisando que o deploy passou.'
+
+const PEDIDO_MCP = 'Soma 2 e 3 usando a ferramenta do servidor MCP e me diz o total.'
+
+const SAIDA_SKILL = [
+  "[skill 'tom-cordial' · origem: projeto]",
+  'Siga estas instruções no que fizer a seguir:',
+  '',
+  '---',
+  'name: tom-cordial',
+  'description: Escreve respostas cordiais',
+  '---',
+  '',
+  "Sempre comece a resposta com uma saudação curta e termine com 'Abraço, Koda'.",
+].join('\n')
+
+const PASSO_SKILL: ToolStep = {
+  name: 'use_skill',
+  arguments: { nome: 'tom-cordial' },
+  output: SAIDA_SKILL,
+  duration_ms: 3,
+  call_id: 'sk1',
+  ok: true,
+  mcp: null,
+}
+
+/** O mesmo passo **antes** de terminar: sem saída e sem duração é o que a tela lê como rodando. */
+const PASSO_SKILL_RODANDO: ToolStep = {
+  ...PASSO_SKILL,
+  output: '',
+  duration_ms: 0,
+}
+
+const PASSO_MCP_OK: ToolStep = {
+  name: 'mcp__eco_server__somar',
+  arguments: { a: 2, b: 3 },
+  output: '5',
+  duration_ms: 12,
+  call_id: 'mc1',
+  ok: true,
+  mcp: { servidor: 'eco-server', ferramenta: 'somar' },
+}
+
+const PASSO_MCP_RODANDO: ToolStep = { ...PASSO_MCP_OK, output: '', duration_ms: 0 }
+
+const PASSO_MCP_ERRO: ToolStep = {
+  name: 'mcp__eco_server__explodir',
+  arguments: {},
+  output:
+    "ERRO: a ferramenta 'explodir' do servidor MCP 'eco-server' falhou: estourei de proposito",
+  duration_ms: 9,
+  call_id: 'mc2',
+  ok: false,
+  mcp: { servidor: 'eco-server', ferramenta: 'explodir' },
+}
+
+/** O servidor caiu no meio da rodada: a recusa explicada, e não "ferramenta desconhecida". */
+const PASSO_MCP_CAIDO: ToolStep = {
+  name: 'mcp__eco_server__somar',
+  arguments: { a: 1, b: 1 },
+  output:
+    "ERRO: a ferramenta MCP 'mcp__eco_server__somar' não está disponível — o servidor pode ter " +
+    'sido desligado ou removido. Não insista: siga sem ela.',
+  duration_ms: 0,
+  call_id: 'mc3',
+  ok: false,
+  mcp: { servidor: 'eco-server', ferramenta: 'somar' },
+}
 
 /**
  * A bolha como ela era **antes** do conserto.
@@ -339,6 +429,60 @@ function Conversa({ cenario }: { cenario: Cenario }) {
                   />
                   <FalaDoModelo texto="Não tenho acesso." />
                 </div>
+              </div>
+            ) : null}
+
+            {/*
+             * Skills: os três momentos, para a captura provar o antes (só o pedido), o
+             * durante (a ferramenta girando) e o depois (o passo com a saída). O `<details>`
+             * de cada passo fica fechado por padrão — quem abre é a captura, clicando, que é
+             * como a pessoa vê o resultado de verdade.
+             */}
+            {cenario === 'skill-antes' ||
+            cenario === 'skill-durante' ||
+            cenario === 'skill-depois' ? (
+              <div className="flex flex-col gap-5">
+                <div className="flex justify-end">
+                  <BolhaUsuario texto={PEDIDO_SKILL} />
+                </div>
+                {cenario === 'skill-antes' ? null : (
+                  <div className="flex flex-col gap-1.5">
+                    <ToolSteps
+                      steps={cenario === 'skill-durante' ? [PASSO_SKILL_RODANDO] : [PASSO_SKILL]}
+                    />
+                    {cenario === 'skill-depois' ? (
+                      <FalaDoModelo texto="Deploy passou, time! 🎉 Abraço, Koda" />
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/*
+             * MCP: o mesmo antes/durante/depois, com os dois desfechos que importam — a
+             * chamada que deu certo (`5`) e a que falhou (o `isError` do servidor). É onde
+             * se confere a olho que o **recurso** aparece (servidor + ferramenta reais) e que
+             * a falha é lida como falha.
+             */}
+            {cenario === 'mcp-antes' || cenario === 'mcp-durante' || cenario === 'mcp-depois' ? (
+              <div className="flex flex-col gap-5">
+                <div className="flex justify-end">
+                  <BolhaUsuario texto={PEDIDO_MCP} />
+                </div>
+                {cenario === 'mcp-antes' ? null : (
+                  <div className="flex flex-col gap-1.5">
+                    <ToolSteps
+                      steps={
+                        cenario === 'mcp-durante'
+                          ? [PASSO_MCP_RODANDO]
+                          : [PASSO_MCP_OK, PASSO_MCP_ERRO, PASSO_MCP_CAIDO]
+                      }
+                    />
+                    {cenario === 'mcp-depois' ? (
+                      <FalaDoModelo texto="Deu 5. O servidor recusou as outras duas chamadas — segue sem elas." />
+                    ) : null}
+                  </div>
+                )}
               </div>
             ) : null}
 

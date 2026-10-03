@@ -37,6 +37,7 @@ const ROTULOS: Record<string, string> = {
   uninstall_package: 'Remover dependência',
   download_file: 'Baixar arquivo',
   upload_file: 'Enviar arquivo',
+  use_skill: 'Usar skill',
 }
 
 /**
@@ -81,6 +82,64 @@ const APELIDOS: Record<string, string> = {
 export const ferramentaCanonica = (nome: string) => APELIDOS[nome] ?? nome
 
 export const rotuloFerramenta = (nome: string) => ROTULOS[ferramentaCanonica(nome)] ?? nome
+
+/**
+ * A ferramenta vem de um servidor MCP?
+ *
+ * O prefixo é o contrato entre o backend e a tela: `mcp__<servidor>__<ferramenta>`. É o que
+ * separa o que é do Koda do que roda **fora**, num processo à parte — e o que escolhe o
+ * ícone e o rótulo do passo.
+ */
+export const eFerramentaMcp = (nome: string) => nome.startsWith('mcp__')
+
+/**
+ * O nome da ferramenta dentro do servidor, lido do próprio nome externo.
+ *
+ * É só o paliativo para quando o `mcp` do passo não veio (mensagem antiga, gravada antes
+ * desta versão): o nome externo é normalizado, então o que sai daqui pode não ser o nome
+ * original. Com o campo `mcp` presente, quem manda é ele.
+ */
+export const ferramentaDoNomeMcp = (nome: string) =>
+  nome.replace(/^mcp__/, '').split('__').slice(1).join('__') || nome
+
+/** Um passo de ferramenta, no mínimo que o rótulo e o resumo precisam. */
+type Passo = {
+  name: string
+  arguments: Record<string, unknown>
+  mcp?: { servidor: string; ferramenta: string } | null
+}
+
+/**
+ * O rótulo do passo na conversa.
+ *
+ * Para MCP, o nome da **ferramenta no servidor** (`somar`) — o nome técnico
+ * (`mcp__eco_server__somar`) é endereço, não rótulo, e vai no detalhe ao clique.
+ */
+export const rotuloDoPasso = (passo: Passo) => {
+  if (passo.mcp) return passo.mcp.ferramenta
+  if (eFerramentaMcp(passo.name)) return ferramentaDoNomeMcp(passo.name)
+  return rotuloFerramenta(passo.name)
+}
+
+/**
+ * O **recurso acionado**, em uma linha: de onde veio e o que foi pedido.
+ *
+ * - MCP: `MCP <servidor> · <argumentos>` — o servidor é o recurso, e o nome dele é o real
+ *   (`eco-server`), não o normalizado que o modelo vê.
+ * - skill: `skill <nome>` — a skill carregada é o recurso.
+ * - o resto: os argumentos, como sempre foram.
+ */
+export const recursoDoPasso = (passo: Passo) => {
+  if (passo.mcp) {
+    const args = resumoArgumentos(passo.arguments)
+    return args ? `MCP ${passo.mcp.servidor} · ${args}` : `MCP ${passo.mcp.servidor}`
+  }
+  if (ferramentaCanonica(passo.name) === 'use_skill') {
+    const nome = String(passo.arguments?.nome ?? '').trim()
+    return nome ? `skill ${nome}` : 'skill'
+  }
+  return resumoArgumentos(passo.arguments)
+}
 
 /**
  * O que a ferramenta recebeu, em uma linha: `chave: valor · chave: valor`.

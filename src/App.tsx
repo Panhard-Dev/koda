@@ -227,7 +227,7 @@ const anexarRaciocinio = (blocos: Bloco[] | undefined, texto: string): Bloco[] =
 /** Fecha, dentro dos blocos, o passo que o `steps` acabou de receber. */
 const fecharPassoNosBlocos = (
   blocos: Bloco[] | undefined,
-  patch: { id: string; output: string; duration_ms: number; ok: boolean },
+  patch: { id: string; output: string; duration_ms: number; ok: boolean; mcp?: ToolStep['mcp'] },
 ): Bloco[] =>
   (blocos ?? []).map((bloco): Bloco =>
     bloco.tipo === 'passo' && bloco.passo.call_id === patch.id
@@ -238,6 +238,7 @@ const fecharPassoNosBlocos = (
             output: patch.output,
             duration_ms: patch.duration_ms,
             ok: patch.ok,
+            mcp: patch.mcp ?? bloco.passo.mcp ?? null,
           },
         }
       : bloco,
@@ -1741,7 +1742,12 @@ function App() {
         current.map((message) => (message.id === assistantId ? patch(message) : message)),
       )
     /** Ferramenta anunciada: entra na lista como "rodando" até o resultado voltar. */
-    const abrirPasso = (id: string, name: string, argumentos: Record<string, unknown>) =>
+    const abrirPasso = (
+      id: string,
+      name: string,
+      argumentos: Record<string, unknown>,
+      mcp?: ToolStep['mcp'],
+    ) =>
       patchAssistant((message) => {
         const passo: ToolStep = {
           name,
@@ -1750,6 +1756,7 @@ function App() {
           duration_ms: 0,
           call_id: id,
           ok: true,
+          mcp: mcp ?? null,
         }
         const bloco: Bloco = { tipo: 'passo', passo }
         return {
@@ -1763,6 +1770,7 @@ function App() {
       output: string
       duration_ms: number
       ok: boolean
+      mcp?: ToolStep['mcp']
     }) =>
       patchAssistant((message) => ({
         ...message,
@@ -1773,6 +1781,10 @@ function App() {
                 output: patch.output,
                 duration_ms: patch.duration_ms,
                 ok: patch.ok,
+                // O `tool_result` traz o endereço de origem do MCP; sem ele, um passo aberto
+                // pelo `tool_call` (que também traz) ficaria sem — e a linha mostraria o
+                // nome normalizado.
+                mcp: patch.mcp ?? step.mcp ?? null,
               }
             : step,
         ),
@@ -1825,7 +1837,7 @@ function App() {
           },
           onToolCall: (data) => {
             sinal()
-            abrirPasso(data.id, data.name, data.arguments)
+            abrirPasso(data.id, data.name, data.arguments, data.mcp)
           },
           onToolResult: (data) => {
             sinal()

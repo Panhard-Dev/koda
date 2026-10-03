@@ -1,7 +1,7 @@
 import { ChevronRight, TriangleAlert, Wrench } from 'lucide-react'
 import type { ToolStep } from '../api/client'
 import { formatarDuracao } from '../duracao'
-import { resumoArgumentos, rotuloFerramenta } from '../tools'
+import { recursoDoPasso, resumoArgumentos, rotuloDoPasso } from '../tools'
 import { ToolIcon, ToolSpinner } from './ToolIcon'
 
 /**
@@ -67,12 +67,12 @@ export default function ToolSteps({
 /** Uma chamada: o que rodou, o que tocou, quanto levou — e o resultado atrás do clique. */
 function Linha({ step }: { step: ToolStep }) {
   const rodando = step.output === '' && step.duration_ms === 0
-  const resumo = resumoArgumentos(step.arguments)
+  const resumo = recursoDoPasso(step)
 
   return (
     <details className="group">
       <summary
-        title={`${step.name}(${resumo})`}
+        title={`${step.name}(${resumoArgumentos(step.arguments)})`}
         className="flex cursor-pointer list-none items-center gap-2 py-1 text-koda-fg/50 transition-colors duration-200 select-none hover:text-koda-fg/85"
       >
         <span className="flex h-4 w-4 shrink-0 items-center justify-center">
@@ -86,7 +86,7 @@ function Linha({ step }: { step: ToolStep }) {
         </span>
 
         <span className="shrink-0 text-[12.5px] font-medium">
-          {rotuloFerramenta(step.name)}
+          {rotuloDoPasso(step)}
         </span>
 
         <span className="min-w-0 truncate font-mono text-[11.5px] text-koda-fg/30">
@@ -103,9 +103,22 @@ function Linha({ step }: { step: ToolStep }) {
       </summary>
 
       <div className="mt-0.5 mb-2 ml-[3px] border-l border-koda-fg/10 pl-3">
+        {/*
+          * O nome técnico do passo. Para MCP ele é o endereço do recurso
+          * (`mcp__eco_server__somar`) — feio de propósito: é o detalhe, não o rótulo. O
+          * servidor de origem vem na linha de baixo, com o nome real do `mcps.json`.
+          */}
         <p className="font-mono text-[10px] tracking-wider text-koda-fg/25 uppercase">
           {step.name}
         </p>
+        {step.mcp && (
+          <p className="mt-0.5 text-[11px] text-koda-fg/35">
+            servidor MCP <span className="font-medium text-koda-fg/55">{step.mcp.servidor}</span>
+            {' · '}
+            ferramenta{' '}
+            <span className="font-medium text-koda-fg/55">{step.mcp.ferramenta}</span>
+          </p>
+        )}
         {/*
           * `break-words` para a saída não virar rolagem lateral: um JSON numa linha,
           * um base64 ou uma URL de download são o caso comum aqui, e rolar de lado
