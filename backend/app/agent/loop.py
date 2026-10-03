@@ -1010,11 +1010,13 @@ def _explicar_restricoes(
     elif modo == MODO_RESPOSTA:
         aviso = (
             "ESTA RODADA É DE RESPOSTA, NÃO DE TRABALHO. O pedido não tem relação com a "
-            "pasta de trabalho: não há ferramenta de arquivo, shell, web nem código "
-            "disponível. Responda exatamente o que foi pedido, direto, em português do "
+            "pasta de trabalho, então nesta rodada não vêm ferramenta de arquivo, shell, web "
+            "nem código. Responda exatamente o que foi pedido, direto, em português do "
             "Brasil — sem listar, ler, criar ou alterar nada, e sem oferecer para fazê-lo. "
-            "Se a pessoa quiser mexer no projeto, ela pede e a próxima rodada traz as "
-            "ferramentas de volta."
+            "Não diga que você não tem ferramentas nem que não pode usá-las: não é uma "
+            "limitação sua nem da sessão, é o recorte desta rodada. Se a pessoa pedir "
+            "trabalho, as ferramentas vêm na rodada seguinte — sem precisar abrir conversa "
+            "nova."
         )
     elif proibidas:
         grupos: list[str] = []
@@ -1148,6 +1150,82 @@ ARQUIVO_NOMEADO = re.compile(
 FERRAMENTAS_DE_RESPOSTA = frozenset({"read_attachment"})
 
 
+#: Pedido curto que manda **seguir** o que já foi combinado, sem dizer o que fazer.
+#:
+#: É o vocabulário do "pode", "beleza", "agora aplica", "vai fundo", "coloca em prática".
+#: Nenhuma destas frases tem marcador de projeto nem verbo de ação reconhecido — e era por
+#: isso que a rodada virava **conversa** e o catálogo ia sem ferramenta nenhuma.
+CONTINUACAO = re.compile(
+    r"\b(beleza|blz|ok|okay|sim|isso|pode|manda|vai|segue|continua|continue|faz|toca|bora|"
+    r"fechou|show|top|perfeito|certo|apli\w+|execut\w+|implement\w+|roda|rode|"
+    r"coloca em pr[áa]tica|m[ãa]os [àa] obra|p[õo]e pra (?:rodar|funcionar)|"
+    r"t[áa] bom|t[áa] certo|agora vai|agora sim|vai fundo|vai l[áa]|segue o baile)\b",
+    re.IGNORECASE,
+)
+
+#: Teto de tamanho de um pedido de continuação.
+#:
+#: Acima disto há texto demais para ser só "segue": é uma pergunta nova, um pedido novo ou
+#: uma correção — e aí quem decide é a régua normal. Sem o teto, "ok, mas me explica o que
+#: é um loop for" viraria trabalho por causa do "ok" no começo.
+LIMITE_DE_CONTINUACAO = 60
+
+#: O que **desmancha** a continuação: a pessoa pegou o "ok" e virou a conversa para outro
+#: lado. Sem isto, qualquer frase que comece com uma confirmação — "ok, mas me explica…" —
+#: seria lida como ordem de seguir, e a pessoa receberia trabalho onde pediu explicação.
+DESVIA_DA_CONTINUACAO = re.compile(
+    r"\b(mas|por[ée]m|entretanto|s[óo]\s+que|ali[áa]s|outra\s+coisa|muda\s+de\s+assunto)\b"
+    r"|\b(me\s+)?(explica|explique|explicar|ensina|ensine|resume|resuma|conta|contar)\b",
+    re.IGNORECASE,
+)
+
+
+def _falas_da_pessoa(mensagens: list[dict[str, Any]]) -> list[str]:
+    """Só as falas **da pessoa**, na ordem — as internas do loop e o resumo ficam de fora."""
+    falas: list[str] = []
+    for mensagem in mensagens:
+        if mensagem.get("role") != "user":
+            continue
+        texto = contexto.sem_anotacoes(contexto.texto_do_conteudo(mensagem.get("content")))
+        if not texto or texto.startswith("[contexto compactado]"):
+            continue
+        if texto in (NARRAR, CONTINUAR, CONSERTAR_FERRAMENTA, RETOMAR_TAREFA):
+            continue
+        falas.append(texto)
+    return falas
+
+
+def _continuacao_de_trabalho(mensagens: list[dict[str, Any]], pedido: str) -> bool:
+    """O pedido é um "segue o que combinamos", numa conversa que **já estava rolando**?
+
+    O caso que isto conserta (relatado pelo dono em 03/10/2026): ele conversa, monta o plano
+    e manda "pode", "beleza" ou "agora aplica". A régua olhava só o texto do pedido, não
+    achava marcador de projeto nem verbo de ação — e classificava a rodada como **conversa**.
+    O catálogo ia sem ferramenta nenhuma e o modelo respondia que "nesta sessão não posso
+    usar ferramentas". Não era o modelo inventando: ele realmente não tinha nenhuma.
+
+    Três condições, e as três precisam valer:
+
+    - a conversa já tem uma fala **anterior** da pessoa (na primeira mensagem não há o que
+      continuar, e é ali que "oi" precisa continuar sendo conversa);
+    - o pedido é curto (ver `LIMITE_DE_CONTINUACAO`);
+    - e ele manda seguir, sem ser pergunta.
+
+    O erro aqui é assimétrico, e a escolha é deliberada: oferecer ferramenta a quem só
+    agradeceu custa uma resposta que não as usa; negar ferramenta a quem mandou executar
+    trava o trabalho e é o defeito que este código existe para não repetir.
+    """
+    if len(_falas_da_pessoa(mensagens)) < 2:
+        return False
+    if len(pedido) > LIMITE_DE_CONTINUACAO:
+        return False
+    if PERGUNTA.search(pedido) or "?" in pedido:
+        return False
+    if DESVIA_DA_CONTINUACAO.search(pedido):
+        return False
+    return bool(CONTINUACAO.search(pedido))
+
+
 def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     """O pedido é uma **resposta** (texto avulso) ou **trabalho no projeto**?
 
@@ -1161,8 +1239,13 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
       que pede uma mudança de verdade → `MODO_CODIGO`: catálogo completo, e o trabalho é
       para ser feito **por inteiro**, validado antes de entregar.
 
-    Na dúvida o veredito é `MODO_CODIGO`: negar ferramenta a quem pediu trabalho é pior do
-    que oferecer ferramenta a quem pediu conversa (que, no máximo, responde sem usá-la).
+    Na dúvida, a resposta depende de **onde** a dúvida aparece, e o critério é a assimetria
+    do erro: negar ferramenta a quem pediu trabalho trava o trabalho, enquanto oferecer
+    ferramenta a quem pediu conversa custa, no máximo, uma resposta que não as usa. Por isso,
+    numa conversa já em andamento, um pedido curto de continuação ("pode", "beleza", "agora
+    aplica") resolve para `MODO_CODIGO`. Na **primeira** mensagem resolve para
+    `MODO_RESPOSTA`: ali não há o que continuar, e é o que impede um "oi" de virar uma
+    varredura da pasta de trabalho da pessoa.
     """
     pedido = pedido_do_usuario(mensagens)
     if not pedido:
@@ -1181,6 +1264,13 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     if MARCADORES_DE_PROJETO.search(pedido):
         return MODO_CODIGO
     if pedido_de_acao(mensagens) or pedido_grande(mensagens):
+        return MODO_CODIGO
+    # Nenhuma régua reconheceu o pedido. Numa conversa já em andamento, esse é o lugar do
+    # "pode", "beleza", "agora aplica": a pessoa está mandando seguir o que foi combinado, e
+    # negar ferramenta aqui é o "nesta sessão não posso usar ferramentas" (ver
+    # `_continuacao_de_trabalho`). Na primeira mensagem, a dúvida continua resolvendo para
+    # conversa — é o que impede o "oi" de virar uma varredura da pasta de trabalho.
+    if _continuacao_de_trabalho(mensagens, pedido):
         return MODO_CODIGO
     return MODO_RESPOSTA
 
