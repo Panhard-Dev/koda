@@ -7,6 +7,7 @@ responde e o banco nasce em `backend/data/koda.db`.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
@@ -14,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import __version__, seguranca
+from . import __version__, mcp, seguranca
 from .config import Settings, get_settings
 from .db import Database
 from .instalador import Baixador
@@ -86,6 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # crítico, num task que morre junto com o app.
         servico = ServicoNuvem(config)
         app.state.nuvem = servico
+        # MCP: aponta o gerenciador para a configuração e sobe os servidores **numa thread**.
+        # Subir processo e esperar o handshake bloqueia; a subida do app não pode depender
+        # de um servidor de terceiros responder. Enquanto não conectarem, as ferramentas
+        # deles simplesmente não aparecem na rodada — e o estado aparece em `/api/mcps`.
+        mcp.configurar(config.database_path.parent / "mcps.json")
+        threading.Thread(target=mcp.preparar, name="koda-mcp", daemon=True).start()
         # O download do instalador roda aqui no processo local: é ele que escreve na pasta
         # de downloads do usuário (a interface nunca escreve em disco).
         maquina = Baixador(config)
@@ -101,6 +108,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # qualquer filho) sobrevivia ao fechamento do Koda, segurando porta e CPU, e
             # ninguém mais tinha como achá-lo — o registro era só um dict no processo.
             ferramentas.encerrar_tudo()
+            # Os servidores MCP são processos: morrem junto com o app, para não ficarem
+            # órfãos segurando porta e CPU.
+            mcp.encerrar()
             if tarefa is not None:
                 tarefa.cancel()
                 with suppress(asyncio.CancelledError):

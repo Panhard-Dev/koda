@@ -418,6 +418,9 @@ async def _agente(
                 duration_ms=passo.duration_ms,
                 call_id=passo.call_id,
                 ok=passo.ok,
+                # O endereço de origem do que veio de servidor MCP: é o que a tela mostra
+                # como "recurso acionado" (servidor + ferramenta reais).
+                mcp=passo.mcp,
             )
             for passo in resultado.passos
         ]

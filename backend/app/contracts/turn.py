@@ -47,6 +47,11 @@ class ToolStep:
     duration_ms: int
     call_id: str = ""
     ok: bool = True
+    #: De qual servidor MCP e de qual ferramenta é este passo (`{"servidor", "ferramenta"}`).
+    #: Vazio nas ferramentas do Koda. Vai gravado junto da mensagem porque a conversa é
+    #: reaberta depois, e sem isto o nome normalizado (`eco_server`) seria tudo o que a tela
+    #: teria para mostrar — um nome que não existe no `mcps.json`.
+    mcp: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +61,7 @@ class ToolStep:
             "duration_ms": self.duration_ms,
             "call_id": self.call_id,
             "ok": self.ok,
+            "mcp": self.mcp,
         }
 
 

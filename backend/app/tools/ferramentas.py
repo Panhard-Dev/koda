@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 
+from .. import mcp
 from ..limits import LIMITES, cortar_cabeca_e_cauda
 from .registry import (
     CAMINHOS_EXTRA,
@@ -1747,6 +1748,20 @@ def _executar_impl(
     nome = canonico(nome)
     if negadas and nome in {canonico(item) for item in negadas}:
         return f"ERRO: a ferramenta {nome} está desligada (KODA_TOOLS_DENY)."
+
+    # Ferramenta de servidor MCP: roda **fora**, no processo do servidor. Vem antes de tudo
+    # porque não é uma ferramenta do Koda — o nome (`mcp__<servidor>__<ferramenta>`) não casa
+    # com nenhum ramo abaixo. O desvio é pelo **prefixo**, e não por estar no mapa: um
+    # servidor que cai no meio da rodada deixa o nome oferecido e fora do mapa, e aí o certo é
+    # a recusa explicada ("não está disponível") — não "ferramenta desconhecida", que mandaria
+    # o modelo procurar o erro no lugar errado. O prazo restante da tarefa é repassado: um
+    # servidor MCP que trava não pode prender a tarefa além do que ela já tinha.
+    if nome.startswith(mcp.PREFIXO):
+        restante = _restante_da_ferramenta()
+        _permitido, saida = mcp.executar(nome, argumentos, tempo_s=restante)
+        # A recusa já vem com a marca `ERRO:` no texto — é o contrato das ferramentas, e é o
+        # que o laço lê para saber que o passo falhou.
+        return saida
 
     if nome in FERRAMENTAS_DE_ARQUIVO:
         fora = _validar_alvos(workspace, nome, argumentos, acesso_livre)

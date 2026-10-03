@@ -1,10 +1,19 @@
 """GET/POST /api/mcps — servidores MCP configurados, do jeito que o submenu MCPs usa.
 
-O Koda ainda não conversa com servidores MCP de verdade — não há cliente nem chamada de
-ferramenta externa. A lista vem de `backend/data/mcps.json` (uma lista de
-`{name, description, command, params, enabled}`); o arquivo não nasce com o projeto, então
-sem ele a rota devolve lista vazia e a interface mostra o estado vazio. O cadastro da tela
-grava nesse mesmo arquivo, e é ele que o cliente MCP vai consumir quando existir.
+Um servidor MCP é um processo que publica **ferramentas** — a outra metade da diferença com
+as skills, que são instruções. A configuração vive em `data/mcps.json`
+(`{name, description, command, params, enabled}`), e quem a consome é o gerenciador
+(`app/mcp/`): ele sobe o processo, faz o handshake, lista as ferramentas e as entrega ao
+agente.
+
+**A lista devolve estado, não só configuração.** Cada servidor vem com `conectado`, `erro` e
+`ferramentas` — os números de agora. Um comando errado aparece como `conectado: false` com o
+que o servidor escreveu no `stderr`, em vez de parecer um servidor funcionando.
+
+**A conexão é reaberta quando a configuração muda.** Cadastrar ou ligar/desligar chama
+`mcp.recarregar()` e espera a nova tentativa (em thread): sem isso, a tela mostraria o
+servidor novo como "ligado" e o agente continuaria sem as ferramentas dele até o app
+reiniciar.
 """
 
 from __future__ import annotations
@@ -13,7 +22,9 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
+from .. import mcp
 from ..config import Settings
 from ..schemas import McpCreate, McpInfo
 
@@ -25,28 +36,34 @@ def caminho_config(settings: Settings) -> Path:
     return settings.database_path.parent / "mcps.json"
 
 
-def ler_config(caminho: Path) -> list[McpInfo]:
-    """Arquivo ausente ou ilegível = nenhum servidor configurado."""
-    return [_info(item) for item in _brutos(caminho)]
+def _estado_por_nome() -> dict[str, dict]:
+    """O que o gerenciador sabe de cada servidor agora (`conectado`, `erro`, `ferramentas`)."""
+    return {item["name"]: item for item in mcp.status()}
 
 
-def _info(item: dict) -> McpInfo:
+def _info(item: dict, estado: dict[str, dict] | None = None) -> McpInfo:
     """Um item do arquivo -> `McpInfo`. Campos novos são opcionais, para o arquivo antigo
     (que só tinha nome e descrição) continuar valendo."""
+    nome = str(item["name"])
+    vivo = (estado or {}).get(nome, {})
     return McpInfo(
-        name=str(item["name"]),
+        name=nome,
         description=str(item.get("description", "")),
         command=str(item.get("command", "")),
         params=str(item.get("params", "")),
         enabled=bool(item.get("enabled", True)),
+        conectado=bool(vivo.get("conectado", False)),
+        erro=vivo.get("erro"),
+        ferramentas=int(vivo.get("ferramentas", 0) or 0),
     )
 
 
 @router.get("/mcps", response_model=list[McpInfo])
 async def mcps(request: Request) -> list[McpInfo]:
-    """Lista os servidores MCP configurados, na ordem do arquivo."""
+    """Lista os servidores MCP configurados, na ordem do arquivo, com o estado de agora."""
     settings: Settings = request.app.state.settings
-    return ler_config(caminho_config(settings))
+    estado = _estado_por_nome()
+    return [_info(item, estado) for item in _brutos(caminho_config(settings))]
 
 
 @router.post("/mcps", response_model=McpInfo, status_code=201)
@@ -56,6 +73,11 @@ async def cadastrar_mcp(payload: McpCreate, request: Request) -> McpInfo:
     Recusa nome já usado com 409: sobrescrever calado trocaria a configuração de um servidor
     de verdade sem aviso. Nome e comando vazios são barrados no schema (`McpCreate`), que
     responde 422.
+
+    Depois de gravar, **tenta conectar** — o retorno já diz se o servidor subiu e quantas
+    ferramentas publicou. Um servidor que não sobe continua cadastrado, com o motivo em
+    `erro`; recusar o cadastro por causa de um comando que talvez seja corrigido depois
+    seria pior.
     """
     settings: Settings = request.app.state.settings
     caminho = caminho_config(settings)
@@ -73,15 +95,20 @@ async def cadastrar_mcp(payload: McpCreate, request: Request) -> McpInfo:
         "enabled": True,
     }
     _salvar(caminho, [*brutos, novo])
-    return _info(novo)
+    await _reconectar()
+    return _info(novo, _estado_por_nome())
 
 
 @router.post("/mcps/{name}/toggle", response_model=McpInfo)
 async def alternar_mcp(name: str, request: Request) -> McpInfo:
-    """Liga/desliga um servidor MCP e regrava o arquivo de configuração."""
+    """Liga/desliga um servidor MCP e regrava o arquivo de configuração.
+
+    Desligar **derruba** a conexão: as ferramentas dele saem do catálogo da próxima rodada.
+    Ligar sobe de novo — e a resposta diz se subiu.
+    """
     settings: Settings = request.app.state.settings
     caminho = caminho_config(settings)
-    configurados = ler_config(caminho)
+    configurados = [_info(item) for item in _brutos(caminho)]
     servidor = next((item for item in configurados if item.name == name), None)
     if servidor is None:
         raise HTTPException(status_code=404, detail="servidor MCP não encontrado")
@@ -92,13 +119,17 @@ async def alternar_mcp(name: str, request: Request) -> McpInfo:
         if str(item.get("name")) == name:
             item["enabled"] = not servidor.enabled
     _salvar(caminho, brutos)
-    return McpInfo(
-        name=servidor.name,
-        description=servidor.description,
-        command=servidor.command,
-        params=servidor.params,
-        enabled=not servidor.enabled,
-    )
+    await _reconectar()
+    atual = next((item for item in _brutos(caminho) if str(item.get("name")) == name), None)
+    if atual is None:  # pragma: no cover — o arquivo acabou de ser gravado com este item
+        raise HTTPException(status_code=404, detail="servidor MCP não encontrado")
+    return _info(atual, _estado_por_nome())
+
+
+async def _reconectar() -> None:
+    """Derruba as conexões velhas e reconecta — em thread, porque subir processo bloqueia."""
+    mcp.recarregar()
+    await run_in_threadpool(mcp.preparar)
 
 
 def _brutos(caminho: Path) -> list[dict]:

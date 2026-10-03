@@ -107,6 +107,13 @@ class ToolStepOut(BaseModel):
     duration_ms: int = 0
     call_id: str = ""
     ok: bool = True
+    """De qual servidor MCP e de qual ferramenta é o passo (`{"servidor", "ferramenta"}`).
+
+    Vazio nas ferramentas do Koda. É o **recurso acionado** que a interface mostra: o nome
+    que o modelo vê é normalizado (`eco_server`), e mostrar esse nome na conversa seria
+    mostrar um nome que não existe no `mcps.json`.
+    """
+    mcp: dict[str, str] | None = None
 
 
 class TodoItem(BaseModel):
@@ -289,6 +296,17 @@ class McpInfo(BaseModel):
     """Parâmetros extras do comando, como digitados."""
     params: str = ""
     enabled: bool = True
+    """O servidor está no ar **agora** — o handshake MCP já respondeu.
+
+    É estado de execução, não configuração: um servidor ligado mas que não subiu aparece
+    com `conectado: false` e o motivo em `erro`. Antes, a lista só sabia dizer "ligado",
+    e um comando errado parecia um servidor funcionando.
+    """
+    conectado: bool = False
+    """Por que não conectou, quando não conectou (o que o servidor disse no `stderr`)."""
+    erro: str | None = None
+    """Quantas ferramentas o servidor publicou no `tools/list`."""
+    ferramentas: int = 0
 
 
 class McpCreate(BaseModel):
