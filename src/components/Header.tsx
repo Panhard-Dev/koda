@@ -57,6 +57,29 @@ function IconButton({
   )
 }
 
+/**
+ * Ícone do painel lateral: quadrado de cantos redondos com a coluna da esquerda cheia.
+ * Mesmo traço do resto da interface (24×24, `currentColor`, 1.7) e SVG inline, como a
+ * coroa da marca — nenhuma imagem de fora e nenhuma dependência nova.
+ */
+function IconePainel({ className = 'h-[18px] w-[18px]' }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="3.2" y="3.2" width="17.6" height="17.6" rx="4.6" />
+      <rect x="6" y="6" width="3.2" height="12" rx="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 function Interruptor({ on }: { on: boolean }) {
   /**
    * Interruptor de status: a bolinha desliza para a direita quando está ligado.
@@ -121,6 +144,7 @@ export function Header({
   conversations,
   skills,
   mcps,
+  painelAberto,
   onToggleSkill,
   onToggleMcp,
   onToggleSearch,
@@ -130,6 +154,7 @@ export function Header({
   onOpenFolders,
   onOpenConversation,
   onOpenSettings,
+  onTogglePainel,
 }: {
   searchOpen: boolean
   searchQuery: string
@@ -152,6 +177,9 @@ export function Header({
   onOpenFolders: () => void
   onOpenConversation: (id: string) => void
   onOpenSettings: (section?: SettingsSection) => void
+  /** A barra lateral está aberta — o botão do painel fica aceso e alterna. */
+  painelAberto: boolean
+  onTogglePainel: () => void
 }) {
   /** O submenu de projeto lista as pastas salvas e as duas formas de abrir outra. */
   const projectOptions = [
@@ -348,16 +376,37 @@ export function Header({
     // janela (a titlebar nativa foi desligada). Filhos clicáveis ficam de fora.
     <header
       data-tauri-drag-region
-      className="relative z-20 flex shrink-0 items-center gap-3 p-5"
+      className="relative z-20 flex shrink-0 items-center gap-3 px-5 pt-5 pb-11"
     >
-      <button
-        type="button"
-        onClick={onNewChat}
-        aria-label="Koda — iniciar nova conversa"
-        className="flex items-center rounded-xl p-1 pr-2 transition-opacity hover:opacity-80 focus-visible:outline-none"
-      >
-        <KodaLogo className="h-6 w-auto" />
-      </button>
+      {/*
+       * Marca e painel lateral empilhados na ponta esquerda: a coroa em cima, o botão do
+       * painel logo abaixo dela.
+       *
+       * O `-mb-10` desconta a altura do botão de baixo, e é o que mantém a coroa no lugar:
+       * sem ele a coluna fica mais alta que a pílula, o `items-center` do cabeçalho
+       * recentraliza a linha e a coroa **sobe** — que foi exatamente o defeito da primeira
+       * versão. Com o desconto, a coluna mede o mesmo que a coroa (32px), a linha continua
+       * com a altura da pílula (44px) e os dois seguem alinhados como antes. O ícone passa a
+       * sobrar para baixo, e o `pb-11` do cabeçalho é quem abre o espaço para ele.
+       */}
+      <div className="flex shrink-0 flex-col items-center gap-1 -mb-10">
+        <button
+          type="button"
+          onClick={onNewChat}
+          aria-label="Koda — iniciar nova conversa"
+          className="flex items-center rounded-xl p-1 transition-opacity hover:opacity-80 focus-visible:outline-none"
+        >
+          <KodaLogo className="h-6 w-auto" />
+        </button>
+
+        <IconButton
+          label={painelAberto ? 'Fechar painel lateral' : 'Abrir painel lateral'}
+          active={painelAberto}
+          onClick={onTogglePainel}
+        >
+          <IconePainel className="h-[18px] w-[18px]" />
+        </IconButton>
+      </div>
 
       <div className="flex items-center gap-0.5 rounded-full bg-koda-surface px-1.5 py-1 shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]">
         <Menu

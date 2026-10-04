@@ -123,6 +123,23 @@ body {
   transform-origin: top;
 }
 
+/* A barra lateral entra deslizando da esquerda: `menu-in` cai de cima, e o movimento aqui é
+   lateral. A guarda de `data-motion='reduced'` lá em cima já anula esta animação. */
+@keyframes painel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.painel-in {
+  animation: painel-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 @keyframes rise {
   from {
     opacity: 0;
