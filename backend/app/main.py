@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import __version__, mcp, seguranca
+from . import __version__, mcp, seguranca, semente
 from .config import Settings, get_settings
 from .db import Database
 from .instalador import Baixador
@@ -89,6 +89,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # crítico, num task que morre junto com o app.
         servico = ServicoNuvem(config)
         app.state.nuvem = servico
+        # O que o app entrega de fábrica entra **antes** de o gerenciador apontar para a
+        # configuração: no instalado o `data/` nasce só com o banco, e sem esta semeadura o
+        # app subiria sem servidor MCP nenhum. Nunca passa por cima do que já existe.
+        semente.semear(config.database_path.parent)
         # MCP: aponta o gerenciador para a configuração e sobe os servidores **numa thread**.
         # Subir processo e esperar o handshake bloqueia; a subida do app não pode depender
         # de um servidor de terceiros responder. Enquanto não conectarem, as ferramentas

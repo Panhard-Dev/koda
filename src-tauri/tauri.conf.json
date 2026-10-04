@@ -48,6 +48,8 @@
     "targets": ["nsis"],
     "resources": {
       "../host/c-host.exe": "host/c-host.exe",
+      "../mcp": "mcp",
+      "../skills": "skills",
       "runtime/backend/python": "backend/python",
       "runtime/backend/app": "backend/app"
     },

@@ -1,0 +1,16 @@
+[
+  {
+    "name": "navegador",
+    "description": "Navegador do Painel Dev: abre localhost e arquivo do disco, le a pagina, clica e digita. O que ele faz aparece no Painel Dev.",
+    "command": "node",
+    "params": "../mcp/dev-browser/server.mjs",
+    "enabled": true
+  },
+  {
+    "name": "logs",
+    "description": "Logs do Painel Dev: so erros (console, rede 4xx/5xx e log do servidor), sem repeticao, com arquivo e linha e correlacao entre front e back. Le o feed do MCP 'navegador'.",
+    "command": "node",
+    "params": "../mcp/dev-logs/server.mjs",
+    "enabled": true
+  }
+]
