@@ -1,0 +1,17 @@
+[
+  {
+    "pasta": "design-taste-frontend",
+    "name": "design-taste-frontend",
+    "description": "Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check."
+  },
+  {
+    "pasta": "diagnosticar-logs",
+    "name": "diagnosticar-logs",
+    "description": "Diagnostica o que o Painel Dev abriu — site, página, jogo ou aplicação — lendo os erros de verdade: console, rede (4xx/5xx) e log do servidor, já sem repetição, cruzando as pontas para achar a causa. Orienta a investigar, corrigir e **revalidar nos logs** depois de cada correção e reinício, com limite de tentativas e sem declarar sucesso sem prova. Use quando o dono pedir \"diagnostica os logs\", \"por que a tela quebrou\", \"o que está dando erro\", \"corrige o que aparece no painel de logs\", \"confere se ainda tem erro\", ou quando o MCP `navegador` abrir uma página que não se comporta."
+  },
+  {
+    "pasta": "validar-front",
+    "name": "validar-front",
+    "description": "Valida um front-end de ponta a ponta pelo MCP navegador — abre a página, interage como uma pessoa (clique, teclado, hover, arrasto, upload, toque) e confere console, rede, armazenamento e árvore de acessibilidade. Use quando precisar provar que uma alteração de interface funciona, sem depender de print: \"validar a tela\", \"testar o front\", \"conferir se quebrou\", \"rodar a bateria de QA\", \"testar responsividade\", \"checar acessibilidade\", \"interagir com a página\"."
+  }
+]
