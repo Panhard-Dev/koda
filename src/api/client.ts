@@ -344,6 +344,86 @@ export const removerAnexo = (id: string) =>
   request<void>(`/api/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 /**
+ * A sessão do navegador que a IA está dirigindo (o MCP `koda-dev-browser`).
+ *
+ * `vivo: false` quando não há nenhuma — e também quando a sessão parou de publicar, porque o
+ * backend só considera viva a que se atualizou nos últimos segundos. Um quadro velho mostrado
+ * como se estivesse ao vivo seria pior do que não mostrar nada.
+ */
+export type EstadoDoNavegador = {
+  vivo: boolean
+  porta?: number | null
+  url?: string | null
+  titulo?: string | null
+  /**
+   * Onde a página está rolada, no navegador da IA.
+   *
+   * Vai junto porque o painel é **outra** instância do navegador: ele carrega a página do zero
+   * e, sem isto, fica no topo enquanto a IA está lendo lá embaixo. `topo` e `total` em pixels,
+   * medidos na janela da IA (`janela`) — o painel converte para a proporção dele, que é outra.
+   */
+  rolagem?: { topo: number; total: number; janela: number; alvo?: string | null } | null
+  idade_s?: number | null
+  motivo?: string | null
+}
+
+export const estadoDoNavegador = () => request<EstadoDoNavegador>('/api/dev-browser')
+
+/** Um erro já consolidado pelo MCP `koda-dev-logs` — uma linha do painel de Logs. */
+export type ErroDeLog = {
+  chave: string
+  /** `navegador` (console/exceção), `rede` (HTTP 4xx/5xx) ou `servidor` (log do alvo). */
+  fonte: string
+  tipo: string
+  severidade: 'grave' | 'leve'
+  texto: string
+  /** Arquivo e linha, quando o relato traz — vazio quando não veio, e não um chute. */
+  onde?: string | null
+  /** Quantas vezes a mesma assinatura apareceu. É o que evita a parede de repetição. */
+  ocorrencias: number
+  /** Passou do teto de repetição: sinal de laço. */
+  repetindo?: boolean
+  /** Nasceu depois da marca do MCP — o que a verificação pós-correção olha. */
+  novo?: boolean
+  primeiro?: number
+  ultimo?: number
+}
+
+/**
+ * O retrato dos logs que o MCP `koda-dev-logs` publicou.
+ *
+ * `vivo: false` quando o MCP não está rodando (nenhuma página foi aberta ainda) — e é a mesma
+ * regra do `dev-browser`: lista velha mostrada como se fosse de agora seria pior do que não
+ * mostrar nada.
+ */
+export type EstadoDosLogs = {
+  vivo: boolean
+  idade_s?: number | null
+  fontes?: Record<string, unknown>
+  resumo?: { grave?: number; leve?: number; total?: number; novos?: number; repetindo?: number }
+  erros?: ErroDeLog[]
+  motivo?: string | null
+}
+
+export const estadoDosLogs = () => request<EstadoDosLogs>('/api/dev-logs')
+
+/**
+ * O último quadro da sessão, como blob local.
+ *
+ * Vem por `fetch` e não direto no `src` da imagem porque a rota exige o token, e um `<img>`
+ * não manda cabeçalho. O `src` recebe um `URL.createObjectURL` — que quem chama **precisa**
+ * revogar, senão cada quadro vira um vazamento de memória.
+ */
+export async function quadroDoNavegador(): Promise<Blob | null> {
+  const resposta = await fetch(`${apiUrl}/api/dev-browser/tela`, {
+    headers: { ...cabecalhoDeAcesso() },
+    cache: 'no-store',
+  })
+  if (!resposta.ok) return null
+  return resposta.blob()
+}
+
+/**
  * Falha de uma rota do backend.
  *
  * Quando a rota explica o motivo (`{"detail": {"codigo", "mensagem"}}`), a frase vem no

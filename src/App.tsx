@@ -26,6 +26,7 @@ import {
 } from './components/WindowControls'
 import type { SettingsSection } from './components/SettingsScreen'
 import ProjectPicker from './components/ProjectPicker'
+import PainelLateral from './components/PainelLateral'
 import { findModel, MODELO_PADRAO } from './models'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
@@ -679,6 +680,8 @@ function App() {
   const [projectId, setProjectId] = useState<string | null>(null)
   const [pastaPadrao, setPastaPadrao] = useState('')
   const [pastasAberto, setPastasAberto] = useState(false)
+  /** Barra lateral do histórico. Sobreposição: cobre a conversa e fica acima de tudo. */
+  const [painelAberto, setPainelAberto] = useState(false)
   const [ocupadoPastas, setOcupadoPastas] = useState(false)
   const [erroPastas, setErroPastas] = useState<string | null>(null)
   /** Quanto o agente pode fazer sozinho (`manual` pergunta tudo que mexe na máquina). */
@@ -2026,7 +2029,19 @@ function App() {
           onOpenFolders={() => setPastasAberto(true)}
           onOpenConversation={handleOpenConversation}
           onOpenSettings={openSettings}
+          painelAberto={painelAberto}
+          onTogglePainel={() => setPainelAberto((aberto) => !aberto)}
         />
+      ) : null}
+
+      {/*
+       * A barra lateral fica **fora** do cabeçalho e do `main`, como sobreposição: ela não
+       * empurra o layout, cobre a conversa e é o `z-[60]` do app — acima do cabeçalho, da
+       * linha de tarefas, das gavetas e dos menus. Só existe na tela de conversa; nos ajustes
+       * a tela é inteira e não há conversa para listar.
+       */}
+      {view === 'chat' ? (
+        <PainelLateral aberto={painelAberto} onFechar={() => setPainelAberto(false)} />
       ) : null}
 
       {/*
