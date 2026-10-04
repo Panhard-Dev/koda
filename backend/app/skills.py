@@ -184,18 +184,59 @@ def _pastas(raiz: Path) -> list[Path]:
         return []
 
 
+def _do_catalogo(raiz: Path, estado: dict[str, bool]) -> list[Skill]:
+    """As skills que vieram com o Koda, na ordem do catálogo `skills/skills.json`.
+
+    O catálogo diz **quais** pastas viajam (e em que ordem); o conteúdo vem do `SKILL.md` de
+    cada uma — o arquivo é que o agente lê, então é ele que manda no nome e na descrição.
+
+    Entrada apontando para pasta sem `SKILL.md` é registrada e ignorada, em vez de sumir
+    calada: catálogo torto vira "a skill não aparece" e ninguém descobre por quê.
+    """
+    try:
+        itens = json.loads((raiz / "skills.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(itens, list):
+        return []
+    achadas: list[Skill] = []
+    for item in itens:
+        nome_pasta = str(item.get("pasta", "")).strip() if isinstance(item, dict) else ""
+        if not nome_pasta:
+            continue
+        arquivo = raiz / nome_pasta / "SKILL.md"
+        skill = _ler(arquivo, "global", estado)
+        if skill is None:
+            print(f"[koda] o catálogo lista '{nome_pasta}', mas {arquivo} não existe", flush=True)
+            continue
+        achadas.append(skill)
+    return achadas
+
+
 def listar(
     workspace: Path,
     estado: dict[str, bool] | None = None,
     cadastradas: list[dict[str, str]] | None = None,
+    embutidas: Path | None = None,
 ) -> list[Skill]:
-    """Skills cadastradas, do projeto e da máquina — nesta ordem.
+    """Skills cadastradas, do projeto, as do Koda e as globais da máquina — nesta ordem.
 
     As cadastradas chegam prontas (lidas de `data/skills.json` por quem tem o `settings`):
     elas não moram no projeto, então `listar` não teria como achá-las sozinha. Nome
-    repetido: cadastrada primeiro, depois projeto, depois global. A cadastrada vence porque
-    foi escolha explícita de quem usa; a do projeto vence a global pelo motivo de sempre
-    (está ao alcance do `read_file`).
+    repetido: vence a primeira que aparecer — cadastrada, depois projeto, depois as do Koda,
+    depois as globais. A cadastrada vence porque foi escolha explícita de quem usa; a do
+    projeto vence a global pelo motivo de sempre (está ao alcance do `read_file`).
+
+    `embutidas` é a pasta `skills/` que viaja com o Koda (`Settings.skills_dir`): as pastas
+    que o instalador traz, listadas no catálogo `skills.json`. Elas entram **antes** das
+    globais — são o que o app entrega, e uma cópia velha em `~/.agents/skills` não pode
+    ganhar da versão que foi no pacote.
+
+    Elas contam como `global` de propósito. O escopo é contrato de produto (`projeto` /
+    `global` / `cadastrada` — está no schema da API e na tela), e o comportamento que
+    interessa é o das globais: entram no prompt **por nome e descrição**, e o `use_skill` lê
+    o arquivo na hora. Um quarto escopo só para trocar a etiqueta mexeria no schema e na
+    interface sem mudar nada do que o agente faz.
     """
     estado = estado or {}
     achadas: dict[str, Skill] = {}
@@ -213,6 +254,13 @@ def listar(
         skill = _ler(pasta / "SKILL.md", "projeto", estado)
         if skill and skill.name not in achadas:
             achadas[skill.name] = skill
+    # As do Koda vêm **antes** das globais da máquina: elas são o que o app entrega, e sem
+    # esta ordem uma cópia antiga em `~/.agents/skills` ganharia da versão que foi no
+    # pacote — o instalado pareceria desatualizado com a skill certa ao lado.
+    if embutidas is not None:
+        for skill in _do_catalogo(Path(embutidas), estado):
+            if skill.name not in achadas:
+                achadas[skill.name] = skill
     global_skills = Path.home() / ".agents" / "skills"
     for pasta in _pastas(global_skills):
         skill = _ler(pasta / "SKILL.md", "global", estado)
@@ -238,7 +286,12 @@ def indice_para_agente(settings: Settings, workspace: Path | None = None) -> str
     raiz = Path(workspace) if workspace is not None else settings.workspace_path
     ligadas = [
         skill
-        for skill in listar(raiz, estado, ler_cadastradas(caminho_cadastradas(settings)))
+        for skill in listar(
+            raiz,
+            estado,
+            ler_cadastradas(caminho_cadastradas(settings)),
+            settings.skills_dir,
+        )
         if skill.enabled
     ]
     if not ligadas:
@@ -309,6 +362,7 @@ class SkillStore:
             self._workspace_de_trabalho(),
             ler_estado(caminho_estado(self._settings)),
             ler_cadastradas(caminho_cadastradas(self._settings)),
+            self._settings.skills_dir,
         )
 
     def nomes(self) -> list[str]:

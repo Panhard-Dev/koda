@@ -60,7 +60,7 @@ async def skills(request: Request) -> list[SkillInfo]:
     return [
         _info(skill, settings.workspace_path)
         for skill in listar(
-            settings.workspace_path, estado, ler_cadastradas(caminho_cadastradas(settings))
+            settings.workspace_path, estado, ler_cadastradas(caminho_cadastradas(settings)), settings.skills_dir
         )
     ]
 
@@ -78,7 +78,7 @@ async def cadastrar_skill(payload: SkillCreate, request: Request) -> SkillInfo:
     estado = ler_estado(caminho_estado(settings))
     existentes = {
         skill.name.casefold()
-        for skill in listar(settings.workspace_path, estado, ler_cadastradas(caminho))
+        for skill in listar(settings.workspace_path, estado, ler_cadastradas(caminho), settings.skills_dir)
     }
     if payload.name.casefold() in existentes:
         raise HTTPException(status_code=409, detail=f'já existe uma skill chamada "{payload.name}"')
@@ -108,7 +108,7 @@ async def alternar_skill(name: str, request: Request) -> SkillInfo:
         (
             item
             for item in listar(
-                settings.workspace_path, estado, ler_cadastradas(caminho_cadastradas(settings))
+                settings.workspace_path, estado, ler_cadastradas(caminho_cadastradas(settings)), settings.skills_dir
             )
             if item.name == name
         ),

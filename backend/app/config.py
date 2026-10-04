@@ -28,6 +28,18 @@ def _provider_padrao() -> ProviderName:
     return "host" if os.environ.get("KODA_BACKEND_PACKAGED") == "1" else "auto"
 
 
+def _skills_do_koda() -> Path | None:
+    """A pasta `skills/` que viaja com o Koda, achada pelo lugar onde este arquivo está.
+
+    Este arquivo mora em `<koda>/backend/app/`, então a pasta é `../../skills` — a mesma
+    conta em dev (`koda/skills`) e no instalado (`<instalação>/resources/skills`), sem
+    variável de ambiente e sem depender de onde o processo foi aberto. É o mesmo raciocínio
+    do `achar_backend` do lançador, que acha o backend ao lado dos recursos.
+    """
+    pasta = Path(__file__).resolve().parent.parent.parent / "skills"
+    return pasta if pasta.is_dir() else None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env",),
@@ -59,6 +71,19 @@ class Settings(BaseSettings):
     # Ferramentas: o agente é o comportamento normal do Koda (área de código).
     tools: bool = True
     workspace: Path | None = None
+    skills_dir: Path | None = Field(default_factory=_skills_do_koda)
+    """A pasta `skills/` que **vem com o Koda** — ao lado do backend, no projeto ou no
+    instalado.
+
+    O instalador traz `skills/` como recurso, e o backend mora em
+    `<koda>/backend/app/`, então a pasta é sempre `../../skills` a partir daqui: a mesma
+    conta vale em dev (`koda/skills`) e no instalado (`<instalação>/resources/skills`), sem
+    variável de ambiente e sem depender de onde o processo foi aberto.
+
+    Sem isto o app instalado nasceria sem skill nenhuma: `.agents/skills` do projeto e
+    `~/.agents/skills` são pastas de quem desenvolve, e não existem na máquina de quem só
+    instalou. `None` quando a pasta não existe (é o caso de um checkout sem as skills).
+    """
     tools_deny: str = ""
     acesso_livre: bool = False
     """Libera as ferramentas de arquivo para mexer fora da pasta de trabalho.
