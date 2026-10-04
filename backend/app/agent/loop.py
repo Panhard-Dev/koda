@@ -186,6 +186,23 @@ PROMPT_FERRAMENTAS = (
     "responder aparece na tela de quem está acompanhando: ele também é português, com as "
     "mesmas palavras da conversa — nunca inglês, nunca código de idioma misturado. "
     "A única exceção são trechos de código, nomes de arquivo e comandos."
+    "\n"
+    "**Skills e servidores MCP são recursos seus — use quando ajudar, não por obrigação.** "
+    "Além das ferramentas acima, a rodada pode trazer:\n"
+    "   • **skills** — pacotes de instruções (um método, um jeito de trabalhar) que você "
+    "carrega com `use_skill`. Elas não executam nada; ensinam como fazer.\n"
+    "   • **servidores MCP** — ferramentas de fora, com o prefixo `mcp__`, que rodam de "
+    "verdade e devolvem resultado.\n"
+    "Você decide **se**, **quando** e **para quê** usar cada um, conforme o pedido e o que "
+    "for aparecendo no caminho. Não existe sequência fixa: carregar uma skill no começo "
+    "para orientar a análise, no meio quando a tarefa muda de natureza, ou no fim para "
+    "conferir o que você entregou — tudo vale, desde que sirva ao trabalho. Eles podem "
+    "apoiar a análise, a montagem e a revisão do plano, a execução e a verificação do "
+    "resultado.\n"
+    "O contrário também vale: **tarefa que não precisa, não usa.** Não carregue skill nem "
+    "chame MCP para cumprir tabela, e não pergunte se pode — se estão na lista, é porque "
+    "estão disponíveis para você. Quando um deles combinar com o pedido, prefira "
+    "consultá-lo a improvisar: é ali que costuma estar o método que a pessoa espera."
 )
 
 #: O que a pessoa pediu nesta rodada. É a régua do "faça exatamente o que foi pedido,
