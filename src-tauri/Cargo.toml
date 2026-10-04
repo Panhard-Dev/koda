@@ -9,7 +9,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 # O diagnóstico da tela de Ajustes volta como JSON para a interface.
 serde = { version = "1", features = ["derive"] }
 # Ler a resposta do handshake (`{"hmac": "…"}`) sem parser de mentira.

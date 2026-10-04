@@ -26,6 +26,7 @@ from .routers import (
     attachments,
     chat,
     conversations,
+    dev_browser,
     host,
     mcps,
     models,
@@ -189,6 +190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(nuvem.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(host.router, prefix="/api")
+    app.include_router(dev_browser.router, prefix="/api")
 
     @app.get("/api/handshake", tags=["system"])
     async def handshake(nonce: str = "") -> dict[str, str]:
