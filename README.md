@@ -151,7 +151,7 @@ backend imprime o token ao subir e a interface o recebe em `VITE_API_TOKEN`.
 
 ## Recursos
 
-- **Ele executa, não improvisa.** 37 ferramentas: ler, criar, editar, mover, copiar, renomear
+- **Ele executa, não improvisa.** 39 ferramentas: ler, criar, editar, mover, copiar, renomear
   e apagar arquivos e pastas, aplicar um diff inteiro de uma vez, rodar comandos, rodar um
   trecho de código (Python ou JavaScript) e conferir sintaxe, procurar arquivo por nome ou
   trecho de código, ler páginas e pesquisar na web, instalar dependência e trabalhar com git
@@ -191,6 +191,32 @@ backend imprime o token ao subir e a interface o recebe em `VITE_API_TOKEN`.
   microfone em `pt-BR` e buscar dentro do histórico.
 - **Acessível e navegável pelo teclado.** Todos os menus respondem a `↑` `↓` `Enter` `→` `←`
   `Esc`, com `aria-expanded`, `aria-pressed` e `role="menu"` onde precisa.
+
+## Skills e MCP
+
+Duas portas para estender o que o Koda sabe — e elas não fazem a mesma coisa:
+
+| | O que é | Onde vive |
+| --- | --- | --- |
+| **Skill** | Instruções: um jeito de trabalhar que o agente carrega quando precisa | `.md` no projeto e em `backend/data/skills.json` |
+| **MCP** | Ferramentas: um processo que publica as suas próprias | `backend/data/mcps.json` |
+
+**Skill é instrução.** O agente recebe só o índice — nome e descrição — e puxa o conteúdo da
+que interessar pela ferramenta `use_skill`, em vez de carregar tudo no prompt. A descoberta
+olha os dois lugares, e a pasta do projeto vence a global quando o nome repete; cadastrar um
+nome já usado é recusado em vez de sobrescrever calado. Skill nasce **ligada**, e o estado fica
+em `data/skills-state.json` — só os desvios do padrão — e sobrevive a reinício. Desligada, ela
+continua na lista da interface mas sai do prompt do agente.
+
+**MCP é ferramenta.** Um servidor MCP é um processo que o Koda sobe, faz o handshake, lista as
+ferramentas e as entrega ao agente junto com as de casa. A tela mostra o **estado de agora**, e
+não a configuração: cada servidor vem com `conectado` e o número de ferramentas e, quando
+falha, o que ele escreveu no `stderr` — comando errado aparece como servidor caído, em vez de
+parecer que está funcionando. Mudar a configuração reabre a conexão na hora, sem reiniciar o
+app.
+
+Os dois ficam no menu do cabeçalho, cada um com submenu para ligar e desligar, e têm seção
+própria em *Ajustes*.
 
 ## Como funciona
 
