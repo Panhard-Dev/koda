@@ -556,7 +556,20 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
             let banco = pasta.join("koda.db");
             log(&format!("banco do app instalado: {}", banco.display()));
             comando.env("KODA_DATABASE_PATH", banco);
+            // Os MCPs precisam achar a **mesma** pasta de dados que o backend: é lá que o
+            // feed de erros (`dev-browser-logs.json`) e a lista consolidada
+            // (`dev-logs.json`) são publicados, e é de lá que `GET /api/dev-logs` lê. Sem
+            // esta variável eles caem no palpite deles (`cwd/data`), que no instalado é a
+            // pasta de instalação — e a aba Logs aparece vazia enquanto o MCP escreve num
+            // lugar que ninguém lê.
+            comando.env("KODA_DATA_DIR", &pasta);
         }
+        // As skills que vieram dentro do instalador não precisam de variável: o backend as
+        // acha pela própria posição (`<koda>/backend/app/` → `../../skills`, ver
+        // `_skills_do_koda` no `config.py`), que dá o mesmo resultado em dev e aqui.
+        // Sem isto o app instalado nasceria sem skill nenhuma: `.agents/skills` do projeto
+        // e `~/.agents/skills` são pastas de quem desenvolve.
+        //
         // Sem isto o Python do pacote pode reclamar de bytecode/paths em pastas de
         // programa; nada disso é nosso e nada disso precisa aparecer na tela.
         comando.env("PYTHONDONTWRITEBYTECODE", "1");
