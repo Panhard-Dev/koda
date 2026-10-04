@@ -30,6 +30,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..execution.processo import _sem_janela
+
 #: Versão do protocolo MCP que este cliente fala. É a revisão estável que os servidores
 #: publicados hoje aceitam; se o servidor responder outra, seguimos com a dele (o MCP manda
 #: o servidor escolher a versão negociada).
@@ -145,6 +147,11 @@ class ServidorMCP:
                 # processo — passar por shell abriria injeção de comando a partir do
                 # cadastro da tela.
                 shell=False,
+                # Sem isto, cada servidor (node.exe) abria uma **janela de console própria**
+                # quando o app roda empacotado: o `CREATE_NO_WINDOW` que o Rust usa para
+                # criar o backend **não** se propaga aos netos. Mesmo helper do resto do
+                # backend, para não haver dois jeitos de esconder janela.
+                **_sem_janela(),
             )
         except (OSError, ValueError) as exc:
             self.erro = f"não foi possível iniciar '{self.comando}': {exc}"
