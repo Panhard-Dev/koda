@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .. import projects
+from ..contracts import mudancas
 from ..policy import approvals
 from ..config import Settings
 from ..db import Database
@@ -127,6 +128,76 @@ async def pastas(
 ) -> dict[str, object]:
     """Subpastas de um caminho, para escolher a pasta sem diálogo do sistema."""
     return await call(projects.navegar, caminho)
+
+
+# --------------------------------------------------- o painel de código (aba Código)
+
+
+@router.get("/fs/arvore")
+async def arvore(caminho: str = Query(max_length=4096)) -> dict[str, object]:
+    """Os filhos de **uma** pasta, para a árvore do painel de código.
+
+    Um nível por vez de propósito: a árvore inteira de um projeto de verdade não cabe numa
+    tela, e trazê-la inteira para mostrar o que ninguém vai ler travaria a tela à toa.
+    """
+    try:
+        return await call(projects.arvore, caminho)
+    except NotADirectoryError:
+        raise HTTPException(status_code=404, detail="essa pasta não existe nesta máquina") from None
+    except OSError:
+        raise HTTPException(status_code=400, detail="não consegui abrir essa pasta") from None
+
+
+@router.get("/fs/arquivo")
+async def arquivo(caminho: str = Query(max_length=4096)) -> dict[str, object]:
+    """O texto de um arquivo, para o visualizador do painel de código.
+
+    Devolve o conteúdo real — o mesmo que o agente lê. `truncado: true` quando o arquivo
+    passou do teto do painel: é o que permite a tela dizer que cortou em vez de mentir que
+    aquilo é o arquivo inteiro.
+
+    Vai junto a **mudança** que a IA fez neste arquivo nesta execução (`null` quando não
+    mexeu). É o que o visualizador pinta de verde e de vermelho. Vem no mesmo pedido, e não
+    em outro, porque dois pedidos dariam duas chances de a tela mostrar o código de um
+    arquivo com o diff de outro.
+    """
+    try:
+        lido = await call(projects.ler_arquivo, caminho)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="esse arquivo não existe") from None
+    except OSError:
+        raise HTTPException(status_code=400, detail="não consegui ler esse arquivo") from None
+    lido["mudanca"] = await call(mudancas.de, str(lido["caminho"]))
+    return lido
+
+
+@router.get("/fs/mudancas")
+async def mudancas_da_execucao() -> dict[str, object]:
+    """O que a IA mudou nos arquivos nesta execução do Koda.
+
+    Sem as linhas do diff: é o que marca as linhas da árvore, e para isso bastam o caminho e
+    a contagem. As linhas vêm em `/fs/arquivo`, só do arquivo que estiver aberto.
+    """
+    return {"itens": await call(mudancas.listar)}
+
+
+@router.get("/fs/mudancas/chamada")
+async def mudanca_de_uma_chamada(id: str = Query(max_length=200)) -> dict[str, object]:
+    """O que **uma** chamada de ferramenta mudou, com as linhas do diff.
+
+    É o que o cartão da ferramenta mostra na conversa. Por chamada, e não por arquivo: num
+    arquivo escrito três vezes, o acumulado apareceria igual nos três cartões.
+
+    Lista vazia é resposta legítima — chamada que não escreveu nada, ou conversa reaberta
+    depois de o app fechar (o registro vive no processo, ver `contracts/mudancas.py`).
+    """
+    return {"itens": await call(mudancas.da_chamada, id)}
+
+
+@router.delete("/fs/mudancas")
+async def esquecer_mudancas() -> dict[str, object]:
+    """Esquece as marcas. O arquivo no disco **não** é tocado — sai só o registro."""
+    return {"removidas": await call(mudancas.limpar)}
 
 
 # ------------------------------------------------------------------ permissões
