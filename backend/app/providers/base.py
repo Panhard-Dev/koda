@@ -1,7 +1,8 @@
 """Contrato dos providers de resposta.
 
-A interface chama só isso: qualquer coisa que produza pedaços de texto em streaming
-serve como provider (modelo local, OpenAI, Ollama, o que vier).
+A interface chama só isso: qualquer coisa que produza pedaços de texto em streaming serve
+como provider. Hoje são **dois** — o `host` (o serviço de modelos oficial) e o `local`, que
+responde offline quando o serviço não está no ar. Não há provider de terceiro.
 """
 
 from __future__ import annotations
@@ -69,11 +70,24 @@ class Piece:
     reasoning: bool = False
     #: Marca de controle no fim do stream quando o provedor fechou com `finish_reason=length`.
     truncated: bool = False
+    #: O `usage` que o provedor manda no fim do stream, num pedaço **sem texto**.
+    #:
+    #: Existe porque o caminho de texto puro (`chat.py::_texto`) não recebe `StepResult`
+    #: nenhum: o `stream()` só devolve `Piece`, e o bloco de `usage` era descartado junto
+    #: com os chunks sem `choices`. Resultado: a ficha ficava sem contador de tokens sempre
+    #: que as ferramentas estavam desligadas. Vai como marcador de rodapé (`text=""`).
+    usage: dict[str, int] | None = None
 
 
 @runtime_checkable
 class Provider(Protocol):
     name: str
+    #: O provider consegue atender? Existe porque um provider já podia estar sem chave (o
+    #: caminho OpenAI-compatible, que saiu do produto). **Hoje os dois que restam são sempre
+    #: prontos** — o host porque quem valida o id é ele, o local porque não depende de nada —
+    #: então a guarda não dispara. Fica no contrato porque é ele que a interface lê
+    #: (`provider_ready` no health), e porque um provider que precise de credencial volta a
+    #: cair aqui em vez de falhar no meio da conversa.
     ready: bool
 
     def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
