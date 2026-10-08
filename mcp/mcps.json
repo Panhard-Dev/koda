@@ -1,7 +1,7 @@
 [
   {
     "name": "navegador",
-    "description": "Navegador do Painel Dev: abre localhost e arquivo do disco, le a pagina, clica e digita. O que ele faz aparece no Painel Dev.",
+    "description": "Navegador do Painel Dev: abre qualquer site, localhost e arquivo do disco, le a pagina, clica e digita. O que ele faz aparece no Painel Dev.",
     "command": "node",
     "params": "../mcp/dev-browser/server.mjs",
     "enabled": true
