@@ -18,14 +18,27 @@ class ToolCall:
     name: str
     arguments: dict[str, Any]
     raw_arguments: str = "{}"
+    #: O que o provedor mandou junto da chamada e espera receber **de volta**, sem que o Koda
+    #: entenda o que é. Hoje é o `extra_content` — o `google.thought_signature` do Gemini 3,
+    #: que a Vertex exige no histórico e responde 400 quando falta. Guardar o envelope e
+    #: ecoá-lo inteiro é o certo: interpretar um campo opaco é o que quebra na próxima versão
+    #: dele. `None` quando não veio nada além dos campos que o Koda já trata.
+    extra: dict[str, Any] | None = None
 
     def para_mensagem(self) -> dict[str, Any]:
-        """Formato OpenAI, com os argumentos intactos (o proxy casa pelo id)."""
-        return {
+        """Formato OpenAI, com os argumentos intactos (o proxy casa pelo id).
+
+        O envelope opaco volta **como veio**: é o que faz um gateway que exige o campo (a
+        assinatura do Gemini, por exemplo) continuar aceitando a conversa no segundo passo.
+        """
+        mensagem: dict[str, Any] = {
             "id": self.id,
             "type": "function",
             "function": {"name": self.name, "arguments": self.raw_arguments or "{}"},
         }
+        if self.extra:
+            mensagem.update(self.extra)
+        return mensagem
 @dataclass(slots=True)
 class StepResult:
     """Um passo do modelo: texto e/ou pedidos de ferramenta."""
@@ -47,6 +60,12 @@ class ToolStep:
     duration_ms: int
     call_id: str = ""
     ok: bool = True
+    #: A chamada **como o modelo a escreveu**, em texto. `arguments` é essa mesma chamada já
+    #: desserializada, e é ela que a ferramenta recebe. Este campo existe para os casos em que
+    #: não há o que desserializar: JSON cortado no meio (`finish_reason: "length"`) chega como
+    #: `{}`, e o passo ficava sem nenhum registro do que o modelo tinha mandado — quem
+    #: depurava via só "caminho vazio" e ia procurar o erro na ferramenta.
+    raw_arguments: str = ""
     #: De qual servidor MCP e de qual ferramenta é este passo (`{"servidor", "ferramenta"}`).
     #: Vazio nas ferramentas do Koda. Vai gravado junto da mensagem porque a conversa é
     #: reaberta depois, e sem isto o nome normalizado (`eco_server`) seria tudo o que a tela
@@ -61,6 +80,7 @@ class ToolStep:
             "duration_ms": self.duration_ms,
             "call_id": self.call_id,
             "ok": self.ok,
+            "raw_arguments": self.raw_arguments,
             "mcp": self.mcp,
         }
 

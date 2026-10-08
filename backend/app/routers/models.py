@@ -14,6 +14,8 @@ embaixo de cada linha era ruído — o usuário já sabe de onde vem o catálogo
 
 from __future__ import annotations
 
+from collections import Counter
+
 import httpx
 from fastapi import APIRouter, Request
 
@@ -77,10 +79,24 @@ def catalogo(dados: dict, janela: int | None = None) -> list[ModelInfo]:
     O host já manda o nome de exibição em `name` ("Liz Nano", "Koda 1"), então ele manda:
     `rotulo()` só entra quando o `name` falta, para não transformar "liz-3-flash" em algo
     pior do que o próprio host escolheu chamar.
+
+    O id do provedor pode vir com namespace (`vendor/model`), e o seletor mostra o nome curto.
+    Encurtar **sempre** funde dois modelos quando dois fornecedores publicam o mesmo nome: o
+    usuário escolhe um e o pedido sai com o id do outro, sem ninguém perceber. Então o curto
+    vale só enquanto for único — colidiu, os dois ficam com o **id integral**, que é o que o
+    host aceita de volta.
     """
+    entradas = [
+        (str(item.get("id", "")), item)
+        for item in dados.get("data") or []
+        if isinstance(item, dict)
+    ]
+    curtos = Counter(bruto.split("/")[-1] for bruto, _ in entradas)
+
     itens: list[ModelInfo] = []
-    for item in dados.get("data") or []:
-        identificador = str(item.get("id", "")).split("/")[-1]
+    for bruto, item in entradas:
+        curto = bruto.split("/")[-1]
+        identificador = bruto if curtos[curto] > 1 else curto
         if not identificador or any(marca in identificador for marca in FORA_DO_CHAT):
             continue
         nome = str(item.get("name") or "").strip()

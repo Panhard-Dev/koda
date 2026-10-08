@@ -93,6 +93,15 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         at=row["at"],
         steps=passos,
         todos=todos,
+        incompleto=bool(row["incompleto"]) if "incompleto" in colunas else False,
+        motivo=row["motivo"] if "motivo" in colunas else None,
+        pendentes=(
+            [str(item) for item in _carregar_json(row["pendentes"], []) if str(item).strip()]
+            if "pendentes" in colunas
+            else []
+        ),
+        executou=int(row["executou"]) if "executou" in colunas else 0,
+        retomavel=bool(row["retomavel"]) if "retomavel" in colunas else True,
     )
 
 
@@ -123,8 +132,8 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
         """
         INSERT INTO messages
           (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
-           contexto, at, steps, todos)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           contexto, at, steps, todos, incompleto, motivo, pendentes, executou, retomavel)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -145,6 +154,11 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
             json.dumps(
                 [item.model_dump() for item in message.todos], ensure_ascii=False
             ),
+            1 if message.incompleto else 0,
+            message.motivo,
+            json.dumps(message.pendentes, ensure_ascii=False),
+            message.executou,
+            1 if message.retomavel else 0,
         ),
     )
     conn.execute(

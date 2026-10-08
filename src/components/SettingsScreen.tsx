@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import {
   ArrowLeft,
   Activity,
+  Bot,
   Cable,
   Check,
   ChevronDown,
@@ -26,7 +27,7 @@ import {
 import AccountSection from './AccountSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
 import type { Conta as ContaKoda } from '../api/cloud'
-import type { ApiProject } from '../api/client'
+import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
 import { WindowControls } from './WindowControls'
@@ -93,6 +94,7 @@ export type SettingsSection =
   | 'conta'
   | 'uso'
   | 'skills'
+  | 'agents'
   | 'mcps'
   | 'nuvem'
   | 'sobre'
@@ -138,6 +140,13 @@ const SECTIONS: {
     icon: <Puzzle className="h-4 w-4" strokeWidth={1.7} />,
     title: 'Skills',
     subtitle: 'Capacidades extras que o agente carrega quando a tarefa pede.',
+  },
+  {
+    id: 'agents',
+    label: 'Agentes',
+    icon: <Bot className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Agentes',
+    subtitle: 'Sub-agentes que o agente principal lança — cada um com o prompt e as ferramentas dele.',
   },
   {
     id: 'mcps',
@@ -261,6 +270,65 @@ function Campo({
         />
       )}
     </label>
+  )
+}
+
+/**
+ * Uma lista de nomes que se marca com o clique — as skills e os MCPs de um sub-agente.
+ *
+ * É escolha, e não digitação: o nome tem de bater com o que existe no backend, e escrever à
+ * mão só criaria um agente que não alcança nada. O que **não** está marcado fica fora — o
+ * poder do agente é o que está aceso aqui.
+ */
+function Escolha({
+  titulo,
+  ajuda,
+  opcoes,
+  escolhidos,
+  onAlternar,
+  vazio,
+}: {
+  titulo: string
+  ajuda: string
+  opcoes: string[]
+  escolhidos: string[]
+  onAlternar: (nome: string) => void
+  vazio: string
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[11px] font-semibold tracking-wider text-koda-fg/45 uppercase">
+        {titulo}
+      </span>
+      {opcoes.length === 0 ? (
+        <p className="text-[12.5px] text-koda-fg/40">{vazio}</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {opcoes.map((nome) => {
+            const ativo = escolhidos.includes(nome)
+            return (
+              <button
+                key={nome}
+                type="button"
+                aria-pressed={ativo}
+                onClick={() => onAlternar(nome)}
+                className={[
+                  'flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] ring-1 transition-colors duration-150',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent',
+                  ativo
+                    ? 'bg-koda-accent/15 text-koda-accent ring-koda-accent/30'
+                    : 'text-koda-fg/60 ring-koda-fg/12 hover:bg-koda-fg/6 hover:text-koda-fg',
+                ].join(' ')}
+              >
+                {ativo ? <Check className="h-3 w-3" strokeWidth={2.6} /> : null}
+                {nome}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <p className="text-[11.5px] leading-4 text-koda-fg/35">{ajuda}</p>
+    </div>
   )
 }
 
@@ -1134,6 +1202,9 @@ export function SettingsScreen({
   mcps = [],
   onAddSkill,
   onAddMcp,
+  agents = [],
+  onSaveAgent,
+  onDeleteAgent,
 }: {
   onClose: () => void
   usage: UsageSummary
@@ -1176,6 +1247,12 @@ export function SettingsScreen({
   onAddSkill?: (skill: NovoSkill) => Promise<void>
   /** Cadastra um servidor MCP novo no backend e devolve quando a lista já foi atualizada. */
   onAddMcp?: (mcp: NovoMcp) => Promise<void>
+  /** Os sub-agentes do `subs.agentes.md`. */
+  agents?: ApiAgente[]
+  /** Cria ou substitui um sub-agente pelo nome (o backend devolve a lista como ficou). */
+  onSaveAgent?: (agente: NovoAgente) => Promise<void>
+  /** Tira um sub-agente do arquivo. */
+  onDeleteAgent?: (nome: string) => Promise<void>
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? 'geral')
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]
@@ -1223,6 +1300,24 @@ export function SettingsScreen({
   const [erroMcp, setErroMcp] = useState<string | null>(null)
   const [salvandoMcp, setSalvandoMcp] = useState(false)
   const [tentouMcp, setTentouMcp] = useState(false)
+
+  // ---- sub-agentes ----
+  const [formAgente, setFormAgente] = useState(false)
+  const [agenteNome, setAgenteNome] = useState('')
+  const [agentePrompt, setAgentePrompt] = useState('')
+  const [agenteSkills, setAgenteSkills] = useState<string[]>([])
+  const [agenteMcps, setAgenteMcps] = useState<string[]>([])
+  const [agenteModelo, setAgenteModelo] = useState('')
+  /**
+   * Qual agente está sendo editado. Vazio = o formulário está criando um novo.
+   *
+   * Editar e criar usam o mesmo formulário de propósito: é o mesmo conjunto de campos, e o
+   * nome é o identificador — salvar com um nome que já existe substitui aquele agente.
+   */
+  const [editandoAgente, setEditandoAgente] = useState('')
+  const [erroAgente, setErroAgente] = useState<string | null>(null)
+  const [salvandoAgente, setSalvandoAgente] = useState(false)
+  const [tentouAgente, setTentouAgente] = useState(false)
 
   const fecharFormSkill = () => {
     setFormSkill(false)
@@ -1282,6 +1377,73 @@ export function SettingsScreen({
       setErroMcp(fraseDeFalha(erro))
     } finally {
       setSalvandoMcp(false)
+    }
+  }
+
+  // ---- sub-agentes ----
+
+  const fecharFormAgente = () => {
+    setFormAgente(false)
+    setEditandoAgente('')
+    setAgenteNome('')
+    setAgentePrompt('')
+    setAgenteSkills([])
+    setAgenteMcps([])
+    setAgenteModelo('')
+    setErroAgente(null)
+    setTentouAgente(false)
+  }
+
+  /** Abre o formulário com o agente dentro — editar é o mesmo formulário, preenchido. */
+  const editarAgente = (agente: ApiAgente) => {
+    setFormAgente(true)
+    setEditandoAgente(agente.nome)
+    setAgenteNome(agente.nome)
+    setAgentePrompt(agente.prompt)
+    setAgenteSkills([...agente.skills])
+    setAgenteMcps([...agente.mcps])
+    setAgenteModelo(agente.modelo)
+    setErroAgente(null)
+    setTentouAgente(false)
+  }
+
+  /** Liga/desliga um nome numa lista de escolhidos — é assim que skills e MCPs se marcam. */
+  const alternar = (lista: string[], setLista: (valor: string[]) => void, nome: string) =>
+    setLista(lista.includes(nome) ? lista.filter((item) => item !== nome) : [...lista, nome])
+
+  const handleSalvarAgente = async () => {
+    setTentouAgente(true)
+    const nome = agenteNome.trim()
+    if (!nome) {
+      setErroAgente('Dê um nome ao agente — é por ele que o principal o chama.')
+      return
+    }
+    setSalvandoAgente(true)
+    setErroAgente(null)
+    try {
+      await onSaveAgent?.({
+        nome,
+        prompt: agentePrompt.trim(),
+        skills: agenteSkills,
+        mcps: agenteMcps,
+        modelo: agenteModelo.trim(),
+      })
+      fecharFormAgente()
+    } catch (erro) {
+      setErroAgente(fraseDeFalha(erro))
+    } finally {
+      setSalvandoAgente(false)
+    }
+  }
+
+  const handleApagarAgente = async (nome: string) => {
+    setErroAgente(null)
+    try {
+      await onDeleteAgent?.(nome)
+      // Apagou o que estava aberto no formulário: fecha, senão ele salvaria de volta.
+      if (editandoAgente === nome) fecharFormAgente()
+    } catch (erro) {
+      setErroAgente(fraseDeFalha(erro))
     }
   }
 
@@ -1768,6 +1930,140 @@ export function SettingsScreen({
                   <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
                     Cadastre uma skill em “Adicionar Skill” — ela entra nesta lista e o
                     agente passa a usá-la quando a conversa pedir.
+                  </p>
+                </div>
+              )}
+            </Card>
+          ) : null}
+
+          {section === 'agents' ? (
+            <Card
+              title="Sub-agentes"
+              description="Cada um roda com o prompt e as ferramentas dele. O agente principal os lança pelo nome, com a ferramenta sub_agente."
+              action={
+                <BotaoAdicionar
+                  aberto={formAgente}
+                  rotulo="Adicionar Agente"
+                  onClick={() => (formAgente ? fecharFormAgente() : setFormAgente(true))}
+                />
+              }
+            >
+              {formAgente ? (
+                <div className="flex flex-col gap-3.5 border-t border-koda-fg/8 px-5 py-4">
+                  <Campo
+                    label="Nome"
+                    valor={agenteNome}
+                    onChange={setAgenteNome}
+                    placeholder="ex.: revisor"
+                    obrigatorio
+                    invalido={tentouAgente && !agenteNome.trim()}
+                  />
+                  <Campo
+                    label="Prompt"
+                    valor={agentePrompt}
+                    onChange={setAgentePrompt}
+                    placeholder="O que este agente é e o que ele faz — é o que ele recebe ao acordar"
+                    multiline
+                  />
+                  <Escolha
+                    titulo="Skills que ele pode usar"
+                    ajuda="Sem nenhuma marcada, ele não carrega skill nenhuma — um agente novo não herda poder."
+                    opcoes={(skills ?? []).map((item) => item.name)}
+                    escolhidos={agenteSkills}
+                    onAlternar={(nome) => alternar(agenteSkills, setAgenteSkills, nome)}
+                    vazio="Nenhuma skill instalada."
+                  />
+                  <Escolha
+                    titulo="MCPs que ele pode usar"
+                    ajuda="Sem nenhum marcado, ele não alcança servidor nenhum."
+                    opcoes={(mcps ?? []).map((item) => item.name)}
+                    escolhidos={agenteMcps}
+                    onAlternar={(nome) => alternar(agenteMcps, setAgenteMcps, nome)}
+                    vazio="Nenhum servidor MCP configurado."
+                  />
+                  <Campo
+                    label="Modelo"
+                    valor={agenteModelo}
+                    onChange={setAgenteModelo}
+                    placeholder="Vazio = o modelo que o principal mandar"
+                  />
+                  {erroAgente ? (
+                    <p className="text-[12.5px] leading-5 text-red-400">{erroAgente}</p>
+                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleSalvarAgente()}
+                      disabled={salvandoAgente}
+                      className="flex items-center gap-1.5 rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90 disabled:opacity-50"
+                    >
+                      {salvandoAgente ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.2} />
+                      )}
+                      {editandoAgente ? 'Salvar alterações' : 'Criar agente'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={fecharFormAgente}
+                      className="rounded-xl px-3 py-1.5 text-[12.5px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/6 hover:text-koda-fg"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {(agents ?? []).length > 0 ? (
+                <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
+                  {(agents ?? []).map((agente) => (
+                    <li key={agente.nome} className="px-5 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <Bot className="h-4 w-4 shrink-0 text-koda-fg/45" strokeWidth={1.7} />
+                        <span className="min-w-0 truncate font-mono text-[13.5px] font-medium text-koda-fg/90">
+                          {agente.nome}
+                        </span>
+                        <span className="ml-auto shrink-0 text-[11.5px] text-koda-fg/40">
+                          {agente.skills.length} skill(s) · {agente.mcps.length} MCP(s)
+                          {agente.modelo ? ` · ${agente.modelo}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => editarAgente(agente)}
+                          className="shrink-0 rounded-lg px-2 py-1 text-[12px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/8 hover:text-koda-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Apagar ${agente.nome}`}
+                          title="Apagar"
+                          onClick={() => void handleApagarAgente(agente.nome)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-koda-fg/40 transition-colors duration-150 hover:bg-red-500/12 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
+                        >
+                          <X className="h-3.5 w-3.5" strokeWidth={1.9} />
+                        </button>
+                      </div>
+                      {agente.prompt ? (
+                        <p className="mt-1.5 line-clamp-2 text-[12.5px] leading-5 text-koda-fg/45">
+                          {agente.prompt}
+                        </p>
+                      ) : (
+                        <p className="mt-1.5 text-[12.5px] text-amber-500/80">
+                          Sem prompt: ele acorda sabendo só que é um sub-agente.
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : formAgente ? null : (
+                <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
+                  <Bot className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
+                  <p className="text-[13.5px] font-medium text-koda-fg/80">Nenhum sub-agente</p>
+                  <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
+                    Crie um em “Adicionar Agente”. O principal passa a poder lançá-lo pelo
+                    nome — e ele não apaga nada nem sai da pasta do projeto.
                   </p>
                 </div>
               )}

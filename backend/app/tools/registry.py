@@ -228,6 +228,7 @@ def _sinonimos(argumentos: dict[str, Any]) -> dict[str, Any]:
             normalizado[destino] = valor
     return normalizado
 
+from .domains.agentes.schema import DEFINICOES as _AGENTES
 from .domains.files.schema import DEFINICOES as _ARQUIVOS
 from .domains.git.schema import DEFINICOES as _GIT
 from .domains.plano.schema import DEFINICOES as _PLANO
@@ -243,6 +244,9 @@ DEFINICOES: list[dict[str, Any]] = [
     *_WEB,
     *_PLANO,
     *_SKILLS,
+    # Por último de propósito: é a ferramenta que **delega**, e o modelo deve olhar as
+    # outras antes de decidir que precisa de outra cabeça.
+    *_AGENTES,
 ]
 #: Todas as ferramentas que executam algo no disco ou na máquina.
 ESCRITA = {

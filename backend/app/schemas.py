@@ -81,6 +81,22 @@ class ChatRequest(BaseModel):
     Exige `conversation_id` e dispensa `text`.
     """
 
+    livre: bool = False
+    """A rodada roda **livre**: nenhuma ação pede permissão antes de acontecer.
+
+    É o que a aba Subs pede. Ela não tem cartão de permissão, e um pedido sem cartão deixaria
+    o agente **parado para sempre** esperando uma resposta que ninguém tem onde dar — pior do
+    que a pergunta que o cartão existe para fazer.
+
+    Vale só para esta rodada: o modo guardado (`approvals.modo`) não muda, e o chat de baixo
+    continua seguindo o dele.
+
+    Quem pode pedir isto é a **interface**, que fala com o backend com o token da execução.
+    O código que o agente roda não tem esse token (ver `seguranca.py`), então ele não tem
+    como se autorizar sozinho por aqui — que é exatamente o achado que a porteira de
+    permissão existe para fechar.
+    """
+
     @model_validator(mode="after")
     def _exige_conteudo(self) -> ChatRequest:
         """Limpa o texto e exige **alguma** coisa: ou uma mensagem, ou um anexo.
@@ -107,6 +123,8 @@ class ToolStepOut(BaseModel):
     duration_ms: int = 0
     call_id: str = ""
     ok: bool = True
+    """A chamada como o modelo a escreveu, em texto (ver `contracts.turn.ToolStep`)."""
+    raw_arguments: str = ""
     """De qual servidor MCP e de qual ferramenta é o passo (`{"servidor", "ferramenta"}`).
 
     Vazio nas ferramentas do Koda. É o **recurso acionado** que a interface mostra: o nome
@@ -144,13 +162,18 @@ class Message(BaseModel):
     """
     model: str | None = None
     elapsed_ms: int | None = None
+    tokens: int | None = None
     """
-    Tokens que a resposta custou, somando todos os passos do agente.
+    O que a resposta **escreveu**, somando os passos do agente (`completion_tokens`).
+
+    É o tamanho da resposta, não o custo dela. O custo seria a soma de `total_tokens` — e aí
+    o mesmo contexto entra uma vez por passo (cada passo reenvia o histórico inteiro), o que
+    dava um número de aparência absurda na ficha. Para o custo, ver o log do provedor.
 
     `None` quando o provedor não conta (servidor local, provedor sem `usage`): a ficha da
     resposta simplesmente não mostra o uso, em vez de mostrar um zero mentiroso.
     """
-    tokens: int | None = None
+    contexto: int | None = None
     """
     Tamanho do contexto no **último passo** da resposta, em tokens de entrada.
 
@@ -158,12 +181,28 @@ class Message(BaseModel):
     estimativa — é ele que o medidor de contexto ao lado do modelo mostra. `None` quando o
     provedor não conta.
     """
-    contexto: int | None = None
     at: int
-    """Ferramentas chamadas nesta resposta (vazio fora do modo agente)."""
     steps: list[ToolStepOut] = Field(default_factory=list)
-    """Lista de tarefas da resposta, quando o agente montou uma (tarefa grande)."""
+    """Ferramentas chamadas nesta resposta (vazio fora do modo agente)."""
     todos: list[TodoItem] = Field(default_factory=list)
+    """Lista de tarefas da resposta, quando o agente montou uma (tarefa grande)."""
+    incompleto: bool = False
+    """A rodada parou antes de terminar o que foi pedido.
+
+    Fica **gravado** junto da mensagem de propósito: o cartão de «tarefa não concluída» tem
+    de voltar quando a conversa é reaberta. Antes ele vivia só na tela, e reabrir mostrava um
+    plano com um item «em andamento» e nada rodando — sem dizer que a tarefa tinha parado
+    nem oferecer o Retomar.
+    """
+    motivo: str | None = None
+    """O **código** do motivo (`loop.PARADA_*`), não a frase — quem traduz é a tela."""
+    pendentes: list[str] = Field(default_factory=list)
+    """Itens do plano que ficaram em aberto, com o nome que o próprio agente deu."""
+    executou: int = 0
+    """Quantas ferramentas rodaram de verdade: separa «nada foi executado» de «parte está no
+    disco»."""
+    retomavel: bool = True
+    """Dá para continuar de onde parou? Falso só quando o mesmo pedido não caberia de novo."""
 
 
 class ConversationSummary(BaseModel):
@@ -247,6 +286,33 @@ class ModelInfo(BaseModel):
     percentual bonito e falso.
     """
     janela: int | None = None
+
+
+class AgenteInfo(BaseModel):
+    """Um sub-agente, do jeito que a seção Agentes mostra e que o `@` lista."""
+
+    nome: str
+    prompt: str = ""
+    """As skills que ele pode carregar. Vazio = nenhuma — agente novo não herda poder."""
+    skills: list[str] = Field(default_factory=list)
+    """Os servidores MCP que ele pode usar. Vazio = nenhum."""
+    mcps: list[str] = Field(default_factory=list)
+    """Modelo dele, quando valer um diferente do principal. Vazio = o que o principal mandar."""
+    modelo: str = ""
+
+
+class AgenteInput(BaseModel):
+    """O que a tela manda ao criar ou editar um sub-agente.
+
+    O nome é o identificador: salvar com um nome que já existe **substitui** aquele agente.
+    É editar, e não duplicar — quem quer outro agente dá outro nome.
+    """
+
+    nome: str = Field(min_length=1, max_length=60)
+    prompt: str = Field(default="", max_length=20_000)
+    skills: list[str] = Field(default_factory=list, max_length=40)
+    mcps: list[str] = Field(default_factory=list, max_length=40)
+    modelo: str = Field(default="", max_length=80)
 
 
 class SkillInfo(BaseModel):

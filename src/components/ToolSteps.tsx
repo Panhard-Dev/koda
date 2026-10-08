@@ -2,6 +2,7 @@ import { ChevronRight, TriangleAlert, Wrench } from 'lucide-react'
 import type { ToolStep } from '../api/client'
 import { formatarDuracao } from '../duracao'
 import { recursoDoPasso, resumoArgumentos, rotuloDoPasso } from '../tools'
+import DiffDoPasso from './DiffDoPasso'
 import { ToolIcon, ToolSpinner } from './ToolIcon'
 
 /**
@@ -119,6 +120,12 @@ function Linha({ step }: { step: ToolStep }) {
             <span className="font-medium text-koda-fg/55">{step.mcp.ferramenta}</span>
           </p>
         )}
+        {/*
+          * O código da chamada, com o verde no que entrou e o vermelho no que saiu. Só
+          * aparece nas ferramentas que escrevem arquivo — as outras não têm mudança para
+          * mostrar, e o componente devolve nada sozinho.
+          */}
+        <DiffDoPasso step={step} />
         {/*
           * `break-words` para a saída não virar rolagem lateral: um JSON numa linha,
           * um base64 ou uma URL de download são o caso comum aqui, e rolar de lado

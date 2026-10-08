@@ -51,7 +51,8 @@
       "../mcp": "mcp",
       "../skills": "skills",
       "runtime/backend/python": "backend/python",
-      "runtime/backend/app": "backend/app"
+      "runtime/backend/app": "backend/app",
+      "runtime/node": "node"
     },
     "icon": [
       "icons/32x32.png",

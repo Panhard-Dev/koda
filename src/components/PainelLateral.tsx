@@ -4,7 +4,10 @@ import { AlertTriangle, ArrowRight, Check, RotateCw, X } from 'lucide-react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { DENTRO_DO_TAURI } from './WindowControls'
 import { estadoDoNavegador, estadoDosLogs } from '../api/client'
-import type { ErroDeLog, EstadoDosLogs } from '../api/client'
+import type { ApiProject, ErroDeLog, EstadoDosLogs } from '../api/client'
+import { AbaCodigo } from './PainelCodigo'
+import Subs from './Subs'
+import type { SessaoDeSub } from './Subs'
 
 /** As seções do painel. */
 const ABAS = ['Painel Dev', 'Código', 'Subs', 'Logs'] as const
@@ -87,8 +90,9 @@ function enderecoDoArquivo(caminho: string): string {
 }
 
 /**
- * Barra lateral — casca, abas e o X. Só a aba **Painel Dev** tem conteúdo (um navegador);
- * as outras três continuam vazias.
+ * Barra lateral — casca, abas e o X. As quatro abas têm conteúdo: **Painel Dev** (um
+ * navegador), **Código** (a árvore do projeto de um lado, o arquivo do outro), **Subs** (uma
+ * conversa separada, com prompt box simples) e **Logs** (o retrato que o MCP publica).
  *
  * O que ela é hoje, e só isso:
  * - uma **sobreposição**: `fixed`, da borda de cima à de baixo da janela, sem empurrar o
@@ -280,7 +284,19 @@ function AbaLogs() {
   )
 }
 
-export function PainelLateral({ aberto, onFechar }: { aberto: boolean; onFechar: () => void }) {
+export function PainelLateral({
+  aberto,
+  onFechar,
+  projeto,
+  subs = [],
+}: {
+  aberto: boolean
+  onFechar: () => void
+  /** O projeto aberto no app — é a pasta que a aba **Código** mostra. `null` = nenhum. */
+  projeto: ApiProject | null
+  /** As sessões de sub-agente lançadas — a aba **Subs** abre uma aba por uma delas. */
+  subs?: SessaoDeSub[]
+}) {
   const caixa = useRef<HTMLElement>(null)
   /** Qual seção está aberta. Estado local: é escolha de tela, não do app. */
   const [aba, setAba] = useState<(typeof ABAS)[number]>(ABAS[0])
@@ -517,6 +533,8 @@ export function PainelLateral({ aberto, onFechar }: { aberto: boolean; onFechar:
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
+        {aba === 'Código' ? <AbaCodigo projeto={projeto} /> : null}
+        {aba === 'Subs' ? <Subs projeto={projeto} subs={subs} /> : null}
         {aba === 'Logs' ? <AbaLogs /> : null}
         {aba !== 'Painel Dev' ? null : (
           <>

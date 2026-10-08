@@ -44,6 +44,7 @@ from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas, registry
 from ..agent.loop import (
     CONTINUAR_TRUNCADA,
+    PARADA_ABORTADA,
     PARADA_PROVEDOR,
     RETOMAR_TAREFA,
     Emit,
@@ -148,18 +149,6 @@ async def _texto(
     )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": False})
 
-    if not engine.ready:
-        yield sse(
-            "error",
-            {
-                "message": (
-                    "O provider configurado não está pronto: preencha OPENAI_API_KEY no "
-                    "backend/.env (ou use KODA_PROVIDER=local) e reinicie o servidor."
-                )
-            },
-        )
-        return
-
     options = _options(
         payload,
         request.app.state.settings.assistente,
@@ -172,6 +161,9 @@ async def _texto(
 
     pieces: list[str] = []
     stored = False
+    #: O `usage` do rodapé do stream (ver `Piece.usage`). Sem ferramentas não há
+    #: `StepResult`, então é daqui que sai o contador da ficha.
+    uso: dict[str, int] = {}
     if compactados:
         # A nota entra no texto gravado junto com a resposta: quem relê a conversa depois
         # precisa saber que parte do histórico virou resumo (e não que sumiu).
@@ -183,6 +175,10 @@ async def _texto(
             trecho: list[str] = []
             truncado = False
             async for piece in engine.stream(turns, options):
+                # Rodapé do stream: traz os tokens, não é texto nem raciocínio.
+                if piece.usage is not None:
+                    uso = piece.usage
+                    continue
                 if piece.truncated:
                     truncado = True
                     continue
@@ -203,7 +199,21 @@ async def _texto(
 
         text = "".join(pieces).strip()
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        message = await call(_store, db, conversation_id, text, modelo, elapsed_ms, [])
+        # `tokens` é a **saída** da resposta e `contexto` é o `prompt_tokens` do pedido — os
+        # dois saem do rodapé do stream. Antes, este caminho gravava sem os dois e a ficha
+        # (e o anel de contexto) ficavam vazios sempre que as ferramentas estavam desligadas.
+        message = await call(
+            _store,
+            db,
+            conversation_id,
+            text,
+            modelo,
+            elapsed_ms,
+            [],
+            _tokens(uso),
+            None,
+            int(uso.get("prompt_tokens", 0) or 0) or None,
+        )
         stored = True
         yield sse(
             "done",
@@ -213,6 +223,7 @@ async def _texto(
                 "elapsed_ms": elapsed_ms,
                 "steps": 0,
                 "tokens": message.tokens,
+                "contexto": message.contexto or None,
                 "usage": await call(_usage, db, payload.tz_offset_minutes),
             },
         )
@@ -318,6 +329,10 @@ async def _agente(
     passos: list[ToolStepOut] = []
     resultado = Resultado(texto="", passos=[], completou=False, uso={})
     stored = False
+    #: Por que a rodada fechou quando ela não fechou pelo caminho normal. Quem grava o que
+    #: sobrou é o `finally`, e ele precisa saber: sem isto, uma queda do provedor ficaria
+    #: registrada como «interrompida» — outro motivo, e outra conversa para quem lê.
+    motivo_do_fim: str = PARADA_ABORTADA
     fim: asyncio.Queue[tuple[str, dict[str, object]] | None] = asyncio.Queue()
     #: Id desta tarefa. Vai junto de cada processo que ela começar, para o Parar derrubar
     #: só os processos **dela** (ver `ferramentas.encerrar_do_dono`).
@@ -335,6 +350,11 @@ async def _agente(
         await fim.put((evento, dados))
 
     modo_permissao = await call(_modo_de_permissao, db)
+    # A aba Subs pede a rodada livre: ela não tem cartão de permissão, e um pedido sem cartão
+    # deixaria o agente parado para sempre esperando resposta. Vale para esta rodada só — o
+    # modo guardado continua sendo o do app inteiro.
+    if payload.livre:
+        modo_permissao = "livre"
 
     async def aprovar(acao: dict[str, object]) -> str:
         return await _pedir_permissao(request, db, modo_permissao, emit, acao)
@@ -373,6 +393,9 @@ async def _agente(
                 # de uma skill — inclusive as da máquina e as cadastradas, que o `read_file`
                 # não alcança.
                 skills=SkillStore(settings, workspace),
+                # A configuração desta execução: quem a usa é o `sub_agente`, que monta a
+                # rodada dele a partir dela (o `subs.agentes.md`, os tetos, as skills).
+                settings=settings,
             )
         finally:
             await fim.put(None)
@@ -418,6 +441,7 @@ async def _agente(
                 duration_ms=passo.duration_ms,
                 call_id=passo.call_id,
                 ok=passo.ok,
+                raw_arguments=passo.raw_arguments,
                 # O endereço de origem do que veio de servidor MCP: é o que a tela mostra
                 # como "recurso acionado" (servidor + ferramenta reais).
                 mcp=passo.mcp,
@@ -441,6 +465,11 @@ async def _agente(
             _tokens(resultado.uso),
             resultado.todos or plano,
             resultado.contexto or None,
+            resultado.completou,
+            resultado.motivo or None,
+            resultado.pendentes,
+            resultado.executou,
+            resultado.retomavel,
         )
         stored = True
         yield sse(
@@ -467,6 +496,7 @@ async def _agente(
             },
         )
     except ProviderError as error:
+        motivo_do_fim = PARADA_PROVEDOR
         yield sse("error", {"message": str(error)})
         # Contrato de vivacidade (achado 9 do QA): erro **encerra a rodada**, e o cliente
         # precisa do evento terminal para sair de "Pensando"/"Trabalhando…". Antes, o `done`
@@ -502,10 +532,14 @@ async def _agente(
             except (asyncio.CancelledError, asyncio.TimeoutError, ProviderError):
                 pass
 
-        # Parou no meio ou caiu a conexão: guarda o que já saiu, sem perder a tarefa.
+        # Parou no meio ou caiu a conexão: guarda o que já saiu, sem perder a tarefa — e
+        # **dizendo que parou**. Antes esta gravação não levava desfecho nenhum, e reabrir a
+        # conversa mostrava o plano com um item «em andamento» e nada rodando: nem sinal de
+        # que a tarefa tinha parado, nem o botão de retomar. Era esse o estado sem saída.
         if not stored:
             texto = ("".join(pedacos) or resultado.texto).strip()
-            if texto or plano:
+            plano_do_fim = resultado.todos or plano
+            if texto or plano_do_fim:
                 _store(
                     db,
                     conversation_id,
@@ -514,9 +548,34 @@ async def _agente(
                     None,
                     passos,
                     None,
-                    resultado.todos or plano,
+                    plano_do_fim,
                     resultado.contexto or None,
+                    # Não completou, e o motivo diz qual dos dois foi: o provedor caiu ou o
+                    # cliente fechou a porta no meio.
+                    False,
+                    motivo_do_fim,
+                    _pendentes_do_plano(plano_do_fim),
+                    sum(1 for passo in passos if passo.ok),
+                    # Retomável nos dois casos: o trabalho parou, mas o pedido continua de
+                    # pé. Só o contexto estourado é que não volta a caber.
+                    True,
                 )
+
+
+def _pendentes_do_plano(plano: list[dict[str, object]]) -> list[str]:
+    """Os itens do plano que ficaram em aberto, com o nome que o próprio agente deu.
+
+    Quem parou no meio não chegou a montar um `Resultado`, então não há lista de pendentes
+    pronta — é o `finally` que grava. Ela sai do próprio plano: o que não foi marcado como
+    feito é o que faltou.
+    """
+    return [
+        str(item.get("texto") or "").strip()
+        for item in plano
+        if isinstance(item, dict)
+        and not item.get("feito")
+        and str(item.get("texto") or "").strip()
+    ]
 
 
 def _nota_de_compactacao(compactados: int) -> str:
@@ -629,6 +688,12 @@ def _visao_ativa(settings: Settings, model: str, do_pedido: list[anexos.Anexo]) 
     As duas condições juntas, de propósito: sem imagem anexada não há o que mandar, e num
     modelo que não enxerga o pedido com `image_url` no corpo é recusado inteiro. Fora deste
     caso, o anexo segue pelos metadados, como sempre foi.
+
+    Quem decide é a **lista curada** do `Settings`, e **não** o `images` do catálogo do
+    host: medido, o host anuncia `images: true` para o `liz-nano` e o upstream por trás
+    responde 400 («model "mai-experimental" not supported for vision»). Mandar imagem para
+    quem o host diz que enxerga, mas o upstream não, derruba o pedido inteiro — a lista é
+    medida e vence.
     """
     return settings.aceita_imagem(model) and any(item.imagem for item in do_pedido)
 
@@ -803,8 +868,16 @@ def _turns(
 
 
 def _tokens(uso: dict[str, Any]) -> int | None:
-    """Tokens que um passo custou — `None` quando o provedor não conta."""
-    return int(uso.get("total_tokens") or 0) or None
+    """O que a resposta **escreveu**: a soma de `completion_tokens` dos passos.
+
+    Não é a soma de `total_tokens`, e a diferença importa. Cada passo do agente reenvia o
+    contexto inteiro (system prompt + catálogo de ferramentas + histórico), então somar o
+    total multiplicava o mesmo contexto pelo número de passos: uma resposta de 4 passos com
+    15,8K de contexto aparecia como 47K "nesta resposta". O número grande é o **custo real**
+    — é o que o provedor cobra —, mas não é o tamanho da resposta, e na ficha (que fala
+    dela, não da conta) ele só confundia. `None` quando o provedor não conta.
+    """
+    return int(uso.get("completion_tokens") or 0) or None
 
 
 def _store(
@@ -817,7 +890,18 @@ def _store(
     tokens: int | None = None,
     todos: list[dict[str, object]] | None = None,
     contexto: int | None = None,
+    completou: bool = True,
+    motivo: str | None = None,
+    pendentes: list[str] | None = None,
+    executou: int = 0,
+    retomavel: bool = True,
 ) -> Message:
+    """Grava a resposta.
+
+    O **desfecho** vai junto porque o cartão de «tarefa não concluída» precisa voltar quando
+    a conversa é reaberta: sem ele, reabrir mostrava o plano com um item «em andamento» e
+    nada rodando, sem dizer que a tarefa tinha parado nem oferecer o Retomar.
+    """
     message = Message(
         id=new_id(),
         role="assistant",
@@ -829,6 +913,11 @@ def _store(
         at=now_ms(),
         steps=steps,
         todos=[TodoItem.model_validate(item) for item in (todos or [])],
+        incompleto=not completou,
+        motivo=motivo,
+        pendentes=list(pendentes or []),
+        executou=executou,
+        retomavel=retomavel,
     )
     with db.connect() as conn:
         append_message(conn, conversation_id, message)

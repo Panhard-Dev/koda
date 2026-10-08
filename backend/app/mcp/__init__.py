@@ -85,14 +85,21 @@ class Gerenciador:
         self._caminho: Path | None = None
         self._ligacoes: dict[str, Ligacao] = {}
         self._mapa: dict[str, tuple[str, str]] = {}
+        self._node: Path | None = None
         self._trava = threading.Lock()
         self._preparando = threading.Lock()
 
     # ------------------------------------------------------------ configuração
 
-    def configurar(self, caminho: Path | None) -> None:
-        """Aponta o gerenciador para o arquivo de configuração (ao lado do banco)."""
+    def configurar(self, caminho: Path | None, node: Path | None = None) -> None:
+        """Aponta o gerenciador para o arquivo de configuração (ao lado do banco).
+
+        `node` é o `node.exe` que viaja com o app (`Settings.node_path`). É opcional de
+        propósito: sem ele o comando do `mcps.json` vale como está, que é o comportamento de
+        quem tem Node no `PATH` e o dos testes.
+        """
         with self._trava:
+            self._node = node
             if caminho == self._caminho:
                 return
             self._caminho = caminho
@@ -171,18 +178,9 @@ class Gerenciador:
                     anterior.cliente.fechar()
                 ligacoes[nome] = self._conectar(config)
 
-            mapa: dict[str, tuple[str, str]] = {}
-            usados: set[str] = set()
-            for nome, ligacao in ligacoes.items():
-                if not ligacao.conectado or ligacao.cliente is None:
-                    continue
-                for ferramenta in ligacao.cliente.ferramentas():
-                    externo = self._nome_externo(nome, ferramenta.nome, usados)
-                    mapa[externo] = (nome, ferramenta.nome)
-
             with self._trava:
                 self._ligacoes = ligacoes
-                self._mapa = mapa
+                self._mapa = self._montar_mapa(ligacoes)
         finally:
             self._preparando.release()
 
@@ -191,7 +189,7 @@ class Gerenciador:
             return Ligacao(config=config, erro="desligado")
         cliente = ServidorMCP(
             nome=config.nome,
-            comando=config.comando,
+            comando=self._comando_de_verdade(config.comando),
             params=config.params,
             tempo_s=TEMPO_HANDSHAKE_S,
         )
@@ -203,48 +201,138 @@ class Gerenciador:
                 config=config,
                 erro=motivo + (f" · {stderr}" if stderr else ""),
             )
+        try:
+            # A listagem é parte de conectar: um servidor que sobe mas não responde ao
+            # `tools/list` não serve para nada, e é melhor saber disso agora do que na hora
+            # em que o modelo chamar a primeira ferramenta.
+            cliente.listar()
+        except ErroMCP as exc:
+            stderr = cliente.ultimo_erro()
+            # `com_saida` **antes** de fechar: depois não há mais processo para perguntar o
+            # código com que ele morreu, e é ele que explica um binário que existe e não roda.
+            motivo = cliente.com_saida(str(exc))
+            cliente.fechar()
+            return Ligacao(
+                config=config,
+                erro=motivo + (f" · {stderr}" if stderr else ""),
+            )
         return Ligacao(config=config, cliente=cliente)
 
-    def _nome_externo(self, servidor: str, ferramenta: str, usados: set[str]) -> str:
+    def _comando_de_verdade(self, comando: str) -> str:
+        """Troca `node`/`node.exe` pelo Node que **viaja com o Koda**, quando ele existe.
+
+        O `mcps.json` guarda `"command": "node"` — um **nome**, não um caminho. É o que faz o
+        mesmo arquivo valer em qualquer máquina, e é o que deixa quem quiser apontar para o
+        Node dele escrevendo o caminho por extenso. Mas o app instalado não pode depender de a
+        máquina de destino ter Node: o instalador promete que não é preciso instalar mais nada,
+        e os dois servidores que o app traz são programas Node. Então, quando o Node que vem
+        junto existe, é ele que roda.
+
+        Comando que já é caminho (tem pasta) passa intacto: quem escreveu escolheu.
+        """
+        if self._node is None or not self._node.is_file():
+            return comando
+        if len(Path(comando).parts) > 1:
+            return comando
+        if comando.strip().lower() not in ("node", "node.exe"):
+            return comando
+        return str(self._node)
+
+    def _montar_mapa(self, ligacoes: dict[str, Ligacao]) -> dict[str, tuple[str, str]]:
+        """O mapa `nome externo -> (servidor, ferramenta real)`.
+
+        A montagem é **ordenada** e **em duas passadas**, e as duas coisas são de propósito:
+
+        1. **ordenada** — as propostas são ordenadas antes de qualquer atribuição. Sem isso,
+           quem recebe o sufixo de desempate é quem aparece primeiro na lista do servidor, e
+           um `tools/list` que troque a ordem (ou um reinício) trocaria o ID de duas
+           ferramentas entre si: a conversa antiga passaria a apontar para a ferramenta
+           errada. Ordenar tira a ordem de chegada da conta.
+        2. **em duas passadas** — primeiro conta-se quantas bases repetem; depois quem repete
+           (ou passa do teto de 64 caracteres) leva sufixo derivado do nome **original**.
+           Assim **todas** as colidentes são desambiguadas, e não só a segunda a chegar.
+        """
+        propostas: list[tuple[str, str, str]] = []  # (base, servidor, nome real)
+        for nome, ligacao in ligacoes.items():
+            if not ligacao.conectado or ligacao.cliente is None:
+                continue
+            for ferramenta in ligacao.cliente.ferramentas():
+                base = f"{PREFIXO}{nome_seguro(nome)}__{nome_seguro(ferramenta.nome)}"
+                propostas.append((base, nome, ferramenta.nome))
+        propostas.sort()
+
+        repetidas: dict[str, int] = {}
+        for base, _, _ in propostas:
+            repetidas[base] = repetidas.get(base, 0) + 1
+
+        mapa: dict[str, tuple[str, str]] = {}
+        usados: set[str] = set()
+        for base, servidor, ferramenta in propostas:
+            externo = self._nome_externo(
+                base, servidor, ferramenta, repetidas[base] > 1, usados
+            )
+            mapa[externo] = (servidor, ferramenta)
+        return mapa
+
+    def _nome_externo(
+        self, base: str, servidor: str, ferramenta: str, repetida: bool, usados: set[str]
+    ) -> str:
         """Nome da função que o modelo vê: `mcp__<servidor>__<ferramenta>`.
 
-        Curto demais para caber: corta a **ferramenta** (não o servidor) e completa com um
-        sufixo estável. Estável de propósito — o nome fica gravado no histórico da conversa,
-        e um sufixo que muda a cada reinício faria a conversa antiga apontar para uma
-        ferramenta que não existe mais.
+        Sem sufixo quando a base cabe em `MAX_NOME` e é única. Com sufixo quando ela repete
+        (dois nomes diferentes que a normalização igualou — `x-y` e `x.y` viram os dois
+        `x_y`) ou quando não cabe.
 
-        Colisão (dois nomes diferentes que a normalização igualou): o segundo recebe o mesmo
-        sufixo. Sem isso, o mapa guardaria só um dos dois e o outro viraria uma chamada
-        perdida.
+        O sufixo sai do **nome original**, e não da posição na lista: é o que faz o ID ser o
+        mesmo depois de um reinício, de uma reordenação, ou de uma ferramenta nova entrar na
+        frente. Ele fica gravado no histórico da conversa, e um sufixo que muda faria a
+        conversa antiga apontar para outra ferramenta.
         """
-        base = f"{PREFIXO}{nome_seguro(servidor)}__{nome_seguro(ferramenta)}"
-        if len(base) <= MAX_NOME and base not in usados:
+        if len(base) <= MAX_NOME and not repetida and base not in usados:
             usados.add(base)
             return base
-        sufixo = format(zlib.crc32(base.encode("utf-8")) & 0xFFFF, "04x")
-        if len(base) > MAX_NOME - 6:
-            base = base[: MAX_NOME - 6]
-        externo = f"{base}_{sufixo}"
-        while externo in usados:  # pragma: no cover — colisão de hash é praticamente nula
+        sufixo = format(
+            zlib.crc32(f"{servidor}\x00{ferramenta}".encode("utf-8")) & 0xFFFF, "04x"
+        )
+        corte = base[: MAX_NOME - 6]
+        externo = f"{corte}_{sufixo}"
+        while externo in usados:  # pragma: no cover — hash de 16 bits colidindo de verdade
             sufixo = format((int(sufixo, 16) + 1) & 0xFFFF, "04x")
-            externo = f"{base}_{sufixo}"
+            externo = f"{corte}_{sufixo}"
         usados.add(externo)
         return externo
 
     # ------------------------------------------------------------ catálogo
 
     def catalogo(self) -> list[dict[str, Any]]:
-        """As ferramentas MCP no formato do provedor — só as que estão conectadas agora.
+        """As ferramentas MCP no formato do provedor — só as que estão conectadas **agora**.
 
-        Lê o cache; **não** conecta nada. É chamado a cada rodada, no caminho quente.
+        Lê o cache; **não** conecta nada. É chamado a cada rodada, no caminho quente. A única
+        exceção é o servidor que avisou que a lista mudou (`tools/list_changed`): aí a
+        listagem dele é refeita aqui, porque servir o catálogo velho na rodada seguinte é
+        exatamente o que o aviso existe para evitar — e é uma chamada só, no servidor que
+        avisou.
         """
         with self._trava:
             ligacoes = dict(self._ligacoes)
+
+        if any(
+            lig.cliente is not None and lig.cliente.desatualizado for lig in ligacoes.values()
+        ):
+            self._relistar(ligacoes)
+            with self._trava:
+                ligacoes = dict(self._ligacoes)
+
+        with self._trava:
             mapa = dict(self._mapa)
+
         definicoes: list[dict[str, Any]] = []
         for externo, (nome_servidor, nome_real) in sorted(mapa.items()):
             ligacao = ligacoes.get(nome_servidor)
-            if ligacao is None or ligacao.cliente is None:
+            # `conectado`, e não só `cliente is not None`: processo morto não publica
+            # ferramenta. O cache do cliente continuaria listando o que ele oferecia antes de
+            # cair, e o modelo chamaria uma ferramenta que não existe mais.
+            if ligacao is None or not ligacao.conectado or ligacao.cliente is None:
                 continue
             ferramenta = next(
                 (f for f in ligacao.cliente.ferramentas() if f.nome == nome_real), None
@@ -267,6 +355,25 @@ class Gerenciador:
             )
         return definicoes
 
+    def _relistar(self, ligacoes: dict[str, Ligacao]) -> None:
+        """Refaz a listagem de quem avisou que mudou, e o mapa inteiro em seguida.
+
+        A falha de um servidor aqui não derruba os outros: o cliente dele fica com a lista
+        vazia (foi invalidada no aviso) e o erro vai para o estado — o `catalogo()` já não
+        publica ferramenta de servidor que não responde.
+        """
+        for ligacao in ligacoes.values():
+            cliente = ligacao.cliente
+            if cliente is None or not cliente.desatualizado:
+                continue
+            try:
+                cliente.listar()
+            except ErroMCP as exc:
+                ligacao.erro = cliente.com_saida(str(exc))
+                cliente.aviso_tratado()
+        with self._trava:
+            self._mapa = self._montar_mapa(ligacoes)
+
     def e_ferramenta_mcp(self, nome: str) -> bool:
         """Este nome é de uma ferramenta MCP desta rodada?"""
         with self._trava:
@@ -285,6 +392,23 @@ class Gerenciador:
         if alvo is None:
             return None
         return {"servidor": alvo[0], "ferramenta": alvo[1]}
+
+    def descricao(self, nome: str) -> str:
+        """O que o **servidor** diz que esta ferramenta faz. Vazio quando ele não diz.
+
+        Vai para o cartão de permissão. O Koda não sabe o que uma ferramenta de fora faz —
+        a única fonte é o próprio servidor, e é por isso que este texto vai **citado** no
+        cartão: quem lê precisa saber de quem é a frase.
+        """
+        with self._trava:
+            alvo = self._mapa.get(nome)
+            ligacao = self._ligacoes.get(alvo[0]) if alvo else None
+        if alvo is None or ligacao is None or ligacao.cliente is None:
+            return ""
+        ferramenta = next(
+            (f for f in ligacao.cliente.ferramentas() if f.nome == alvo[1]), None
+        )
+        return ferramenta.descricao.strip() if ferramenta is not None else ""
 
     def executar(self, nome: str, argumentos: dict[str, Any], tempo_s: float | None = None) -> tuple[bool, str]:
         """Despacha uma chamada para o servidor certo. Nunca levanta."""
@@ -318,13 +442,27 @@ class Gerenciador:
         for nome, config in por_nome.items():
             ligacao = ligacoes.get(nome)
             cliente = ligacao.cliente if ligacao else None
+            conectado = bool(cliente is not None and cliente.vivo)
+            erro = ligacao.erro if ligacao else None
+            if cliente is not None and not conectado and not erro:
+                # Processo que morreu depois de conectar. Sem isto a linha ficava
+                # "desconectado" e **sem motivo** — e o `ferramentas` ainda contava o cache
+                # do que ele oferecia antes de cair.
+                ultimo = cliente.ultimo_erro()
+                erro = "o servidor encerrou" + (f" · {ultimo}" if ultimo else "")
             saida.append(
                 {
                     "name": nome,
                     "enabled": config.enabled,
-                    "conectado": bool(cliente is not None and cliente.vivo),
-                    "erro": (ligacao.erro if ligacao else None),
-                    "ferramentas": len(cliente.ferramentas()) if cliente is not None else 0,
+                    "conectado": conectado,
+                    "erro": erro,
+                    "ferramentas": len(cliente.ferramentas()) if conectado else 0,
+                    # Lista parcial apresentada como completa é pior do que lista parcial com
+                    # o motivo escrito: `conectado: true` com metade das ferramentas não diz a
+                    # ninguém que faltou coisa. `None` quando a última listagem foi inteira.
+                    "incompleto": (
+                        cliente.incompleto if cliente is not None and conectado else None
+                    ),
                 }
             )
         return saida
@@ -352,9 +490,9 @@ def _esquema(bruto: dict[str, Any]) -> dict[str, Any]:
 gerenciador = Gerenciador()
 
 
-def configurar(caminho: Path | None) -> None:
-    """Liga o gerenciador ao arquivo de configuração (chamado na subida do app)."""
-    gerenciador.configurar(caminho)
+def configurar(caminho: Path | None, node: Path | None = None) -> None:
+    """Liga o gerenciador ao arquivo de configuração e ao Node que vem com o app."""
+    gerenciador.configurar(caminho, node)
 
 
 def preparar() -> None:
@@ -389,6 +527,11 @@ def e_ferramenta_mcp(nome: str) -> bool:
 def detalhar(nome: str) -> dict[str, str] | None:
     """Servidor e ferramenta reais por trás de um nome `mcp__…` (para a interface)."""
     return gerenciador.detalhar(nome)
+
+
+def descricao(nome: str) -> str:
+    """A descrição que o servidor publicou para a ferramenta (para o cartão de permissão)."""
+    return gerenciador.descricao(nome)
 
 
 def status() -> list[dict[str, Any]]:

@@ -21,9 +21,11 @@
  *
  * ## O que ele aceita abrir
  *
- * Só o que o dono pediu: `http://localhost` / `127.0.0.1` (servidor de dev) e arquivo do
- * disco (caminho do Windows ou `file://`). Qualquer outro host é recusado — este MCP não é
- * um navegador de internet.
+ * Qualquer `http`/`https`, arquivo do disco (caminho do Windows ou `file://`) e o atalho
+ * `localhost:PORTA`. A trava de "só localhost" foi derrubada a pedido do dono: ele quer que a
+ * IA veja **qualquer** site, não só o servidor de dev. O que continua fora são os esquemas que
+ * não são navegação (`javascript:`, `data:`), que não abrem página nenhuma e só serviriam para
+ * injetar script no que já está aberto.
  *
  * ## Protocolo
  *
@@ -76,32 +78,58 @@ function acharNavegador() {
 }
 
 /**
- * Um endereço que este MCP aceita: localhost, 127.0.0.1 ou arquivo do disco.
+ * Um endereço que este MCP aceita: `http`/`https` de **qualquer** host, `localhost:PORTA` sem
+ * esquema, ou arquivo do disco.
  *
- * Recusar o resto é de propósito. Um navegador de internet aqui seria outra conversa — com
- * outras consequências — e não foi o que se pediu.
+ * Antes só passava `localhost`/`127.0.0.1` e arquivo — o dono derrubou essa trava: ele quer que
+ * a IA veja qualquer site, não só o servidor de dev. Quem fica de fora são os esquemas que não
+ * são navegação (`javascript:`, `data:`, `about:`): não abrem página e só serviriam para
+ * injetar script no que já está aberto.
  */
 function enderecoAceito(valor) {
   const bruto = String(valor ?? '').trim()
   if (!bruto) return { ok: false, motivo: 'endereço vazio' }
 
-  if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(bruto)) {
+  // O caso normal, e o único que o modelo precisa acertar: a URL inteira.
+  if (/^https?:\/\/\S+$/i.test(bruto)) {
     return { ok: true, url: bruto }
   }
-  if (/^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(bruto)) {
+
+  // Caminho do disco. Vem **antes** do atalho de host sem esquema: senão `C:/x/index.html`
+  // viraria `https://C:/x/index.html`.
+  const arquivo = caminhoDeArquivo(bruto)
+  if (arquivo) return { ok: true, url: paraUrlDeArquivo(arquivo), arquivo }
+
+  // `localhost:5173/...` sem esquema — servidor de dev é sempre http, não https.
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(bruto)) {
     return { ok: true, url: `http://${bruto}` }
   }
 
-  const arquivo = caminhoDeArquivo(bruto)
-  if (arquivo) return { ok: true, url: paraUrlDeArquivo(arquivo), arquivo }
+  // `exemplo.com` sem esquema. A última etiqueta tem de parecer um domínio e **não** uma
+  // extensão de arquivo: senão `index.html` viraria `https://index.html`, que é pior do que
+  // recusar — abriria um site que não existe em vez de dizer que faltou o caminho.
+  const semEsquema = bruto.split(/[?#]/)[0]
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/|$)/i.test(bruto)) {
+    const ultima = semEsquema.replace(/\/.*$/, '').split('.').pop().toLowerCase()
+    if (!EXTENSOES_DE_ARQUIVO.has(ultima)) {
+      return { ok: true, url: `https://${bruto}` }
+    }
+  }
 
   return {
     ok: false,
     motivo:
-      `só abro localhost/127.0.0.1 e arquivo do disco; "${bruto}" não é nenhum dos dois. ` +
-      'Para servidor de dev use http://localhost:PORTA/...; para arquivo, o caminho completo.',
+      `não sei abrir "${bruto}": mande um endereço http/https (ex.: https://exemplo.com), ` +
+      '`localhost:PORTA/...` ou o caminho completo de um arquivo do disco.',
   }
 }
+
+/** Etiquetas finais que são arquivo, não domínio — só para não confundir as duas coisas. */
+const EXTENSOES_DE_ARQUIVO = new Set([
+  'html', 'htm', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'css', 'json', 'md', 'txt',
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'pdf', 'xml', 'csv', 'yml', 'yaml',
+  'py', 'rs', 'go', 'java', 'sh', 'bat', 'ps1', 'zip',
+])
 
 /** `C:\x`, `C:/x`, `file:///C:/x` e `\\servidor\pasta` viram caminho do disco. */
 function caminhoDeArquivo(valor) {
@@ -2257,8 +2285,9 @@ const FERRAMENTAS = [
   {
     name: 'abrir',
     description:
-      'Abre um endereço no navegador do Painel Dev. Aceita servidor de dev (http://localhost:PORT/…) ' +
-      'e arquivo do disco (C:/pasta/arquivo.html ou file:///C:/pasta/arquivo.html). Devolve a URL e o título.',
+      'Abre um endereço no navegador do Painel Dev. Aceita qualquer site (https://exemplo.com), ' +
+      'servidor de dev (http://localhost:PORT/…) e arquivo do disco (C:/pasta/arquivo.html ou ' +
+      'file:///C:/pasta/arquivo.html). Devolve a URL e o título.',
     inputSchema: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Endereço ou caminho a abrir.' } },

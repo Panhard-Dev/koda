@@ -1,14 +1,15 @@
-"""Provider OpenAI-compatível: streaming para o texto e um passo com ferramentas.
+"""Provider do serviço de modelos oficial: streaming para o texto e um passo com ferramentas.
 
-Serve OpenAI, Groq, OpenRouter e o Ollama (`http://localhost:11434/v1`) — muda só a
-`OPENAI_BASE_URL` e a chave. `HostProvider` herda daqui apontando para o serviço de
-modelos oficial do projeto (o host em `host/c-host.exe`), que fala o mesmo protocolo.
+O protocolo é o da OpenAI (`/chat/completions`), e é o que o host fala. Quem herda daqui é o
+`HostProvider`, apontando para `host/c-host.exe`; **não há provider de terceiro** — este módulo
+já foi instanciado direto, com chave de outro serviço, e esse caminho saiu do produto.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
@@ -33,9 +34,9 @@ TRANSITORIOS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 #: O 404 **não** entra mais aqui. Antes ele era repetido porque o upstream do host devolvia
 #: 404 no meio da conversa e o passo seguinte costumava funcionar — mas o efeito colateral
-#: era caro: um id de modelo errado ou uma `OPENAI_BASE_URL` errada (erros que **não** têm
-#: conserto por retentativa) ficavam martelando com backoff por dezenas de segundos antes de
-#: desistir. Falha de configuração tem de falhar rápido e dizer o que está errado.
+#: era caro: um id de modelo errado (erro que **não** tem conserto por retentativa) ficava
+#: martelando com backoff por dezenas de segundos antes de desistir. Falha de configuração tem
+#: de falhar rápido e dizer o que está errado.
 TRANSITORIOS_PROXY = TRANSITORIOS
 
 #: Por quanto tempo o catálogo de esforços do host fica em memória, em segundos. Sem
@@ -77,6 +78,20 @@ def _descrever_erro_de_rede(error: httpx.HTTPError) -> str:
     if isinstance(error, httpx.ProtocolError):
         return f"a comunicacao HTTP com o provedor foi interrompida ({nome})"
     return f"erro de comunicacao com o provedor ({nome})"
+
+
+def _usage_do_provider(uso: dict[str, Any]) -> dict[str, int]:
+    """O bloco de `usage` do provedor reduzido aos três contadores que o Koda guarda.
+
+    Existe para os três pontos que leem `usage` (o passo não-streaming, o passo em
+    streaming e o rodapé do `stream()` de texto) falarem a mesma língua — sem isto, cada
+    um montava o dicionário à mão e um campo novo teria de ser lembrado nos três.
+    """
+    return {
+        "prompt_tokens": int(uso.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(uso.get("completion_tokens", 0) or 0),
+        "total_tokens": int(uso.get("total_tokens", 0) or 0),
+    }
 
 
 def _texto_do_usuario(turno: Any) -> str:
@@ -192,23 +207,54 @@ def sobe_ate_o_piso(nivel: str, piso: str | None) -> str:
     return piso if NIVEIS_ESFORCO.index(nivel) < NIVEIS_ESFORCO.index(piso) else nivel
 
 
+def _recusou_esforco(detalhe: str) -> bool:
+    """O host recusou o pedido por causa do `reasoning_effort`?
+
+    O host **esconde** o motivo real: um esforço que o upstream não aceita chega como
+    `invalid_request` genérico — «A Liz AI Studio não aceitou este pedido» —, sem citar o
+    campo (medido: o `liz-nano`/`mai-experimental` responde 400 a `minimal`). Por isso a
+    detecção aceita também esse texto; o `model_not_found` (id errado) fica **de fora**,
+    porque repetir não conserta id errado.
+    """
+    baixo = detalhe.lower()
+    if "reasoning_effort" in baixo or "reasoning effort" in baixo:
+        return True
+    return "invalid_request" in baixo and "aceitou este pedido" in baixo
+
+
 class OpenAICompatibleProvider:
+    """A base de quem fala a API da OpenAI (`/chat/completions`).
+
+    **Não é um provider de terceiro.** Quem herda dela é o `HostProvider` — o serviço de
+    modelos oficial. Houve um tempo em que esta classe era instanciada direto, com a chave do
+    `.env`, para falar com OpenAI/Groq/Ollama; esse caminho saiu do produto, e com ele saiu o
+    defeito de o seletor oferecer modelos da casa a um serviço que não os tem. O nome ficou
+    porque descreve o **protocolo**, que é o que o host fala, e não o fornecedor.
+    """
+
     name = "openai"
-    #: Manda `reasoning_effort` no corpo? Só o host entende o campo — OpenAI, Groq e o
-    #: Ollama podem recusar campo desconhecido, então fica desligado por padrão.
+    #: Manda `reasoning_effort` no corpo? Só o host entende o campo — quem responde outra
+    #: coisa pode recusar campo desconhecido, então fica desligado por padrão.
     manda_esforco = False
     #: Pede o bloco de `usage` no fim do stream (`stream_options.include_usage`). Sem ele o
     #: caminho de streaming — que é o que o agente usa de verdade — **nunca** reportava
     #: tokens: o medidor de contexto e o controle de custo ficavam cegos.
     manda_usage = True
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, base_url: str, model: str) -> None:
+        """O endereço e o modelo vêm de **quem constrói** — não do `Settings`.
+
+        Não há chave: o único provider real é o host, e a credencial dele é a sessão da conta,
+        montada a cada pedido pelo `HostProvider.headers()`. Antes esta classe lia
+        `OPENAI_API_KEY` do ambiente, e era por ali que uma variável de outro programa mudava
+        o provider do Koda.
+        """
         self.settings = settings
-        self.base_url = settings.openai_base_url.rstrip("/")
-        self.api_key = settings.openai_api_key
+        self.base_url = base_url.rstrip("/")
         #: Modelo padrão para streaming e para os passos com ferramentas.
-        self.model = settings.openai_model
-        self.ready = bool(self.api_key)
+        self.model = model
+        #: Sempre pronto: quem valida o id do modelo é o host, e o `local` não depende de nada.
+        self.ready = True
         #: Cliente HTTP reaproveitado entre passos. Antes cada passo criava o seu
         #: (`async with httpx.AsyncClient(...)`): conexão TCP nova — e handshake TLS novo,
         #: quando o endereço é https — a cada chamada. Um passo sozinho não sente; uma
@@ -224,13 +270,12 @@ class OpenAICompatibleProvider:
         return self._cliente_http
 
     def headers(self) -> dict[str, str]:
-        base = {"Content-Type": "application/json"}
-        if self.api_key:
-            base["Authorization"] = f"Bearer {self.api_key}"
-        return base
+        """Só o tipo do corpo. Quem tem credencial para mandar é o `HostProvider`."""
+        return {"Content-Type": "application/json"}
 
     def resolve_model(self, model: str) -> str:
-        return self.settings.resolve_model(model, self.settings.openai_model)
+        """Id vazio cai no modelo padrão deste provider. O resto vai como veio."""
+        return model or self.model
 
     def _messages(self, turns: list[ChatTurn], options: ChatOptions) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
@@ -256,12 +301,6 @@ class OpenAICompatibleProvider:
     # ------------------------------------------------------------ streaming
 
     async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
-        if not self.ready:
-            raise ProviderError(
-                "Provider OpenAI escolhido sem chave: preencha OPENAI_API_KEY no backend/.env "
-                "(ou use KODA_PROVIDER=local)."
-            )
-
         modelo = self.resolve_model(options.model)
         payload: dict[str, Any] = {
             "model": modelo,
@@ -286,48 +325,74 @@ class OpenAICompatibleProvider:
         # pedaços — é o que a limpeza por expressão regular, feita pedaço a pedaço, erra.
         raciocinio = pensamento.LimpaRaciocinio()
         motivo_de_fim = ""
+        #: O stream anunciou o próprio fim (`[DONE]`)? Sem ele e sem `finish_reason`, a
+        #: resposta acabou **sem dizer que acabou** — ver o `truncated` no fim do método.
+        terminou = False
+        #: O bloco de `usage` do rodapé, quando o host manda (ver `Piece.usage`).
+        uso: dict[str, Any] = {}
 
+        #: Quantos degraus de esforço já subimos nesta chamada. O catálogo do host publica
+        #: níveis que o upstream real às vezes recusa (ver `_recusou_esforco`): em vez de
+        #: devolver 400 na tela, sobe um degrau e repete — o `liz-nano` anuncia `minimal`,
+        #: mas o modelo por trás só aceita de `low` para cima.
+        ajustes = 0
         try:
-            async with self._cliente().stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=self.headers(),
-                json=payload,
-            ) as response:
-                if response.status_code >= 400:
-                    detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
-                    raise self._erro(response.status_code, detalhe)
+            while True:
+                async with self._cliente().stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self.headers(),
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
+                        if ajustes < 2 and _recusou_esforco(detalhe):
+                            proximo = self._proximo_esforco(
+                                payload.get("reasoning_effort"), modelo
+                            )
+                            if proximo:
+                                payload["reasoning_effort"] = proximo
+                                ajustes += 1
+                                continue
+                        raise self._erro(response.status_code, detalhe)
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    if not data:
-                        continue
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    escolha = choices[0]
-                    if escolha.get("finish_reason"):
-                        motivo_de_fim = str(escolha["finish_reason"])
-                    delta = escolha.get("delta") or {}
-                    # O raciocínio vem antes do texto e pode durar minutos. Ele não é a
-                    # resposta, mas vai para a tela: sem isso o usuário encara uma tela
-                    # parada e a resposta parece aparecer de uma vez no fim.
-                    razao = delta.get("reasoning_content")
-                    if razao:
-                        yield Piece(str(razao), reasoning=True)
-                    piece = delta.get("content")
-                    if piece:
-                        limpo = raciocinio.alimentar(filtro.push(str(piece)))
-                        if limpo:
-                            yield Piece(limpo)
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            terminou = True
+                            break
+                        if not data:
+                            continue
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        # O bloco de `usage` chega num chunk **sem** `choices` — a captura
+                        # tem de vir antes do descarte abaixo, senão ele se perde. Era esse
+                        # o furo do contador no caminho de texto puro.
+                        if chunk.get("usage"):
+                            uso = chunk["usage"]
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        escolha = choices[0]
+                        if escolha.get("finish_reason"):
+                            motivo_de_fim = str(escolha["finish_reason"])
+                        delta = escolha.get("delta") or {}
+                        # O raciocínio vem antes do texto e pode durar minutos. Ele não é a
+                        # resposta, mas vai para a tela: sem isso o usuário encara uma tela
+                        # parada e a resposta parece aparecer de uma vez no fim.
+                        razao = delta.get("reasoning_content")
+                        if razao:
+                            yield Piece(str(razao), reasoning=True)
+                        piece = delta.get("content")
+                        if piece:
+                            limpo = raciocinio.alimentar(filtro.push(str(piece)))
+                            if limpo:
+                                yield Piece(limpo)
+                break
         except httpx.HTTPError as error:  # rede, DNS, timeout
             raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
@@ -336,7 +401,15 @@ class OpenAICompatibleProvider:
         resto = raciocinio.alimentar(filtro.fechar()) + raciocinio.despejar()
         if resto:
             yield Piece(resto)
-        if motivo_de_fim == "length":
+        # O rodapé com os tokens. Quem consome este `stream()` (o caminho de texto, sem
+        # ferramentas) não recebe `StepResult` nenhum: sem este pedaço o `usage` era
+        # descartado e a ficha ficava sem contador.
+        if uso:
+            yield Piece("", usage=_usage_do_provider(uso))
+        # `length` é o corte declarado. O outro caso é o stream que acabou **sem** marcador de
+        # término: aí não se sabe se o provedor terminou ou se a conexão caiu no meio, e
+        # anunciar truncado é o lado seguro — a tela avisa em vez de dar por completo.
+        if motivo_de_fim == "length" or not (terminou or motivo_de_fim):
             yield Piece("", truncated=True)
 
     # ------------------------------------------------------------ ferramentas
@@ -356,9 +429,6 @@ class OpenAICompatibleProvider:
         Com ferramentas, não envia `tool_choice`: o provedor mantém a seleção automática
         e o modelo decide se chama uma ferramenta e qual delas.
         """
-        if not self.ready:
-            raise ProviderError("Provider sem chave para chamar ferramentas.")
-
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
             "stream": False,
@@ -404,6 +474,7 @@ class OpenAICompatibleProvider:
                 name=str((item.get("function") or {}).get("name", "")),
                 arguments=_json_ou_vazio((item.get("function") or {}).get("arguments")),
                 raw_arguments=str((item.get("function") or {}).get("arguments") or "{}"),
+                extra=_extra_do_item(item),
             )
             for item in (mensagem.get("tool_calls") or [])
         ]
@@ -458,75 +529,105 @@ class OpenAICompatibleProvider:
             payload["reasoning_effort"] = await self.esforco(reasoning, modelo, effort)
 
         texto: list[str] = []
-        parciais: dict[int, dict[str, str]] = {}
+        #: `index` -> os pedaços daquela chamada. `extra` guarda o envelope opaco que veio
+        #: junto (ver `_extra_do_item`), que é dict e não string — daí o `Any`.
+        parciais: dict[int, dict[str, Any]] = {}
         uso: dict[str, Any] = {}
         motivo_de_fim = ""
+        #: O stream anunciou o próprio fim? `[DONE]` é o marcador da OpenAI; `finish_reason` é
+        #: o da escolha. Sem nenhum dos dois o stream **acabou sem dizer que acabou**, e é o
+        #: que distingue "resposta completa" de "conexão caiu no meio" (ver `truncado` abaixo).
+        terminou = False
         filtro = FiltroIdentidade(self.settings.assistente, _identidade_pedida(messages))
         # Mesmo limpador do outro fluxo: o raciocínio não vai para a resposta visível.
         raciocinio = pensamento.LimpaRaciocinio()
 
+        #: Degraus de esforço já subidos nesta chamada (ver o `stream()` acima).
+        ajustes = 0
         try:
-            async with self._cliente().stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=self.headers(),
-                json=payload,
-            ) as response:
-                if response.status_code >= 400:
-                    detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
-                    raise self._erro(response.status_code, detalhe)
+            while True:
+                texto.clear()
+                parciais.clear()
+                uso.clear()
+                motivo_de_fim = ""
+                terminou = False
+                async with self._cliente().stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self.headers(),
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
+                        if ajustes < 2 and _recusou_esforco(detalhe):
+                            proximo = self._proximo_esforco(
+                                payload.get("reasoning_effort"), modelo
+                            )
+                            if proximo:
+                                payload["reasoning_effort"] = proximo
+                                ajustes += 1
+                                continue
+                        raise self._erro(response.status_code, detalhe)
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    if not data:
-                        continue
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk.get("usage"):
-                        uso = chunk["usage"]
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    escolha = choices[0]
-                    if escolha.get("finish_reason"):
-                        motivo_de_fim = str(escolha["finish_reason"])
-                    delta = escolha.get("delta") or {}
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            terminou = True
+                            break
+                        if not data:
+                            continue
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("usage"):
+                            uso = chunk["usage"]
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        escolha = choices[0]
+                        if escolha.get("finish_reason"):
+                            motivo_de_fim = str(escolha["finish_reason"])
+                        delta = escolha.get("delta") or {}
 
-                    razao = delta.get("reasoning_content")
-                    if razao:
-                        yield Piece(str(razao), reasoning=True)
-                    pedaco = delta.get("content")
-                    if pedaco:
-                        limpo = raciocinio.alimentar(filtro.push(str(pedaco)))
-                        if limpo:
-                            texto.append(limpo)
-                            yield Piece(limpo)
+                        razao = delta.get("reasoning_content")
+                        if razao:
+                            yield Piece(str(razao), reasoning=True)
+                        pedaco = delta.get("content")
+                        if pedaco:
+                            limpo = raciocinio.alimentar(filtro.push(str(pedaco)))
+                            if limpo:
+                                texto.append(limpo)
+                                yield Piece(limpo)
 
-                    for bruto in delta.get("tool_calls") or []:
-                        indice_bruto = bruto.get("index")
-                        novo_id = str(bruto.get("id") or "")
-                        if indice_bruto is None:
-                            # Nem todo OpenAI-compatible manda `index`. Sem ele, uma chamada
-                            # **nova** se anuncia pelo `id` novo; sem id, o pedaço é
-                            # continuação da última — assumir "sempre 0" misturava chamadas
-                            # paralelas num argumento só.
-                            indice = len(parciais) if (novo_id or not parciais) else max(parciais)
-                        else:
-                            indice = int(indice_bruto)
-                        atual = parciais.setdefault(indice, {"id": "", "name": "", "args": ""})
-                        if novo_id:
-                            atual["id"] = novo_id
-                        funcao = bruto.get("function") or {}
-                        if funcao.get("name"):
-                            atual["name"] = str(funcao["name"])
-                        if funcao.get("arguments"):
-                            atual["args"] += str(funcao["arguments"])
+                        for bruto in delta.get("tool_calls") or []:
+                            indice_bruto = bruto.get("index")
+                            novo_id = str(bruto.get("id") or "")
+                            if indice_bruto is None:
+                                # Nem todo OpenAI-compatible manda `index`. Ver `_posicao_do_pedaco`:
+                                # id repetido volta para a posição dele (senão a chamada duplicava,
+                                # sem nome) e id novo abre a próxima posição de verdade.
+                                indice = _posicao_do_pedaco(parciais, novo_id)
+                            else:
+                                indice = int(indice_bruto)
+                            atual = parciais.setdefault(
+                                indice, {"id": "", "name": "", "args": "", "extra": None}
+                            )
+                            if novo_id:
+                                atual["id"] = novo_id
+                            funcao = bruto.get("function") or {}
+                            if funcao.get("name"):
+                                atual["name"] = str(funcao["name"])
+                            if funcao.get("arguments"):
+                                atual["args"] += str(funcao["arguments"])
+                            # O envelope opaco pode chegar em qualquer pedaço da chamada: o que
+                            # veio fica, e o pedaço seguinte só acrescenta o que faltava.
+                            extra = _extra_do_item(bruto)
+                            if extra:
+                                atual["extra"] = {**(atual["extra"] or {}), **extra}
+                break
         except httpx.HTTPError as error:
             raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
@@ -548,6 +649,7 @@ class OpenAICompatibleProvider:
                     name=parcial["name"],
                     arguments=_json_ou_vazio(parcial["args"]),
                     raw_arguments=parcial["args"] or "{}",
+                    extra=parcial.get("extra"),
                 )
                 for posicao, (_, parcial) in enumerate(sorted(parciais.items()))
             ],
@@ -556,7 +658,11 @@ class OpenAICompatibleProvider:
                 "completion_tokens": int(uso.get("completion_tokens", 0) or 0),
                 "total_tokens": int(uso.get("total_tokens", 0) or 0),
             },
-            truncado=motivo_de_fim == "length",
+            # `length` é o corte que o provedor **declarou**. O outro caso é o stream que
+            # acabou sem `finish_reason` e sem `[DONE]`: aí não se sabe se ele terminou ou se
+            # a conexão caiu no meio, e chamar isso de passo completo é o que fazia o laço
+            # executar uma ferramenta cujos argumentos podiam estar pela metade.
+            truncado=motivo_de_fim == "length" or not (terminou or motivo_de_fim),
         )
 
 
@@ -577,12 +683,9 @@ class HostProvider(OpenAICompatibleProvider):
     manda_esforco = True
 
     def __init__(self, settings: Settings) -> None:
-        super().__init__(settings)
-        self.base_url = settings.host_url.rstrip("/")
-        # A credencial **não** fica guardada aqui: ela é lida a cada pedido (ver
-        # `headers`), porque a sessão da conta chega depois da subida do processo.
-        self.api_key = None
-        self.model = settings.host_model
+        super().__init__(settings, base_url=settings.host_url, model=settings.host_model)
+        # A credencial **não** fica guardada aqui: ela é lida a cada pedido (ver `headers`),
+        # porque a sessão da conta chega depois da subida do processo.
         self.ready = True
         self._esforcos: dict[str, frozenset[str]] | None = None
         #: Piso de raciocínio por modelo, do mesmo `/v1/models` (ver `sobe_ate_o_piso`).
@@ -634,10 +737,21 @@ class HostProvider(OpenAICompatibleProvider):
 
         suportados: dict[str, frozenset[str]] = {}
         pisos: dict[str, str] = {}
+        # Mesmo raciocínio do catálogo do seletor (`routers/models.py`): o id do provedor pode
+        # vir com namespace (`vendor/model`), e encurtar **sempre** funde dois modelos que
+        # publicam o mesmo nome — um passaria a valer os esforços do outro, e o 400 voltaria
+        # na tela. O curto vale só enquanto for único.
+        curtos = Counter(
+            str(item.get("id", "")).split("/")[-1]
+            for item in itens
+            if isinstance(item, dict) and str(item.get("id", ""))
+        )
         for item in itens:
             if not isinstance(item, dict):
                 continue
-            identificador = str(item.get("id", "")).split("/")[-1]
+            bruto = str(item.get("id", ""))
+            curto = bruto.split("/")[-1]
+            identificador = bruto if curtos[curto] > 1 else curto
             if not identificador:
                 continue
             piso = item.get("reasoningFloor")
@@ -677,6 +791,22 @@ class HostProvider(OpenAICompatibleProvider):
             ajustado = sobe_ate_o_piso(ajustado, self._pisos.get(modelo))
         return ajustado
 
+    def _proximo_esforco(self, atual: str | None, modelo: str) -> str | None:
+        """O nível seguinte acima de `atual` no catálogo do modelo, ou `None` se não há.
+
+        É o degrau que o retry sobe quando o host recusa o `reasoning_effort` enviado
+        (ver `_recusou_esforco`). Sem catálogo — host fora do ar — não há como saber, e aí
+        devolve `None`: melhor mostrar o erro original do que chutar um nível às cegas.
+        """
+        if not atual or not self._esforcos:
+            return None
+        suportados = self._esforcos.get(modelo)
+        if not suportados or atual not in NIVEIS_ESFORCO:
+            return None
+        indice = NIVEIS_ESFORCO.index(atual)
+        acima = [nivel for nivel in NIVEIS_ESFORCO[indice + 1 :] if nivel in suportados]
+        return acima[0] if acima else None
+
     #: Nomes decorativos do seletor antigo. Conversa gravada antes do serviço atual ainda
     #: manda um desses; melhor cair no padrão do que virar um 400 lá.
     LEGADOS = frozenset(
@@ -697,10 +827,10 @@ class HostProvider(OpenAICompatibleProvider):
         o que engolia o catálogo inteiro do host (`liz-nano`, `koda-1`, `layze-2`…) e mandava
         todo mundo para o mesmo modelo. Quem valida o id agora é o host, que responde com uma
         mensagem clara quando não reconhece.
+
+        Os `LEGADOS` são os nomes decorativos das versões antigas — esses caem no
+        `host_model`, porque não existem mais no catálogo.
         """
-        alias = self.settings.model_aliases.get(model)
-        if alias:
-            return alias
         if not model or model in self.LEGADOS:
             return self.settings.host_model
         return model
@@ -732,3 +862,40 @@ def _json_ou_vazio(valor: Any) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return dados if isinstance(dados, dict) else {}
+
+
+#: Campos da tool call que o Koda **trata**. `index` fica de fora porque é a posição na lista
+#: do provedor, não informação da chamada — devolvê-lo ao histórico não significa nada.
+CAMPOS_DA_CHAMADA = ("id", "type", "function", "index")
+
+
+def _extra_do_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    """O envelope da tool call que **não** é campo nosso, para devolver como veio.
+
+    É por aqui que o `extra_content` (a assinatura de pensamento do Gemini 3) sobrevive: o
+    Koda não sabe o que há dentro, e não precisa saber — só tem de devolver igual, porque
+    quem exige de volta é o gateway, e a resposta a um campo faltando é 400.
+    """
+    extra = {chave: valor for chave, valor in item.items() if chave not in CAMPOS_DA_CHAMADA}
+    return extra or None
+
+
+def _posicao_do_pedaco(parciais: dict[int, dict[str, Any]], novo_id: str) -> int:
+    """Onde este pedaço de tool call entra, quando o provedor **não** manda `index`.
+
+    Duas regras, e as duas custaram tempo:
+
+    - **id que já apareceu volta para a posição dele.** O mesmo id é a mesma chamada. Abrir
+      posição nova duplicava a ferramenta, e a segunda cópia ficava **sem nome** — só com o
+      resto dos argumentos. Uma sequência `A, B, A` virava três chamadas em vez de duas.
+    - **posição nova é `max + 1`, não `len`.** Com posições fora da sequência (um provedor que
+      num pedaço manda `index` 0 e no outro 2), `len` devolve 2 e cai justamente numa que já
+      existe — a chamada nova sobrescrevia a anterior.
+    """
+    if not novo_id:
+        # Pedaço sem id é continuação da última chamada aberta.
+        return max(parciais) if parciais else 0
+    for posicao, parcial in parciais.items():
+        if parcial.get("id") == novo_id:
+            return posicao
+    return max(parciais) + 1 if parciais else 0

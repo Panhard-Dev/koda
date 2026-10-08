@@ -26,10 +26,11 @@ from typing import Any, Protocol
 
 from ..tools import ferramentas, registry
 from .. import mcp
+from ..config import Settings, get_settings
 from ..policy import guards
-from . import contexto, repeticao
+from . import contexto, repeticao, subagente
 from ..limits import LIMITES
-from ..contracts.turn import StepResult, ToolCall, ToolStep
+from ..contracts.turn import StepResult, ToolCall, ToolStep, texto_do_conteudo
 
 PROMPT_FERRAMENTAS = (
     "Você é o Koda, um agente de engenharia que executa tarefas REAIS na máquina do "
@@ -113,6 +114,7 @@ PROMPT_FERRAMENTAS = (
     "   • baixar arquivo da internet: download_file · enviar: upload_file\n"
     "   • rodar build/testes/comando de verdade: shell\n"
     "   • calcular, analisar, conferir um resultado: code_interpreter\n"
+    "   • delegar um pedaço grande e independente para outro agente: sub_agente\n"
     "   Escolha a ferramenta pelo objetivo e pela descrição do catálogo; o loop não escolhe "
     "nem obriga uma ferramenta por você. Algumas diferenças importantes: `search_files` "
     "acha caminhos pelo nome; `search_codebase`/`regex_search` procuram conteúdo; "
@@ -1076,6 +1078,96 @@ def _explicar_restricoes(
     }
 
 
+#: O que a pessoa marca com `@` no pedido: `@sub.revisor`, `@mcp.navegador`, `@skill.revisao`.
+#:
+#: O ponto separa o tipo do nome, e o tipo aceita o apelido que a mão escreve (`agente` e
+#: `sub` são a mesma coisa). O nome aceita letra, número, `-`, `_` e `.`.
+MENCAO = re.compile(r"@(sub|agente|mcp|skill)\.([A-Za-z0-9._-]+)", re.IGNORECASE)
+
+
+def mencoes_do_pedido(mensagens: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """O que a pessoa marcou com `@` no **último** pedido dela.
+
+    Só o último: a marca é uma ordem para esta rodada, não uma configuração que fica valendo.
+    Varrer o histórico inteiro faria um `@sub.revisor` de dez mensagens atrás continuar
+    mandando no trabalho de agora.
+    """
+    texto = ""
+    for mensagem in reversed(mensagens):
+        if mensagem.get("role") == "user":
+            texto = texto_do_conteudo(mensagem.get("content"))
+            break
+
+    vistos: dict[str, dict[str, str]] = {}
+    for achado in MENCAO.finditer(texto):
+        tipo = achado.group(1).lower()
+        if tipo == "agente":
+            tipo = "sub"
+        nome = achado.group(2).strip()
+        if not nome:
+            continue
+        vistos[f"{tipo}.{nome.lower()}"] = {
+            "tipo": tipo,
+            "nome": nome,
+            "bruto": achado.group(0)[1:],
+        }
+    return list(vistos.values())
+
+
+def _instrucoes_da_skill(skills: Any, nome: str) -> str:
+    """As instruções da skill marcada com `@`, quando ela existe e está ligada.
+
+    Devolve vazio quando não dá: a mensagem de sistema já diz que a skill foi pedida, e uma
+    skill que sumiu no meio do caminho não pode derrubar a rodada inteira.
+    """
+    if skills is None:
+        return ""
+    try:
+        return str(skills.instrucoes(nome))
+    except Exception:  # noqa: BLE001 — skill ausente ou desligada não derruba a rodada
+        return ""
+
+
+def _explicar_mencoes(
+    historico: list[dict[str, Any]], mencoes: list[dict[str, str]], skills: Any
+) -> None:
+    """Diz ao modelo o que a pessoa marcou com `@` — e manda nisso.
+
+    Marcar é uma **ordem**, e não um enfeite no texto: `@mcp.navegador` é «use este
+    servidor», e `@sub.revisor` é «quem faz isto é aquele agente». Sem esta mensagem o modelo
+    veria um `@` no meio do pedido e decidiria sozinho o que fazer com ele.
+    """
+    if not mencoes or not historico or historico[0].get("role") != "system":
+        return
+
+    linhas = ["O QUE A PESSOA MARCOU COM `@` NESTE PEDIDO — é ordem, e não sugestão:"]
+    for item in mencoes:
+        if item["tipo"] == "sub":
+            linhas.append(
+                f"- `@{item['bruto']}`: quem faz isto é o sub-agente «{item['nome']}». "
+                "Lance-o com a ferramenta `sub_agente`, passando este pedido como tarefa — "
+                "não faça o trabalho você mesmo."
+            )
+        elif item["tipo"] == "mcp":
+            linhas.append(
+                f"- `@{item['bruto']}`: use o servidor MCP «{item['nome']}». As ferramentas "
+                "dos outros servidores não estão nesta rodada."
+            )
+        else:
+            linhas.append(
+                f"- `@{item['bruto']}`: a skill «{item['nome']}» já está carregada abaixo — "
+                "siga as instruções dela."
+            )
+            instrucoes = _instrucoes_da_skill(skills, item["nome"])
+            if instrucoes:
+                linhas.append(f"\n<skill {item['nome']}>\n{instrucoes}\n</skill>")
+
+    historico[0] = {
+        **historico[0],
+        "content": f"{historico[0].get('content', '')}\n\n" + "\n".join(linhas),
+    }
+
+
 def _explicar_mcp(historico: list[dict[str, Any]], ferramentas_mcp: list[dict[str, Any]]) -> None:
     """Diz ao modelo, no prompt de sistema, que existem ferramentas de servidores MCP.
 
@@ -1585,6 +1677,13 @@ class Resultado:
     passos: list[ToolStep]
     completou: bool
     uso: dict[str, int]
+    """
+    Uso somado de **todos** os passos: `prompt_tokens`, `completion_tokens`, `total_tokens`.
+
+    O `total_tokens` daqui é o **custo** da tarefa (cada passo reenvia o contexto inteiro, e
+    é isso que o provedor cobra) — não é o tamanho da resposta. Quem mostra na ficha lê só o
+    `completion_tokens`; ver `_tokens` em `routers/chat.py`.
+    """
     motivo: str = ""
     #: Última lista de tarefas que o modelo registrou, na ordem (vazia sem plano).
     #: É ela que fica gravada na mensagem — quem reabre a conversa vê o que foi feito.
@@ -1706,6 +1805,7 @@ async def executar(
     cancelamento: threading.Event | None = None,
     anexos: Any = None,
     skills: Any = None,
+    settings: Settings | None = None,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -1715,6 +1815,11 @@ async def executar(
 
     `dono` identifica a tarefa: vai junto dos processos que ela começar, para o cancelamento
     derrubar só os dela.
+
+    `settings` é a configuração desta execução. O laço quase não precisa dela — quem precisa
+    é o `sub_agente`, que monta a rodada dele a partir dela (o arquivo dos agentes, os
+    tetos, o diretório de skills). Sem ela, vale a do ambiente; em produção é a mesma coisa,
+    porque o app nasce de `get_settings()`.
     """
     # Todo evento de ferramenta sai com o **endereço de origem**, quando é de servidor MCP:
     # a interface mostra o nome real do servidor e da ferramenta (`[MCP · eco-server]`), e
@@ -1736,6 +1841,8 @@ async def executar(
     # não pode virar uma frase que o modelo decide ignorar.
     proibidas, sem_ferramentas = restricoes_do_pedido(mensagens)
     modo = classificar_pedido(mensagens)
+    # O que a pessoa marcou com `@` — uma ordem para **esta** rodada.
+    mencoes = mencoes_do_pedido(mensagens)
     todas = {item["function"]["name"] for item in registry.DEFINICOES}
     ferramentas_mcp: list[dict[str, Any]] = []
     if sem_ferramentas:
@@ -1758,6 +1865,21 @@ async def executar(
             for item in mcp.catalogo()
             if item["function"]["name"] not in proibidas_canonicas
         ]
+        # `@mcp.navegador` é «use **este** servidor»: os outros saem da rodada. É a marca
+        # mais estreita que existe, e é de propósito — quem escreveu o nome não quer que o
+        # modelo escolha entre cinco servidores.
+        servidores_marcados = {
+            item["nome"].casefold() for item in mencoes if item["tipo"] == "mcp"
+        }
+        if servidores_marcados:
+            ferramentas_mcp = [
+                item
+                for item in ferramentas_mcp
+                if str(
+                    (mcp.detalhar(str(item["function"]["name"])) or {}).get("servidor") or ""
+                ).casefold()
+                in servidores_marcados
+            ]
         tools = tools + ferramentas_mcp
     # A porteira do despacho (porta do Koda — ver `guards.py`): só o que foi **oferecido**
     # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
@@ -1766,6 +1888,7 @@ async def executar(
     historico = [dict(item) for item in mensagens]
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
     _explicar_mcp(historico, ferramentas_mcp)
+    _explicar_mencoes(historico, mencoes, skills)
     passos: list[ToolStep] = []
     uso = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     texto_final = ""
@@ -1789,6 +1912,9 @@ async def executar(
     ferramentas_ok = 0
     #: Chamadas que passaram pelo orçamento e foram entregues às ferramentas.
     chamadas_feitas = 0
+    #: Sub-agentes lançados **nesta rodada**. O teto é do motor, e não do arquivo do agente:
+    #: quem escreve um agente não decide quantos podem rodar de uma vez.
+    sub_agentes_lancados = 0
     #: Repetições da mesma ferramenta, argumentos, pedido e estado do plano.
     repeticoes: dict[str, int] = {}
     repeticao_terminal = False
@@ -2213,6 +2339,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2246,6 +2373,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=problema_de_json,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2280,6 +2408,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=recusa,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2327,6 +2456,7 @@ async def executar(
                 passo = ToolStep(
                     name=chamada.name,
                     arguments=argumentos,
+                    raw_arguments=chamada.raw_arguments,
                     output=saida,
                     duration_ms=0,
                     call_id=chamada.id,
@@ -2360,6 +2490,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2418,6 +2549,7 @@ async def executar(
                     passo = ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2470,6 +2602,38 @@ async def executar(
                 )
             if negado_por_codigo and oportunidade is not None:
                 saida = aviso_de_ferramenta(oportunidade)
+            elif chamada.name == subagente.FERRAMENTA:
+                # O sub-agente roda **aqui**, e não pelo despacho: quem sabe rodá-lo é o laço
+                # (`agent`), e `tools` não pode importar `agent` — seria import para cima.
+                # Daqui para baixo o caminho é o de sempre: a duração, o passo, o evento e o
+                # histórico tratam esta saída como tratam a de qualquer ferramenta.
+                if sub_agentes_lancados >= subagente.POR_RODADA:
+                    saida = (
+                        f"ERRO: o teto de {subagente.POR_RODADA} sub-agentes por rodada já foi "
+                        "atingido. Faça o que falta você mesmo, ou finalize esta rodada e "
+                        "lance os outros na próxima."
+                    )
+                else:
+                    sub_agentes_lancados += 1
+                    saida = await subagente.executar(
+                        engine,
+                        settings or get_settings(),
+                        nome=str(argumentos.get("agente", "")),
+                        tarefa=str(argumentos.get("tarefa", "")),
+                        workspace=workspace,
+                        esforco=str(argumentos.get("esforco") or "") or None,
+                        modelo=str(argumentos.get("modelo") or "") or None,
+                        fora_da_pasta=bool(argumentos.get("fora_da_pasta")),
+                        # O modo do app vale para o sub-agente também: ele pergunta o que o
+                        # principal perguntaria — e nunca pede para apagar (ver o veto).
+                        aprovar=aprovar,
+                        # O que ele narra sai como evento `sub`, endereçado ao id desta
+                        # chamada: é assim que a área Subs abre uma aba por sub-agente.
+                        emit=emit_bruto,
+                        chamada=chamada.id,
+                        dono=dono,
+                        cancelamento=cancelamento,
+                    )
             else:
                 try:
                     saida = await asyncio.to_thread(
@@ -2484,6 +2648,10 @@ async def executar(
                         skills=skills,
                         timeout_s=prazo_tool,
                         cancelamento=cancelamento,
+                        # O id da chamada vai junto para o registro de mudanças: é ele que
+                        # deixa o cartão desta ferramenta mostrar, na conversa, o diff que
+                        # **esta** chamada fez — e não o acumulado do arquivo.
+                        chamada=chamada.id,
                     )
                 except TimeoutError:
                     saida = (
@@ -2542,6 +2710,7 @@ async def executar(
             passo = ToolStep(
                 name=chamada.name,
                 arguments=argumentos,
+                raw_arguments=chamada.raw_arguments,
                 output=saida,
                 duration_ms=duracao,
                 call_id=chamada.id,

@@ -31,7 +31,14 @@ CREATE TABLE IF NOT EXISTS messages (
   contexto        INTEGER,
   at              INTEGER NOT NULL,
   steps           TEXT NOT NULL DEFAULT '[]',
-  todos           TEXT NOT NULL DEFAULT '[]'
+  todos           TEXT NOT NULL DEFAULT '[]',
+  -- O desfecho da rodada. Sem isto, reabrir a conversa perdia a informação de que a
+  -- tarefa parou no meio: o plano voltava com um item «em andamento» e nada rodando.
+  incompleto      INTEGER NOT NULL DEFAULT 0,
+  motivo          TEXT,
+  pendentes       TEXT NOT NULL DEFAULT '[]',
+  executou        INTEGER NOT NULL DEFAULT 0,
+  retomavel       INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, at);
@@ -116,6 +123,27 @@ class Database:
             conn.execute("ALTER TABLE messages ADD COLUMN contexto INTEGER")
         if "todos" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN todos TEXT NOT NULL DEFAULT '[]'")
+        # O desfecho da rodada. Mensagem antiga nasce **completa**: é o que ela era antes
+        # desta coluna existir, e marcar tudo o que já está no banco como «não concluída»
+        # encheria o histórico de cartões de tarefa que terminou.
+        if "incompleto" not in colunas:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN incompleto INTEGER NOT NULL DEFAULT 0"
+            )
+        if "motivo" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN motivo TEXT")
+        if "pendentes" not in colunas:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN pendentes TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "executou" not in colunas:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN executou INTEGER NOT NULL DEFAULT 0"
+            )
+        if "retomavel" not in colunas:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN retomavel INTEGER NOT NULL DEFAULT 1"
+            )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

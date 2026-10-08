@@ -36,11 +36,15 @@ completo do backend fica em `GET /api/health/detalhado`, que exige o token. No a
 empacotado `/docs`, `/redoc`, `/openapi.json` e `/` ficam desligados.
 
 No app instalado, o launcher marca o backend com `KODA_BACKEND_PACKAGED=1` e o
-provedor padrão é `host`. Assim, variáveis `OPENAI_*` de outros programas não
-redirecionam a conversa por acidente. `KODA_PROVIDER` definido explicitamente no
-ambiente ou no `.env` continua prevalecendo, inclusive `auto`. No desenvolvimento,
-o padrão continua sendo `auto`; o marcador é interno ao launcher, não precisa
-ser configurado pelo usuário.
+provedor padrão é `host`. No desenvolvimento o padrão continua sendo `auto`; o marcador
+é interno ao launcher, não precisa ser configurado pelo usuário. `KODA_PROVIDER`
+definido explicitamente no ambiente ou no `.env` continua prevalecendo, inclusive `auto`.
+
+**Não existe provider de terceiro.** Há um tempo havia um caminho OpenAI-compatible,
+escolhido por uma `OPENAI_API_KEY` que estivesse no ambiente — inclusive a de outro
+programa —, e ele fazia o seletor oferecer os modelos da casa (Liz, Koda, Layze) a um
+serviço que não os tem: escolher "Liz 4" mandava o modelo do `.env`, sem avisar. Saiu do
+produto. As variáveis `OPENAI_*` são ignoradas.
 
 ## Rotas
 
@@ -611,8 +615,8 @@ meia-noite, segunda-feira e dia 1º **no relógio do cliente**. Os limites ficam
 
 ## Providers
 
-`KODA_PROVIDER=auto` (padrão) procura nesta ordem: OpenAI (se houver chave), o serviço de
-modelos (se estiver respondendo) e o provider local.
+`KODA_PROVIDER=auto` (padrão) procura nesta ordem: o serviço de modelos (se estiver
+respondendo) e o provider local. São **dois**, e não há um terceiro.
 
 - **local** — responde sem chave, em pedaços, dizendo que não há modelo configurado. **Não
   sabe chamar ferramenta**: com ele o chat funciona, mas o agente não executa nada
@@ -636,9 +640,6 @@ modelos (se estiver respondendo) e o provider local.
   guarda credencial nenhuma.
 
       SERVE_LIZ_AUTH_URL=https://koda-cloud-api.studiosluxgames.workers.dev ./c-host.exe
-- **openai** — `/chat/completions` com `stream: true`; serve OpenAI, Groq, OpenRouter e o
-  Ollama (`OPENAI_BASE_URL=http://localhost:11434/v1`). `KODA_MODEL_MAP` traduz os nomes
-  da interface (`{"liz-nano": "gpt-4o"}`).
 
 Duas decisões que o provider do serviço toma e que não são óbvias:
 

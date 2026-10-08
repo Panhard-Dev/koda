@@ -148,6 +148,12 @@ export type ToolStep = {
   call_id: string
   ok: boolean
   /**
+   * A chamada como o modelo a escreveu, em texto. Vem do histórico (a conversa reaberta);
+   * a tela não desenha isto — está aqui para o `arguments` acima ter o original ao lado
+   * quando o JSON do modelo não desserializou (resposta cortada no teto de tokens).
+   */
+  raw_arguments?: string
+  /**
    * O **recurso acionado**, quando a ferramenta vem de um servidor MCP.
    *
    * O nome da ferramenta que o modelo vê é normalizado (`mcp__eco_server__somar`) e não
@@ -191,7 +197,12 @@ export type ApiMessage = {
   attachments: ApiAnexo[]
   model: string | null
   elapsed_ms: number | null
-  /** Tokens que a resposta custou; `null` quando o provedor não conta. */
+  /**
+   * O que a resposta **escreveu** (soma de `completion_tokens` dos passos); `null` quando o
+   * provedor não conta. É o tamanho da resposta — não o custo: cada passo reenvia o
+   * contexto inteiro, então somar o total multiplicaria o mesmo contexto pelo número de
+   * passos e a ficha mostraria um número absurdo.
+   */
   tokens: number | null
   /** Contexto do último passo (tokens de entrada) — o medidor ao lado do modelo. */
   contexto: number | null
@@ -199,6 +210,22 @@ export type ApiMessage = {
   steps: ToolStep[]
   /** Lista de tarefas da resposta, quando o agente montou uma. */
   todos: ApiTodo[]
+  /**
+   * A rodada parou antes de terminar o que foi pedido.
+   *
+   * Vem gravado com a mensagem, e não só no evento `done`: é o que faz o cartão de «tarefa
+   * não concluída» — com o Retomar — voltar quando a conversa é reaberta. Sem isso, reabrir
+   * mostrava o plano com um item «em andamento» e nada rodando.
+   */
+  incompleto: boolean
+  /** O **código** do motivo (`pending_steps`, `interrupted`, `provider_error`…). */
+  motivo: string | null
+  /** Itens do plano que ficaram em aberto, com o nome que o agente deu. */
+  pendentes: string[]
+  /** Quantas ferramentas rodaram de verdade nesta rodada. */
+  executou: number
+  /** Dá para continuar de onde parou? */
+  retomavel: boolean
 }
 
 export type ApiConversationSummary = {
@@ -253,6 +280,35 @@ export type NovoSkill = {
   /** O que a skill manda o agente fazer — o miolo das instruções. */
   action: string
 }
+
+/**
+ * Um sub-agente, como a seção Agentes e o `@` o mostram.
+ *
+ * `skills` e `mcps` vazios significam **nenhum**, e não «todos»: o que o sub-agente pode usar
+ * está escrito, nunca subentendido. Um agente novo não herda poder.
+ */
+export type ApiAgente = {
+  nome: string
+  prompt: string
+  skills: string[]
+  mcps: string[]
+  /** Modelo dele, quando valer um diferente do principal. Vazio = o que o principal mandar. */
+  modelo: string
+}
+
+/** O que a tela manda ao criar ou editar um sub-agente. O nome é o identificador. */
+export type NovoAgente = ApiAgente
+
+/** Os sub-agentes escritos no `subs.agentes.md`. */
+export const listAgents = () => request<ApiAgente[]>('/api/agents')
+
+/** Cria ou substitui um sub-agente pelo nome; devolve a lista como ficou. */
+export const saveAgent = (agente: NovoAgente) =>
+  request<ApiAgente[]>('/api/agents', { method: 'POST', body: JSON.stringify(agente) })
+
+/** Tira o sub-agente do arquivo; devolve a lista como ficou. */
+export const deleteAgent = (nome: string) =>
+  request<ApiAgente[]>(`/api/agents/${encodeURIComponent(nome)}`, { method: 'DELETE' })
 
 export type ApiMcp = {
   name: string
@@ -313,6 +369,14 @@ export type ChatPayload = {
    * `text: "continue"` e fazia a tela mostrar o próprio usuário pedindo a palavra mágica.
    */
   resume?: boolean
+  /**
+   * Roda **livre**: nenhuma ação pede permissão antes de acontecer.
+   *
+   * É o que a aba Subs manda. Ela não tem cartão de permissão, e um pedido sem cartão
+   * deixaria o agente parado para sempre esperando uma resposta que ninguém tem onde dar.
+   * Vale só para esta rodada — o modo guardado do app não muda.
+   */
+  livre?: boolean
 }
 
 /**
@@ -768,6 +832,125 @@ export const listFolders = (caminho?: string | null) =>
     `/api/fs/pastas${caminho ? `?caminho=${encodeURIComponent(caminho)}` : ''}`,
   )
 
+// ------------------------------------------------------- o painel de código
+
+/**
+ * Um item da árvore: uma pasta ou um arquivo de código.
+ *
+ * Só nome e caminho. Tamanho não vem aqui de propósito: a lista mostra nome, e o tamanho
+ * aparece quando o arquivo é aberto — medido no `ler_arquivo`, que lê o arquivo de verdade.
+ */
+export type ItemDeArvore = {
+  nome: string
+  caminho: string
+  pasta: boolean
+}
+
+/** Os filhos de uma pasta, como a aba Código os desenha. */
+export type ArvoreDePasta = {
+  caminho: string
+  nome: string
+  itens: ItemDeArvore[]
+}
+
+/**
+ * O que a IA mudou num arquivo **nesta execução** do Koda — o resumo que marca a árvore.
+ *
+ * `mais`/`menos` são `null` quando o arquivo passou do teto do diff: a tela diz «mudou» sem
+ * inventar uma contagem que não foi medida.
+ */
+export type MudancaDeArquivo = {
+  caminho: string
+  /** Qual ferramenta escreveu: `write_file`, `edit_file` ou `apply_patch`. */
+  ferramenta: string
+  quando: number
+  /** Quantas vezes uma ferramenta escreveu neste arquivo. */
+  vezes: number
+  mais: number | null
+  menos: number | null
+  /** O arquivo não existia antes — foi criado pela IA. */
+  criado: boolean
+}
+
+/** Uma linha do diff, já com a marca. `antigo`/`novo` são `null` do lado que não existe. */
+export type LinhaDeDiff = {
+  tipo: 'igual' | 'entrou' | 'saiu'
+  antigo: number | null
+  novo: number | null
+  texto: string
+}
+
+/** O retrato de um arquivo alterado: o resumo mais as linhas marcadas. */
+export type RetratoDaMudanca = MudancaDeArquivo & {
+  /** `null` quando o arquivo passou do teto do diff. */
+  linhas: LinhaDeDiff[] | null
+}
+
+/**
+ * O texto de um arquivo, para o visualizador.
+ *
+ * `truncado` é o que permite a tela dizer «cortado» em vez de mostrar um pedaço como se
+ * fosse o arquivo inteiro. `mudanca` é `null` quando a IA não mexeu neste arquivo nesta
+ * execução — e aí a tela mostra o código como ele está, sem pintar nada.
+ */
+export type ArquivoLido = {
+  caminho: string
+  nome: string
+  texto: string
+  linhas: number
+  tamanho: number
+  truncado: boolean
+  mudanca: RetratoDaMudanca | null
+}
+
+/** Os filhos de uma pasta — **um nível só**: quem abre a pasta pede os dela. */
+export const listarArquivos = (caminho: string) =>
+  request<ArvoreDePasta>(`/api/fs/arvore?caminho=${encodeURIComponent(caminho)}`)
+
+/** O conteúdo real de um arquivo. Lê o disco a cada chamada — não há cache. */
+export const lerArquivo = (caminho: string) =>
+  request<ArquivoLido>(`/api/fs/arquivo?caminho=${encodeURIComponent(caminho)}`)
+
+/**
+ * Os arquivos que a IA mexeu nesta execução — o que marca a árvore.
+ *
+ * É uma leitura barata (só memória do backend, sem disco), feita em sondagem pela aba
+ * Código: é assim que a tela acompanha a IA trabalhando com o painel aberto.
+ */
+export const listarMudancas = () =>
+  request<{ itens: MudancaDeArquivo[] }>('/api/fs/mudancas')
+
+/** Esquece as marcas. O arquivo no disco não é tocado. */
+export const limparMudancas = () =>
+  request<{ removidas: number }>('/api/fs/mudancas', { method: 'DELETE' })
+
+/**
+ * O que **uma** chamada de ferramenta mudou — é o que o cartão dela mostra na conversa.
+ *
+ * `criado` diz que o arquivo não existia antes; sem ele, um arquivo escrito do zero e um
+ * arquivo reescrito apareceriam iguais, e são coisas diferentes.
+ */
+export type MudancaDaChamada = {
+  caminho: string
+  ferramenta: string
+  criado: boolean
+  /** `null` quando o arquivo passou do teto do diff. */
+  linhas: LinhaDeDiff[] | null
+}
+
+/**
+ * O diff de uma chamada de ferramenta, pelo id dela.
+ *
+ * Por chamada, e não por arquivo: num arquivo escrito três vezes na mesma conversa, o
+ * acumulado apareceria igual nos três cartões. Lista vazia é resposta legítima — chamada que
+ * não escreveu nada, ou conversa de uma execução anterior do Koda, porque o registro vive no
+ * processo do backend e morre com ele.
+ */
+export const mudancasDaChamada = (id: string) =>
+  request<{ itens: MudancaDaChamada[] }>(
+    `/api/fs/mudancas/chamada?id=${encodeURIComponent(id)}`,
+  )
+
 export const listPermissions = () => request<Permissoes>('/api/permissions')
 
 export const setPermissionMode = (modo: ModoPermissao) =>
@@ -820,6 +1003,21 @@ type StreamData = {
    * desenha como painel, em vez de esconder atrás de "Rodar ferramenta".
    */
   todos: { todos: ApiTodo[]; step: number }
+  /**
+   * O que um **sub-agente** está fazendo, em nome dele.
+   *
+   * Vem como evento próprio, e não misturado aos passos de cima: o sub-agente narra o
+   * trabalho dele numa aba da área Subs, e a conversa de cima mostra uma coisa só — a
+   * chamada do `sub_agente` e o que ele devolveu. `dados` é o evento de dentro, do mesmo
+   * formato dos de cima (`delta`, `tool_call`, `tool_result`, `todos`…).
+   */
+  sub: {
+    /** O id da chamada `sub_agente` que o lançou. É a identidade da aba dele. */
+    chamada: string
+    agente: string
+    evento: string
+    dados: Record<string, unknown>
+  }
   /** O agente parou pedindo permissão para mexer na máquina. */
   approval_request: PedidoPermissao
   done: {
@@ -840,7 +1038,7 @@ type StreamData = {
     executed?: number
     /** Dá para retomar? Falso no único motivo que não vale a pena (`context_overflow`). */
     resumable?: boolean
-    /** Tokens que esta resposta custou (soma dos passos); `null` se o provedor não conta. */
+    /** O que a resposta escreveu (soma de `completion_tokens`); `null` se o provedor não conta. */
     tokens?: number | null
     /**
      * Contexto do último passo, em tokens de entrada — o medidor ao lado do modelo.
@@ -866,6 +1064,8 @@ export type StreamHandlers = {
   onTodos?: (data: StreamData['todos']) => void
   /** O agente precisa de permissão — o stream fica parado até a resposta. */
   onApprovalRequest?: (data: StreamData['approval_request']) => void
+  /** Um sub-agente lançado narrou um passo do trabalho dele. */
+  onSub?: (data: StreamData['sub']) => void
   onDone?: (data: StreamData['done']) => void
   /**
    * O fluxo fechou sem evento terminal — o `done` nunca chegou.
@@ -926,6 +1126,7 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
         handlers.onToolResult?.(parsed as unknown as StreamData['tool_result'])
       else if (event === 'todos')
         handlers.onTodos?.(parsed as unknown as StreamData['todos'])
+      else if (event === 'sub') handlers.onSub?.(parsed as unknown as StreamData['sub'])
       else if (event === 'approval_request')
         handlers.onApprovalRequest?.(parsed as unknown as StreamData['approval_request'])
       else if (event === 'done') {

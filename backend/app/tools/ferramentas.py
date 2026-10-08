@@ -35,6 +35,7 @@ from typing import Any
 import httpx
 
 from .. import mcp
+from ..contracts import mudancas
 from ..limits import LIMITES, cortar_cabeca_e_cauda
 from .registry import (
     CAMINHOS_EXTRA,
@@ -626,6 +627,24 @@ def _escrever_atomico(rota: Path, texto: str) -> None:
         temporario.unlink(missing_ok=True)
 
 
+def _ler_para_comparar(rota: Path) -> str | None:
+    """O texto do arquivo **antes** da escrita, para o painel poder mostrar o que mudou.
+
+    `None` quando o arquivo não existia — que é o que faz um arquivo criado aparecer inteiro
+    em verde, e não como uma edição.
+
+    Nunca levanta: perder a anotação é aceitável, derrubar uma ferramenta por causa dela não
+    é. Arquivo binário entra como texto com os bytes ilegíveis trocados — o diff dele sai
+    estranho, mas sai.
+    """
+    try:
+        if not rota.is_file():
+            return None
+        return rota.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 # ---------------------------------------------------------------- web
 
 
@@ -1080,6 +1099,50 @@ COMANDO_PERIGOSO = re.compile(
 ESCOPO_QUALQUER = "*"
 
 
+def _acao_de_mcp(nome: str) -> dict[str, Any]:
+    """O cartão de permissão de uma ferramenta de servidor externo (MCP).
+
+    Não há o que classificar: o Koda não tem regra nenhuma sobre o que uma ferramenta de
+    fora faz — ela roda no processo do servidor, e o que ela pode fazer é o que o servidor
+    decidir. Chutar «é só leitura» pelo nome da ferramenta seria pior do que perguntar:
+    errar para o lado permissivo é o que este cartão existe para impedir. Então a ação é
+    sempre **alto**, e a decisão volta para a pessoa com o que o servidor diz na mão.
+
+    As `annotations` do MCP (`readOnlyHint` e companhia) **não** são consultadas de
+    propósito: são uma dica que o próprio servidor escreve sobre si mesmo, e a
+    especificação diz que não servem de base para decisão de segurança. Se um servidor
+    mentir ali, quem paga é quem confiou.
+    """
+    detalhe = mcp.detalhar(nome) or {}
+    servidor = str(detalhe.get("servidor") or "")
+    ferramenta = str(detalhe.get("ferramenta") or "")
+    onde = f"no servidor «{servidor}»" if servidor else "num servidor externo"
+
+    explicacao = (
+        f"Esta ferramenta não é do Koda: ela roda {onde}, um programa à parte, "
+        "e o Koda não sabe o que ela faz."
+    )
+    dito = mcp.descricao(nome)
+    if dito:
+        # Texto do servidor, citado: quem lê precisa saber de quem é a frase.
+        explicacao += f" O próprio servidor a descreve como: «{dito[:300]}»."
+    explicacao += (
+        " O Koda não tem como conferir isso — se você não reconhece a ferramenta, negue."
+    )
+
+    return {
+        "kinds": ["ferramenta_externa"],
+        # O escopo é a ferramenta inteira (`mcp__servidor__ferramenta`), e não o servidor:
+        # «sempre» numa ferramenta de leitura não pode liberar a que executa código.
+        "escopos": {"ferramenta_externa": nome},
+        "titulo": "Usar ferramenta de servidor externo",
+        "resumo": f"{servidor} · {ferramenta}" if servidor else nome,
+        "explicacao": explicacao,
+        "lembrar": f"usar {ferramenta or nome} ({servidor or 'servidor externo'})",
+        "risco": "alto",
+    }
+
+
 def classificar(
     nome: str, argumentos: dict[str, Any], workspace: Path
 ) -> dict[str, Any] | None:
@@ -1094,6 +1157,16 @@ def classificar(
     # Apelido e sinônimo primeiro: o cartão de permissão descreve a ação **real**, então
     # `run_command` tem que ser tratado como `shell` — senão passava sem descrição.
     nome = canonico(nome)
+
+    # Ferramenta de servidor externo (MCP): vem antes das regras nativas porque **nenhuma**
+    # delas descreve o que ela faz. Antes esta chamada caía no `return None` do fim do
+    # `classificar`: sem `kinds`, o `approvals.resolver` respondia «seguir», o cartão não
+    # saía e a ferramenta rodava sem permissão (F02). Vem antes do `_sinonimos` pelo mesmo
+    # motivo do despacho (F01): os argumentos são do contrato do servidor, e traduzir
+    # apelido aqui descreveria uma chamada que não é a que sai.
+    if nome.startswith(mcp.PREFIXO):
+        return _acao_de_mcp(nome)
+
     argumentos = _sinonimos(argumentos)
 
     if nome in ("shell", "terminal"):
@@ -1602,7 +1675,9 @@ def _aplicar_hunks(texto: str, hunks: list[tuple[int, list[str], list[str]]]) ->
     return final, ""
 
 
-def _aplicar_patch(diff: str, workspace: Path, acesso_livre: bool) -> str:
+def _aplicar_patch(
+    diff: str, workspace: Path, acesso_livre: bool, chamada: str = ""
+) -> str:
     """Aplica um diff unificado — tudo em memória, e só depois grava.
 
     Se o terceiro arquivo do diff não bate, os dois primeiros **não** podem ficar alterados:
@@ -1674,6 +1749,11 @@ def _aplicar_patch(diff: str, workspace: Path, acesso_livre: bool) -> str:
             if rota not in trocados:
                 temporario.unlink(missing_ok=True)
         return f"ERRO ao gravar o patch (nada foi alterado): {exc}"
+    # O `originais` já está na mão: é o texto de antes, lido quando o patch foi preparado. A
+    # anotação vem depois da troca, e não antes, para o painel só mostrar o patch que de fato
+    # chegou ao disco.
+    for rota, texto in prontos:
+        mudancas.anotar(str(rota), originais.get(rota), texto, "apply_patch", chamada)
     return (
         f"ok: patch aplicado em {len(prontos)} arquivo(s): "
         + ", ".join(str(rota) for rota, _ in prontos)
@@ -1692,8 +1772,14 @@ def executar(
     skills: Any = None,
     timeout_s: float | None = None,
     cancelamento: Event | None = None,
+    chamada: str = "",
 ) -> str:
-    """Executa uma ferramenta com prazo cooperativo propagado aos seus recursos."""
+    """Executa uma ferramenta com prazo cooperativo propagado aos seus recursos.
+
+    `chamada` é o id da chamada do modelo. Vai junto só para o registro de mudanças
+    (`contracts.mudancas`): é ele que permite o cartão da ferramenta, na conversa, mostrar o
+    diff **daquela** chamada em vez do acumulado do arquivo.
+    """
     if timeout_s is not None and timeout_s <= 0:
         return "ERRO: o prazo da tarefa acabou antes da execução da ferramenta."
     prazo = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
@@ -1710,6 +1796,7 @@ def executar(
             dono=dono,
             anexos=anexos,
             skills=skills,
+            chamada=chamada,
         )
     finally:
         _CANCELAMENTO_DA_FERRAMENTA.reset(token_cancelamento)
@@ -1725,6 +1812,7 @@ def _executar_impl(
     dono: str = "",
     anexos: Any = None,
     skills: Any = None,
+    chamada: str = "",
 ) -> str:
     """Roda uma ferramenta e devolve o texto que volta para o modelo.
 
@@ -1744,24 +1832,37 @@ def _executar_impl(
     restante = _restante_da_ferramenta()
     if restante is not None and restante <= 0:
         return "ERRO: o prazo desta chamada de ferramenta acabou antes da execução."
-    argumentos = _sinonimos(argumentos or {})
+    # `canonico` só baixa a caixa do nome; não toca nos argumentos. Ele vem antes de tudo
+    # porque é ele que a porteira usa para decidir se a chamada passa — o nome oferecido no
+    # catálogo e o despachado aqui não podem divergir.
     nome = canonico(nome)
     if negadas and nome in {canonico(item) for item in negadas}:
         return f"ERRO: a ferramenta {nome} está desligada (KODA_TOOLS_DENY)."
 
     # Ferramenta de servidor MCP: roda **fora**, no processo do servidor. Vem antes de tudo
-    # porque não é uma ferramenta do Koda — o nome (`mcp__<servidor>__<ferramenta>`) não casa
-    # com nenhum ramo abaixo. O desvio é pelo **prefixo**, e não por estar no mapa: um
-    # servidor que cai no meio da rodada deixa o nome oferecido e fora do mapa, e aí o certo é
-    # a recusa explicada ("não está disponível") — não "ferramenta desconhecida", que mandaria
-    # o modelo procurar o erro no lugar errado. O prazo restante da tarefa é repassado: um
-    # servidor MCP que trava não pode prender a tarefa além do que ela já tinha.
+    # — inclusive de `_sinonimos`, e é esse o ponto (F01). Os argumentos de uma ferramenta
+    # externa são do **contrato do servidor**, não do nosso: `_sinonimos` existe para o
+    # modelo poder escrever `path` numa ferramenta nativa que espera `caminho`, e ele
+    # **acrescenta** a chave em vez de trocar (`{"path": …}` vira `{"path": …, "caminho": …}`).
+    # Aplicado aqui, isso manda ao servidor um campo que ele não pediu — e um servidor de
+    # esquema fechado recusa a chamada com o modelo tendo acertado. Quem altera a chamada
+    # passa a ser o Koda, e o erro aparece do lado errado. Por isso: nada de normalizar
+    # argumento de fora.
+    #
+    # O desvio é pelo **prefixo**, e não por estar no mapa: um servidor que cai no meio da
+    # rodada deixa o nome oferecido e fora do mapa, e aí o certo é a recusa explicada ("não
+    # está disponível") — não "ferramenta desconhecida", que mandaria o modelo procurar o
+    # erro no lugar errado. O prazo restante da tarefa é repassado: um servidor MCP que
+    # trava não pode prender a tarefa além do que ela já tinha.
     if nome.startswith(mcp.PREFIXO):
         restante = _restante_da_ferramenta()
-        _permitido, saida = mcp.executar(nome, argumentos, tempo_s=restante)
+        _permitido, saida = mcp.executar(nome, argumentos or {}, tempo_s=restante)
         # A recusa já vem com a marca `ERRO:` no texto — é o contrato das ferramentas, e é o
         # que o laço lê para saber que o passo falhou.
         return saida
+
+    # Daqui para baixo é ferramenta do Koda: aí sim vale o sinônimo.
+    argumentos = _sinonimos(argumentos or {})
 
     if nome in FERRAMENTAS_DE_ARQUIVO:
         fora = _validar_alvos(workspace, nome, argumentos, acesso_livre)
@@ -1939,9 +2040,13 @@ def _executar_impl(
     if nome == "write_file":
         rota = _resolver(workspace, str(argumentos.get("caminho", "")))
         conteudo = str(argumentos.get("conteudo", ""))
+        antes = _ler_para_comparar(rota)
         try:
             # Gravação atômica: nada de arquivo pela metade se o processo morrer no meio.
             _escrever_atomico(rota, conteudo)
+            # Só depois de gravar: anotar antes deixaria o painel mostrando uma mudança que
+            # não aconteceu, caso a gravação falhasse.
+            mudancas.anotar(str(rota), antes, conteudo, "write_file", chamada)
             return f"ok: {len(conteudo)} caracteres gravados em {rota}"
         except OSError as exc:
             return f"ERRO ao gravar {rota}: {exc}"
@@ -1963,7 +2068,9 @@ def _executar_impl(
             return "ERRO: old_string não encontrado no arquivo"
         if ocorrencias > 1:
             return f"ERRO: old_string aparece {ocorrencias} vezes; informe um trecho único"
-        _escrever_atomico(rota, texto.replace(antigo, novo, 1))
+        final = texto.replace(antigo, novo, 1)
+        _escrever_atomico(rota, final)
+        mudancas.anotar(str(rota), texto, final, "edit_file", chamada)
         return f"ok: substituição aplicada em {rota}"
 
     if nome == "list_dir":
@@ -2130,7 +2237,9 @@ def _executar_impl(
         return _limitar(corpo)
 
     if nome == "apply_patch":
-        return _aplicar_patch(str(argumentos.get("diff", "")), workspace, acesso_livre)
+        return _aplicar_patch(
+            str(argumentos.get("diff", "")), workspace, acesso_livre, chamada
+        )
 
     if nome == "git_push":
         argv = ["git", "push"]
