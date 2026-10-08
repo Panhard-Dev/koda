@@ -109,6 +109,11 @@ export default function MessageFooter({
 }: {
   /** O texto gravado da resposta — é o que a cópia leva. */
   texto: string
+  /**
+   * O que a resposta escreveu, em tokens (`completion_tokens` somados). É o tamanho dela —
+   * não o custo: cada passo do agente reenvia o contexto inteiro, e somar isso dava um
+   * número que parecia impossível (ver `_tokens` no backend).
+   */
   tokens?: number | null
   elapsedMs?: number | null
   /** Quando a resposta entrou na conversa (hora mostrada na ficha). */
@@ -181,7 +186,7 @@ export default function MessageFooter({
       {numeros ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-koda-fg/35">
           {tokens ? (
-            <Marca titulo={`${tokens.toLocaleString('pt-BR')} tokens nesta resposta`}>
+            <Marca titulo={`${tokens.toLocaleString('pt-BR')} tokens escritos nesta resposta`}>
               <Coins className="h-3.5 w-3.5" strokeWidth={1.7} />
               <span className="tabular-nums">{formatarTokens(tokens)} tok</span>
             </Marca>
