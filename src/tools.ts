@@ -147,6 +147,29 @@ export const recursoDoPasso = (passo: Passo) => {
  * Serve tanto para a linha da ferramenta na conversa quanto para a linha de trabalho, que
  * precisa dizer o que está rodando agora — o mesmo resumo, cortado em limites diferentes.
  */
+/**
+ * Chaves que carregam **conteúdo de arquivo**, não um parâmetro.
+ *
+ * O código delas aparece inteiro no cartão da ferramenta, com o verde e o vermelho. Num
+ * resumo de uma linha elas não informam nada e ainda empurram o caminho para fora da tela —
+ * era o que fazia o cartão de um `write_file` mostrar 44 caracteres de HTML no lugar do nome
+ * do arquivo.
+ */
+const CHAVES_DE_CONTEUDO = new Set(['conteudo', 'old_string', 'new_string', 'diff'])
+
+/**
+ * Os caminhos que um diff unificado toca, lidos dos cabeçalhos.
+ *
+ * `+++` e não `---`: arquivo criado pelo patch tem `--- /dev/null` do lado antigo, e o nome
+ * de verdade só aparece no lado novo.
+ */
+export const caminhosDoDiff = (diff: string) =>
+  diff
+    .split('\n')
+    .filter((linha) => linha.startsWith('+++ '))
+    .map((linha) => linha.slice(4).trim().replace(/^[ab]\//, ''))
+    .filter((caminho) => caminho && caminho !== '/dev/null')
+
 export const resumoArgumentos = (argumentos: Record<string, unknown>, limite = 96) => {
   // Acompanhar/parar um comando que já está rodando lê melhor em português do que o par
   // chave/valor cru: na linha de baixo aparece "acompanhando o comando abc123", que é o
@@ -154,7 +177,16 @@ export const resumoArgumentos = (argumentos: Record<string, unknown>, limite = 9
   if (argumentos.continuar) return `acompanhando o comando ${argumentos.continuar}`
   if (argumentos.parar) return `parando o comando ${argumentos.parar}`
 
-  const partes = Object.entries(argumentos).map(([chave, valor]) => {
+  let entradas = Object.entries(argumentos).filter(
+    ([chave]) => !CHAVES_DE_CONTEUDO.has(chave),
+  )
+  if (entradas.length === 0 && typeof argumentos.diff === 'string') {
+    // O patch não traz caminho nos argumentos: ele está dentro do diff.
+    const caminhos = caminhosDoDiff(argumentos.diff)
+    entradas = caminhos.length ? [['arquivos', caminhos.join(', ')]] : []
+  }
+
+  const partes = entradas.map(([chave, valor]) => {
     const texto = typeof valor === 'string' ? valor : JSON.stringify(valor)
     const curto = (texto ?? '').replace(/\s+/g, ' ').slice(0, 44)
     return `${chave}: ${curto}${(texto ?? '').length > 44 ? '…' : ''}`
