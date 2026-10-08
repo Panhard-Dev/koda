@@ -6,7 +6,6 @@ o provider local responde e o banco nasce em `data/koda.db`.
 
 from __future__ import annotations
 
-import json
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -19,12 +18,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .identidade import NOME
 from .projects import area_de_trabalho
 
-ProviderName = Literal["auto", "local", "openai", "host"]
+ProviderName = Literal["auto", "local", "host"]
 
 
 def _provider_padrao() -> ProviderName:
     # O launcher marca apenas o processo filho. Configuracao explicita (inclusive
-    # no .env) continua vencendo; OPENAI_* de outros apps nao escolhe o instalado.
+    # no .env) continua vencendo.
+    #
+    # **Só existem estes três**: o serviço de modelos oficial (o `c-host.exe`), o `local` que
+    # responde offline quando ele não está no ar, e o `auto` que escolhe entre os dois. Não há
+    # provider de terceiro — nem chave de outro programa escolhe o provider daqui. Antes havia
+    # um caminho OpenAI-compatible, e era ele que fazia o seletor oferecer modelos da casa para
+    # um serviço que não os tem (F05 do relatório de QA).
     return "host" if os.environ.get("KODA_BACKEND_PACKAGED") == "1" else "auto"
 
 
@@ -183,21 +188,6 @@ class Settings(BaseSettings):
     """Última cartada: espera essa janela e tenta uma vez mais (0 desliga)."""
     retry_final_wait_s: int = 12
 
-    # Chaves sem prefixo, como todo mundo espera encontrar no .env.
-    openai_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("OPENAI_API_KEY", "KODA_OPENAI_API_KEY"),
-    )
-    openai_base_url: str = Field(
-        default="https://api.openai.com/v1",
-        validation_alias=AliasChoices("OPENAI_BASE_URL", "KODA_OPENAI_BASE_URL"),
-    )
-    openai_model: str = Field(
-        default="gpt-4o-mini",
-        validation_alias=AliasChoices("OPENAI_MODEL", "KODA_OPENAI_MODEL"),
-    )
-    model_map: str = "{}"
-
     # Serviço de modelos oficial (Liz): é o host em `host/c-host.exe`, que publica o
     # catálogo em /v1/models e recebe a conversa em /v1/chat/completions.
     host_url: str = Field(
@@ -214,15 +204,16 @@ class Settings(BaseSettings):
         default="liz-4,liz-3-flash,koda-1,layze-2",
         validation_alias=AliasChoices("KODA_HOST_VISAO", "HOST_VISAO"),
     )
-    """Ids do host que **enxergam imagem**, separados por vírgula.
+    """Ids do host que **enxergam imagem**, separados por vírgula — lista **curada**.
 
-    A lista é necessária porque o host **não publica** a capacidade em `/v1/models` (só
-    `efforts` e `reasoningFloor`): sem ela não há como saber se a imagem pode ir no corpo
-    do pedido ou se o provedor vai recusar. Modelo fora da lista recebe o anexo do mesmo
-    jeito que antes — pelos metadados —, em vez de o pedido inteiro falhar.
+    O host publica `images` por modelo em `/v1/models`, mas **não dá para confiar nele**: o
+    `liz-nano` é anunciado com `images: true` e o upstream por trás responde 400 («model
+    "mai-experimental" not supported for vision»), porque o modelo real por trás do id varia
+    conforme o pool do host. Mandar imagem para quem o host diz que enxerga, mas o upstream
+    não, derruba o pedido inteiro. Por isso a lista é medida e editada à mão: modelo fora
+    dela recebe o anexo pelos metadados, em vez de o pedido falhar.
 
-    Ajustável por `KODA_HOST_VISAO`: quando o host passar a publicar a capacidade, é aqui
-    que ela entra até virar campo do catálogo.
+    Ajustável por `KODA_HOST_VISAO`.
     """
 
     host_key: str | None = Field(
@@ -290,27 +281,13 @@ class Settings(BaseSettings):
     def origins(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
-    @property
-    def model_aliases(self) -> dict[str, str]:
-        """Modelo da interface -> modelo do provedor (opcional)."""
-        try:
-            data = json.loads(self.model_map or "{}")
-        except json.JSONDecodeError:
-            return {}
-        return {str(key): str(value) for key, value in data.items()} if isinstance(data, dict) else {}
-
-    def resolve_model(self, model: str, padrao: str | None = None) -> str:
-        """Modelo da interface (liz-nano, koda-1…) para o nome do provedor."""
-        return self.model_aliases.get(model, padrao or self.openai_model)
-
     def aceita_imagem(self, model: str) -> bool:
         """O modelo enxerga imagem? Decide se o anexo de imagem vai **no corpo** do pedido.
 
-        Compara pelo id do host e também pelo alias: a interface manda o id do catálogo
-        (`liz-4`), e o `model_map` pode traduzi-lo antes de o pedido subir. Um id vazio cai
-        no modelo padrão do host, que é o que o provider vai usar de verdade.
+        Compara pelo id do catálogo do host (`liz-4`). Um id vazio cai no modelo padrão do
+        host, que é o que o provider vai usar de verdade.
         """
-        alvo = self.model_aliases.get(model, model) or self.host_model
+        alvo = model or self.host_model
         return alvo in {item.strip() for item in self.host_modelos_com_visao.split(",") if item.strip()}
 
     @property

@@ -1,7 +1,12 @@
 """Escolha do provider a partir da configuração.
 
-`auto` procura nesta ordem: OpenAI (se houver chave), o host com os modelos oficiais
-(se estiver respondendo) e, por fim, o provider local — que responde sem depender de nada.
+São **dois**, e não há um terceiro: o **host** com os modelos oficiais (o `c-host.exe`) e o
+**local**, que responde offline e sem ferramentas. O `auto` procura nesta ordem: o host, se
+estiver respondendo, e o local se não estiver.
+
+Não existe provider de terceiro. Havia um caminho OpenAI-compatible, escolhido por uma
+`OPENAI_API_KEY` que estivesse no ambiente — inclusive a de outro programa —, e era ele que
+fazia o seletor oferecer os modelos da casa a um serviço que não os tem.
 """
 
 from __future__ import annotations
@@ -64,8 +69,6 @@ def build_provider(settings: Settings) -> Provider:
         return LocalProvider(settings)
     if settings.provider == "host":
         return HostProvider(settings)
-    if settings.provider == "openai" or settings.openai_api_key:
-        return OpenAICompatibleProvider(settings)
     if host_disponivel(settings):
         return HostProvider(settings)
     return LocalProvider(settings)
