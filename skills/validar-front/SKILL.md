@@ -16,8 +16,8 @@ antes de começar.
 ## Antes de qualquer coisa
 
 1. **O servidor está no ar.** `mcp__navegador__abrir` devolve erro claro se não estiver.
-2. **A página certa.** Só `localhost`/`127.0.0.1` e arquivo do disco — é o isolamento, e é de
-   propósito: não é navegador de internet. O Chrome sobe com perfil próprio e temporário.
+2. **A página certa.** Aceita **qualquer site** (`https://exemplo.com`), servidor de dev
+   (`localhost:PORTA`) e arquivo do disco. O Chrome sobe com perfil próprio e temporário.
 3. **Use `localhost`, não `127.0.0.1`, em `fetch` de página.** Medido em 04/10/2026: a mesma
    chamada levou **6.360 ms** por `127.0.0.1` e **328 ms** por `localhost` (há proxy no
    caminho, e o `localhost` está na exceção).

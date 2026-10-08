@@ -9,6 +9,12 @@ São quatro modos, escolhidos no prompt box:
 - **auto** — não pergunta nada; as ferramentas de arquivo continuam no projeto;
 - **livre** — não pergunta nada e libera as ferramentas de arquivo fora do projeto.
 
+Ferramenta de **servidor externo** (MCP) pergunta em manual e em default. O Koda não sabe o
+que ela faz — roda no processo do servidor, e o que ela pode fazer é o que o servidor
+decidir —, então não há como classificá-la como «só leitura»: quem decide é a pessoa, com a
+descrição que o próprio servidor publicou na mão (`ferramentas._acao_de_mcp`). Em auto e em
+livre ela passa como todo o resto: são os modos em que a pessoa já dispensou a pergunta.
+
 O shell executa comandos reais do usuário do sistema em todos os modos. Auto e Livre
 dispensam a aprovação desses comandos; escolher Livre também amplia o escopo das
 ferramentas de arquivo.
@@ -30,12 +36,17 @@ from ..repository import new_id
 MODOS = ("manual", "default", "auto", "livre")
 
 #: Os tipos de ação que podem exigir permissão.
-KINDS = ("comando", "escrita", "exclusao", "fora_da_pasta")
+KINDS = ("comando", "escrita", "exclusao", "fora_da_pasta", "ferramenta_externa")
 
 #: O que cada modo pergunta antes de fazer.
+#:
+#: `ferramenta_externa` (MCP) entra em **manual** e **default** — não há como saber o que
+#: uma ferramenta de fora faz, e «difícil de desfazer» é exatamente o caso dela. Fica de
+#: fora de **auto** e **livre**, que são os modos em que a pessoa já disse que não quer
+#: pergunta nenhuma (é o mesmo `PERGUNTA` que faz o `chat.py` passar `aprovar=None`).
 PERGUNTA: dict[str, set[str]] = {
-    "manual": {"comando", "escrita", "exclusao", "fora_da_pasta"},
-    "default": {"comando", "exclusao", "fora_da_pasta"},
+    "manual": {"comando", "escrita", "exclusao", "fora_da_pasta", "ferramenta_externa"},
+    "default": {"comando", "exclusao", "fora_da_pasta", "ferramenta_externa"},
     "auto": set(),
     "livre": set(),
 }
@@ -51,6 +62,7 @@ ROTULO = {
     "escrita": "escrita de arquivo",
     "exclusao": "exclusão de arquivo",
     "fora_da_pasta": "arquivo fora da pasta do projeto",
+    "ferramenta_externa": "ferramenta de servidor externo (MCP)",
 }
 
 
