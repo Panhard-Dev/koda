@@ -45,6 +45,29 @@ def _skills_do_koda() -> Path | None:
     return pasta if pasta.is_dir() else None
 
 
+def _node_do_koda() -> Path | None:
+    """O `node.exe` que viaja com o Koda, achado pelo lugar onde este arquivo está.
+
+    Os dois servidores MCP que vêm com o app (`navegador` e `logs`) são programas **Node**.
+    Sem um Node na máquina de destino eles não sobem — e o instalador promete que não é
+    preciso instalar mais nada. Então o Node vai junto, em `resources/node/`.
+
+    A conta é a mesma do `_skills_do_koda`: este arquivo mora em `<koda>/backend/app/`, e no
+    instalado o backend fica em `<instalação>/resources/backend/app/`. Daqui, `../../node` dá
+    `resources/node` no instalado e `koda/node` em dev — que não existe, e é o certo: em dev
+    quem desenvolve já tem o Node dele no `PATH`. A segunda tentativa cobre o runtime montado
+    por `scripts/gerar-runtime-node.mjs` antes de empacotar.
+    """
+    raiz = Path(__file__).resolve().parent.parent.parent
+    for candidato in (
+        raiz / "node" / "node.exe",
+        raiz / "src-tauri" / "runtime" / "node" / "node.exe",
+    ):
+        if candidato.is_file():
+            return candidato
+    return None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env",),
@@ -88,6 +111,15 @@ class Settings(BaseSettings):
     Sem isto o app instalado nasceria sem skill nenhuma: `.agents/skills` do projeto e
     `~/.agents/skills` são pastas de quem desenvolve, e não existem na máquina de quem só
     instalou. `None` quando a pasta não existe (é o caso de um checkout sem as skills).
+    """
+    node_path: Path | None = Field(default_factory=_node_do_koda)
+    """O `node.exe` que **vem com o Koda** — ver `_node_do_koda`.
+
+    O gerenciador de MCP troca o `node`/`node.exe` do `mcps.json` por este caminho: os dois
+    servidores que o app traz são programas Node, e o instalador promete que não é preciso
+    instalar mais nada. `None` quando não existe (em dev, normalmente): aí o comando do
+    `mcps.json` vale como está, e quem não tem Node no `PATH` vê o servidor não subir com o
+    motivo na tela, em vez de o app fingir que o recurso existe.
     """
     tools_deny: str = ""
     acesso_livre: bool = False

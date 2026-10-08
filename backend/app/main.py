@@ -97,7 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Subir processo e esperar o handshake bloqueia; a subida do app não pode depender
         # de um servidor de terceiros responder. Enquanto não conectarem, as ferramentas
         # deles simplesmente não aparecem na rodada — e o estado aparece em `/api/mcps`.
-        mcp.configurar(config.database_path.parent / "mcps.json")
+        mcp.configurar(config.database_path.parent / "mcps.json", config.node_path)
         threading.Thread(target=mcp.preparar, name="koda-mcp", daemon=True).start()
         # O download do instalador roda aqui no processo local: é ele que escreve na pasta
         # de downloads do usuário (a interface nunca escreve em disco).
