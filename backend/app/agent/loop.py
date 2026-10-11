@@ -1413,10 +1413,10 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     Na dúvida, a resposta depende de **onde** a dúvida aparece, e o critério é a assimetria
     do erro: negar ferramenta a quem pediu trabalho trava o trabalho, enquanto oferecer
     ferramenta a quem pediu conversa custa, no máximo, uma resposta que não as usa. Por isso,
-    numa conversa já em andamento, um pedido curto de continuação ("pode", "beleza", "agora
-    aplica") resolve para `MODO_CODIGO`. Na **primeira** mensagem resolve para
-    `MODO_RESPOSTA`: ali não há o que continuar, e é o que impede um "oi" de virar uma
-    varredura da pasta de trabalho da pessoa.
+    numa conversa já em andamento a dúvida resolve para `MODO_CODIGO` — inclusive o pedido
+    que nenhuma régua reconheceu. Só a **primeira** mensagem resolve para `MODO_RESPOSTA`:
+    ali não há o que continuar, e é o que impede um "oi" de virar uma varredura da pasta de
+    trabalho da pessoa.
     """
     pedido = pedido_do_usuario(mensagens)
     if not pedido:
@@ -1436,12 +1436,21 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
         return MODO_CODIGO
     if pedido_de_acao(mensagens) or pedido_grande(mensagens):
         return MODO_CODIGO
-    # Nenhuma régua reconheceu o pedido. Numa conversa já em andamento, esse é o lugar do
-    # "pode", "beleza", "agora aplica": a pessoa está mandando seguir o que foi combinado, e
-    # negar ferramenta aqui é o "nesta sessão não posso usar ferramentas" (ver
-    # `_continuacao_de_trabalho`). Na primeira mensagem, a dúvida continua resolvendo para
-    # conversa — é o que impede o "oi" de virar uma varredura da pasta de trabalho.
+    # Nenhuma régua reconheceu o pedido. Aqui vale a assimetria que este módulo declara:
+    # negar ferramenta a quem pediu trabalho **trava o trabalho**, e oferecer ferramenta a
+    # quem pediu conversa custa, no máximo, uma resposta que não as usa. Então a dúvida só
+    # resolve para "sem ferramenta" na **primeira** mensagem da conversa, onde não há nada
+    # em andamento para continuar — é o que impede um "oi" de virar varredura da pasta.
+    #
+    # Numa conversa já em andamento, a dúvida resolve para trabalho. Era aqui o defeito que
+    # o dono relatou em 10/10/2026: ele pedia algo que nenhuma régua previa e recebia "sem
+    # acesso às ferramentas nesta rodada" — o modelo não estava inventando, a rodada ia sem
+    # catálogo mesmo. Pedido não reconhecido em conversa em andamento é trabalho até prova
+    # em contrário: quem quiser resposta pura diz isso, e aí `SEM_FERRAMENTA_NENHUMA` ou
+    # `SOMENTE_RESPOSTA` pegam acima.
     if _continuacao_de_trabalho(mensagens, pedido):
+        return MODO_CODIGO
+    if len(_falas_da_pessoa(mensagens)) >= 2:
         return MODO_CODIGO
     return MODO_RESPOSTA
 
