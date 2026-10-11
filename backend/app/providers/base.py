@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from ..identidade import NOME, regras
 
@@ -24,7 +24,7 @@ class TransientProviderError(ProviderError):
 
 @dataclass(slots=True)
 class ChatTurn:
-    role: str  # 'user' | 'assistant' | 'system'
+    role: str  # 'user' | 'assistant' | 'system' | 'tool'
     text: str
     #: Imagens que vão **junto** deste turno, como `data:` URLs (`data:image/png;base64,…`).
     #:
@@ -32,6 +32,16 @@ class ChatTurn:
     #: campo `image_url` do pedido, e só o turno do usuário carrega alguma. Vazio (o caso
     #: normal) manda o pedido exatamente como antes — `content` continua sendo uma string.
     imagens: list[str] = field(default_factory=list)
+    #: As **chamadas de ferramenta** deste turno (`assistant`), no formato do provedor.
+    #:
+    #: Um turno do assistente que usou ferramenta volta ao modelo com as chamadas, e cada
+    #: resultado volta como um turno `tool` que aponta para elas. Sem isto o histórico chega
+    #: só com texto: o modelo vê as próprias falas **sem** as chamadas e aprende com elas a
+    #: narrar em vez de chamar — defeito que só aparecia depois de alguns pedidos na mesma
+    #: conversa, porque é a repetição do exemplo ruim que ensina.
+    chamadas: list[dict[str, Any]] = field(default_factory=list)
+    #: A qual chamada este turno responde (`tool`) — casa com `chamadas[i]["id"]`.
+    chamada_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -70,6 +80,10 @@ class Piece:
     reasoning: bool = False
     #: Marca de controle no fim do stream quando o provedor fechou com `finish_reason=length`.
     truncated: bool = False
+    #: Marca de controle no fim do stream quando o **raciocínio** virou laço e o provedor
+    #: cortou a leitura (ver `StepResult.repetiu`). Existe separada de `truncated` porque o
+    #: caminho de texto puro não recebe `StepResult` nenhum — e o alô ao modelo sai daqui.
+    repetiu: bool = False
     #: O `usage` que o provedor manda no fim do stream, num pedaço **sem texto**.
     #:
     #: Existe porque o caminho de texto puro (`chat.py::_texto`) não recebe `StepResult`

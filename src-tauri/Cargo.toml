@@ -1,6 +1,6 @@
 [package]
 name = "koda"
-version = "0.6.4"
+version = "0.6.9"
 description = "Koda — chat de código com agente local"
 authors = ["Koda"]
 edition = "2021"
@@ -9,7 +9,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 # O diagnóstico da tela de Ajustes volta como JSON para a interface.
 serde = { version = "1", features = ["derive"] }
 # Ler a resposta do handshake (`{"hmac": "…"}`) sem parser de mentira.

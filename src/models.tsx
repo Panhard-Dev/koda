@@ -30,6 +30,25 @@ const model = (value: string, label: string): MenuOption => ({
 })
 
 /**
+ * A etiqueta de aviso de um item do seletor — hoje só «Tempo limitado».
+ *
+ * O âmbar é a cor de aviso que o app já usa (cartão de permissão, recados de sessão); um
+ * aviso com a cor do accent pareceria destaque, não aviso.
+ *
+ * Existe como componente, e não como texto solto em cada lista, porque o aviso precisa
+ * aparecer **igual** na lista viva e na de emergência: divergir entre as duas foi o defeito
+ * que a coroa no ícone já consertou uma vez — o menu mudava de cara conforme o host
+ * respondesse ou não.
+ */
+function Aviso({ texto }: { texto: string }) {
+  return (
+    <span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-amber-300 ring-1 ring-amber-500/20">
+      {texto}
+    </span>
+  )
+}
+
+/**
  * Catálogo da casa, o espelho de emergência do seletor.
  *
  * Esta lista é só o que o seletor mostra enquanto o backend não respondeu: quando ele
@@ -63,6 +82,13 @@ export const MODEL_MENU: MenuOption[] = [
     icon: MODEL_ICON,
     options: [model('layze-2', 'Layze 2')],
   },
+  {
+    value: 'categoria-nable',
+    label: 'Nable',
+    icon: MODEL_ICON,
+    trailing: <Aviso texto="Tempo limitado" />,
+    options: [model('nable-4-mini-preview', 'Nable 4 Mini Preview')],
+  },
 ]
 
 /** Modelo usado quando a interface ainda não recebeu o catálogo do backend. */
@@ -76,10 +102,11 @@ export const MODEL_LABELS: Record<string, string> = Object.fromEntries(
 )
 
 /** Prefixos de id que viram uma categoria no seletor (liz-nano → Liz). */
-const GRUPOS: { chave: string; label: string }[] = [
+const GRUPOS: { chave: string; label: string; aviso?: string }[] = [
   { chave: 'liz', label: 'Liz' },
   { chave: 'koda', label: 'Koda' },
   { chave: 'layze', label: 'Layze' },
+  { chave: 'nable', label: 'Nable', aviso: 'Tempo limitado' },
 ]
 
 /**
@@ -124,6 +151,7 @@ export function modelMenu(items: RemoteModel[] = [], bloqueados: readonly string
       value: `categoria-${grupo.chave}`,
       label: grupo.label,
       icon: MODEL_ICON,
+      trailing: grupo.aviso ? <Aviso texto={grupo.aviso} /> : undefined,
       options: meus.map(opcao),
     })
   }

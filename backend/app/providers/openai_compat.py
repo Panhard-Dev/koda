@@ -16,6 +16,10 @@ from typing import Any
 import httpx
 
 from .. import host_auth
+# O vigia de repetição é texto puro — não importa nada de `providers` —, então usá-lo aqui
+# não cria ciclo. E é **aqui** que o raciocínio passa: é o único ponto que vê o laço nascer,
+# antes de o stream terminar (um fluxo que não para nunca chega à checagem de conclusão).
+from ..agent.repeticao import VigiaDeRepeticao
 from ..config import Settings
 from ..identidade import FiltroIdentidade, limpar_identidade, pergunta_identidade
 from . import pensamento
@@ -112,7 +116,25 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
     Sem imagem o corpo é idêntico ao de antes (uma string) — o caminho de visão não pode
     mexer no que já funciona para todo o resto. Com imagem, `content` vira a lista
     `[{type: text}, {type: image_url}, …]`, que é o formato OpenAI para visão.
+
+    **Turno de ferramenta viaja inteiro.** O `tool` responde a uma chamada pelo `id`, e o
+    `assistant` que chamou leva o campo `tool_calls`: é isso que faz o histórico reaberto
+    parecer uma conversa que usou ferramenta, e não um monte de falas soltas. Sem esses dois
+    campos o modelo aprende com o próprio histórico a **narrar em vez de chamar**.
     """
+    if turno.role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": turno.chamada_id or "",
+            "content": turno.text,
+        }
+    if turno.chamadas:
+        # `content` vazio vira `None`: é o que o formato espera de um turno que só chamou.
+        return {
+            "role": turno.role,
+            "content": turno.text or None,
+            "tool_calls": turno.chamadas,
+        }
     if not turno.imagens:
         return {"role": turno.role, "content": turno.text}
     partes: list[dict[str, Any]] = []
@@ -324,6 +346,12 @@ class OpenAICompatibleProvider:
         # marcações) não pode chegar à tela. O limpador segura a marcação partida entre
         # pedaços — é o que a limpeza por expressão regular, feita pedaço a pedaço, erra.
         raciocinio = pensamento.LimpaRaciocinio()
+        #: O raciocínio em laço é cortado **aqui** (ver `Piece.repetiu`). Sem isto o stream só
+        #: terminaria quando o modelo cansasse de repetir — e o teto de tokens de saída
+        #: (131 072) é alto demais para servir de freio: medido, o modelo repetiu 97 mil
+        #: caracteres e ainda não tinha chegado perto dele.
+        vigia = VigiaDeRepeticao()
+        laco_de_raciocinio = False
         motivo_de_fim = ""
         #: O stream anunciou o próprio fim (`[DONE]`)? Sem ele e sem `finish_reason`, a
         #: resposta acabou **sem dizer que acabou** — ver o `truncated` no fim do método.
@@ -387,6 +415,12 @@ class OpenAICompatibleProvider:
                         razao = delta.get("reasoning_content")
                         if razao:
                             yield Piece(str(razao), reasoning=True)
+                            if vigia.alimentar(str(razao)):
+                                # A mesma coisa repetida por dezenas de milhares de
+                                # caracteres: para de ler **agora**. Quem consome é que decide
+                                # o que fazer com o `repetiu` do rodapé.
+                                laco_de_raciocinio = True
+                                break
                         piece = delta.get("content")
                         if piece:
                             limpo = raciocinio.alimentar(filtro.push(str(piece)))
@@ -409,7 +443,13 @@ class OpenAICompatibleProvider:
         # `length` é o corte declarado. O outro caso é o stream que acabou **sem** marcador de
         # término: aí não se sabe se o provedor terminou ou se a conexão caiu no meio, e
         # anunciar truncado é o lado seguro — a tela avisa em vez de dar por completo.
-        if motivo_de_fim == "length" or not (terminou or motivo_de_fim):
+        # O laço de raciocínio **não** é truncamento: quem cortou fomos nós, de propósito, e
+        # quem consome vai dar um alô ao modelo em vez de aceitar um parcial pela metade. Os
+        # dois nunca saem juntos — sem o `elif`, o corte nosso apareceria como "resposta
+        # cortada" e o alô viraria um aviso de erro.
+        if laco_de_raciocinio:
+            yield Piece("", repetiu=True)
+        elif motivo_de_fim == "length" or not (terminou or motivo_de_fim):
             yield Piece("", truncated=True)
 
     # ------------------------------------------------------------ ferramentas
@@ -551,6 +591,9 @@ class OpenAICompatibleProvider:
                 uso.clear()
                 motivo_de_fim = ""
                 terminou = False
+                #: O vigia do raciocínio em laço, novo a cada tentativa (ver `Piece.repetiu`).
+                vigia = VigiaDeRepeticao()
+                laco_de_raciocinio = False
                 async with self._cliente().stream(
                     "POST",
                     f"{self.base_url}/chat/completions",
@@ -595,6 +638,12 @@ class OpenAICompatibleProvider:
                         razao = delta.get("reasoning_content")
                         if razao:
                             yield Piece(str(razao), reasoning=True)
+                            if vigia.alimentar(str(razao)):
+                                # A mesma coisa repetida por dezenas de milhares de
+                                # caracteres: para de ler **agora**. Quem consome é que decide
+                                # o que fazer com o `repetiu` do rodapé.
+                                laco_de_raciocinio = True
+                                break
                         pedaco = delta.get("content")
                         if pedaco:
                             limpo = raciocinio.alimentar(filtro.push(str(pedaco)))
@@ -662,7 +711,11 @@ class OpenAICompatibleProvider:
             # acabou sem `finish_reason` e sem `[DONE]`: aí não se sabe se ele terminou ou se
             # a conexão caiu no meio, e chamar isso de passo completo é o que fazia o laço
             # executar uma ferramenta cujos argumentos podiam estar pela metade.
-            truncado=motivo_de_fim == "length" or not (terminou or motivo_de_fim),
+            # O corte por laço de raciocínio é **nosso**, não do provedor: sem o `not`, o
+            # stream que não fechou sozinho (porque nós o cortamos) apareceria como truncado.
+            truncado=not laco_de_raciocinio
+            and (motivo_de_fim == "length" or not (terminou or motivo_de_fim)),
+            repetiu=laco_de_raciocinio,
         )
 
 

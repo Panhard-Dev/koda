@@ -34,6 +34,12 @@ def baixador(request: Request) -> Baixador:
     return request.app.state.baixador
 
 
-async def call(func: Callable[..., T], *args: Any) -> T:
-    """Roda uma função do repositório fora do event loop (SQLite é síncrono)."""
-    return await asyncio.to_thread(func, *args)
+async def call(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Roda uma função do repositório fora do event loop (SQLite é síncrono).
+
+    `**kwargs` não é enfeite: `_store` recebe `tokens_total` **por nome**, no fim da assinatura,
+    justamente para não mudar o significado das chamadas antigas que passam tudo por posição. Sem
+    isto aqui, o `call` recusava a chamada inteira — e o caminho de resposta truncada e
+    continuada morria com `TypeError` antes de gravar qualquer coisa.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)

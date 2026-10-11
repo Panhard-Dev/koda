@@ -130,6 +130,134 @@ def navegar(caminho: str | None) -> dict[str, object]:
     }
 
 
+#: Pastas que a árvore do painel de código não abre.
+#:
+#: É a mesma ideia da lista que a busca do agente usa (`tools.ferramentas.PASTAS_IGNORADAS`):
+#: pasta gerada, enorme, ou as duas coisas — `node_modules` sozinho enterraria o projeto
+#: debaixo de milhares de arquivos que ninguém vai ler. Está copiada aqui de propósito:
+#: importar `tools.ferramentas` por causa de uma constante traria o httpx, o gerenciador de
+#: MCP e o módulo de execução para dentro do módulo de pastas.
+#:
+#: As pastas que começam com `.` (`.git`, `.venv`, `.next`) ficam de fora pela regra do
+#: nome e por isso não estão aqui. O painel diz na tela o que ficou de fora — esconder pasta
+#: sem avisar faria o dono procurar o que não está lá.
+PASTAS_FORA = frozenset({"node_modules", "venv", "__pycache__", "target", "coverage"})
+
+#: Extensões que o painel não lista: não são código, e o clique só renderizaria binário.
+#: `.svg` **não** está aqui de propósito — é texto, e é código.
+EXTENSOES_FORA = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff",
+        ".zip", ".gz", ".tar", ".7z", ".rar", ".bz2", ".xz",
+        ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".lib", ".pdb", ".bin", ".wasm",
+        ".pyc", ".pyo", ".pyd", ".class", ".jar", ".rlib", ".rmeta",
+        ".pdf", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".sqlite", ".sqlite3", ".db", ".mp3", ".mp4", ".wav", ".mov", ".webm",
+        ".lnk", ".iso", ".dmg", ".msi", ".apk", ".pack", ".idx",
+    }
+)
+
+#: Teto do que o painel mostra de um arquivo, em caracteres.
+#:
+#: Não é o teto da leitura do agente (`file_read_max_chars`): aqui quem lê é uma pessoa, numa
+#: coluna estreita, e ninguém rola 400 mil caracteres. O que passar disso aparece cortado e
+#: com o aviso na tela — um pedaço com aviso é melhor do que uma tela travada.
+TETO_DO_PAINEL = 400_000
+
+
+def arvore(caminho: str) -> dict[str, object]:
+    """O conteúdo de **uma** pasta, para a árvore do painel de código.
+
+    Um nível por vez, e é escolha: a árvore inteira de um projeto de verdade não cabe numa
+    tela nem numa resposta. Quem abre uma pasta pede os filhos dela.
+
+    Pasta sem permissão de leitura devolve a lista vazia em vez de erro, igual ao `navegar`:
+    quem está olhando só quer ver o que dá para abrir.
+    """
+    alvo = _rota(caminho)
+    if not alvo.is_dir():
+        raise NotADirectoryError(str(alvo))
+
+    itens: list[dict[str, object]] = []
+    try:
+        filhos = list(alvo.iterdir())
+    except OSError:
+        filhos = []
+
+    for item in filhos:
+        nome = item.name
+        # Lixeira e afins: existem na raiz de um disco e não são projeto de ninguém.
+        if nome.startswith("$"):
+            continue
+        try:
+            pasta = item.is_dir()
+        except OSError:
+            continue
+        if pasta:
+            if nome.startswith(".") or nome in PASTAS_FORA:
+                continue
+            itens.append({"nome": nome, "caminho": str(item), "pasta": True})
+            continue
+        if Path(nome).suffix.lower() in EXTENSOES_FORA:
+            continue
+        # Sem `stat` aqui de propósito: a árvore mostra nome, não tamanho. O tamanho aparece
+        # quando o arquivo é aberto — e aí ele vem do `ler_arquivo`, que já mede o arquivo
+        # de verdade em vez de repetir uma segunda medição que poderia discordar.
+        itens.append({"nome": nome, "caminho": str(item), "pasta": False})
+
+    # Pasta primeiro, depois arquivo; alfabético dentro de cada grupo. É a ordem que a mão
+    # procura — o `index.html` não fica perdido no meio de sete pastas.
+    itens.sort(key=lambda entrada: (not entrada["pasta"], str(entrada["nome"]).lower()))
+    return {"caminho": str(alvo), "nome": alvo.name or str(alvo), "itens": itens}
+
+
+def ler_arquivo(caminho: str) -> dict[str, object]:
+    """O texto de um arquivo, para o visualizador do painel de código.
+
+    Lê o arquivo **de verdade**: é o mesmo conteúdo que o agente vê quando abre o mesmo
+    caminho. O teto corta o fim e o painel diz que cortou — não há resumo nem amostra.
+    """
+    alvo = _rota(caminho)
+    if not alvo.is_file():
+        raise FileNotFoundError(str(alvo))
+
+    tamanho = alvo.stat().st_size
+    with alvo.open("rb") as arquivo:
+        dados = arquivo.read(TETO_DO_PAINEL)
+    texto = _decodificar(dados)
+    return {
+        "caminho": str(alvo),
+        "nome": alvo.name,
+        "texto": texto,
+        "linhas": texto.count("\n") + 1,
+        "tamanho": tamanho,
+        "truncado": tamanho > len(dados),
+    }
+
+
+def _decodificar(dados: bytes) -> str:
+    """UTF-8, e o que sobra vira Windows-1252 — é o que sai de um arquivo salvo no Notepad.
+
+    Sem o segundo passo, um `.py` salvo em ANSI apareceria com um `�` em cada acento. E o
+    corte no teto pode partir um caractere no meio: o `replace` do fim evita que isso vire
+    exceção em cima de um arquivo grande.
+    """
+    for codificacao in ("utf-8", "cp1252"):
+        try:
+            return dados.decode(codificacao)
+        except UnicodeDecodeError:
+            continue
+    return dados.decode("utf-8", errors="replace")
+
+
+def _rota(caminho: str) -> Path:
+    """Caminho resolvido — e, se nem isso der, o que veio, sem estourar."""
+    try:
+        return Path(_limpar(caminho))
+    except OSError:
+        return Path(str(caminho).strip().strip('"'))
+
+
 def _linha(row: sqlite3.Row) -> dict[str, object]:
     return {
         "id": row["id"],

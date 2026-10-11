@@ -1,10 +1,10 @@
-/** Limites do plano Free nesta build. Nada é cobrado: servem de régua para a tela de uso. */
-export const PLAN = {
-  name: 'Free',
-  dailyMessages: 20,
-  weeklyMessages: 100,
-  monthlyMessages: 300,
-}
+/**
+ * Datas e janelas do uso.
+ *
+ * Aqui morava também o `PLAN` com os tetos de mensagens (20/dia, 100/semana, 300/mês). Ele saiu
+ * quando a tela de Uso passou a mostrar **tempo gasto e créditos**, sem comparar com teto — e
+ * teto de mensagens que não é o que se cobra é um número que confunde mais do que informa.
+ */
 
 /** Data local em `AAAA-MM-DD`, para o fuso do usuário — `toISOString` seria UTC. */
 export const dayKey = (date: Date) =>
@@ -15,6 +15,10 @@ export const dayKey = (date: Date) =>
   ].join('-')
 
 const short = (date: Date) => date.toLocaleDateString('pt-BR')
+
+/** Hoje às 00:00 — o começo da janela diária. */
+export const dayStart = (date = new Date()) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate())
 
 /** Segunda-feira 00:00 da semana da data dada. */
 export const weekStart = (date = new Date()) => {
@@ -42,9 +46,3 @@ export const weeklyReset = (date = new Date()) => {
 /** Dia 1º do mês seguinte: quando a cota mensal volta. */
 export const monthlyReset = (date = new Date()) =>
   short(new Date(date.getFullYear(), date.getMonth() + 1, 1))
-
-/** Porcentagem usada, limitada a 100 — igual à barra do print. */
-export const percentUsed = (used: number, limit: number) =>
-  Math.min(100, limit === 0 ? 0 : (used / limit) * 100)
-
-export const remaining = (used: number, limit: number) => Math.max(0, limit - used)

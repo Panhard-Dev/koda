@@ -11,8 +11,13 @@ import type { MenuOption } from './components/Menu'
  * (`liz-4` e `layze-2`, de alvo `openai-responses`, respondem 400) — desligar o
  * raciocínio é o que o botão Reasoning já faz, com o cuidado de cair no `minimal` nesses
  * modelos.
+ *
+ * `xhigh` e `max` entraram em 10/10/2026: o host publica os **sete** níveis para 6 dos 8
+ * modelos, e parar em `high` deixava o topo do catálogo inalcançável pela interface. Quem
+ * não aceita o nível (o `layze-2` recusa `max`) não quebra — o backend arredonda para o
+ * mais próximo que o modelo aceita.
  */
-export type Effort = 'auto' | 'minimal' | 'low' | 'medium' | 'high'
+export type Effort = 'auto' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export const EFFORT_PADRAO: Effort = 'auto'
 
@@ -22,6 +27,8 @@ const NIVEIS: { value: Effort; label: string; hint: string }[] = [
   { value: 'low', label: 'Baixo', hint: 'Pensa um pouco mais antes de responder' },
   { value: 'medium', label: 'Médio', hint: 'Equilíbrio entre tempo e profundidade' },
   { value: 'high', label: 'Alto', hint: 'Pensa mais — a resposta demora mais' },
+  { value: 'xhigh', label: 'Muito alto', hint: 'Pensa muito — a resposta demora bem mais' },
+  { value: 'max', label: 'Máximo', hint: 'O máximo que o modelo permite' },
 ]
 
 export const EFFORT_MENU: MenuOption[] = NIVEIS.map(({ value, label, hint }) => ({

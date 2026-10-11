@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import {
   Cable,
   Folder,
+  Gift,
   History,
   Menu as MenuIcon,
   MessagesSquare,
@@ -154,6 +155,7 @@ export function Header({
   onOpenFolders,
   onOpenConversation,
   onOpenSettings,
+  onOpenPresente,
   onTogglePainel,
 }: {
   searchOpen: boolean
@@ -177,6 +179,8 @@ export function Header({
   onOpenFolders: () => void
   onOpenConversation: (id: string) => void
   onOpenSettings: (section?: SettingsSection) => void
+  /** Abre a página do presente (o ícone solto, ao lado da cápsula). */
+  onOpenPresente: () => void
   /** A barra lateral está aberta — o botão do painel fica aceso e alterna. */
   painelAberto: boolean
   onTogglePainel: () => void
@@ -432,6 +436,28 @@ export function Header({
           <Plus className="h-[19px] w-[19px]" strokeWidth={1.8} />
         </IconButton>
       </div>
+
+      {/*
+       * O presente fica **fora** da cápsula, solto ao lado dela — e é escolha, não descuido.
+       * Lá dentro ele seria mais um da fileira (menu, lupa, novo chat), que são atalhos do
+       * que já está na tela; o presente é outra coisa, e o `gap-3` do header já o separa.
+       *
+       * Ele **chama atenção** de propósito, e é o único do header que faz isso: cor de
+       * destaque e um halo que respira. Os outros são cinza porque são atalhos de coisas que
+       * já estão à vista; este é a porta de uma que a pessoa ainda não viu. Quem escolheu
+       * «reduzir animações» em Aparência não perde o recado — a guarda de `data-motion`
+       * anula o pulso, e o que sobra é a cor, que é quem carrega a atenção.
+       */}
+      <button
+        type="button"
+        aria-label="Presente"
+        title="Presente"
+        onClick={onOpenPresente}
+        className="relative flex h-9 w-9 items-center justify-center rounded-xl text-koda-accent transition-colors duration-150 hover:bg-koda-accent/12 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+      >
+        <span aria-hidden className="presente-halo absolute inset-0 rounded-xl" />
+        <Gift className="relative h-[18px] w-[18px]" strokeWidth={1.9} />
+      </button>
 
       {searchOpen ? (
         <div className="menu-in flex items-center gap-2 rounded-full bg-koda-surface px-3.5 py-2 ring-1 ring-koda-fg/8">

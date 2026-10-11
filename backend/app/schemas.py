@@ -10,12 +10,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 Role = Literal["user", "assistant"]
 
 
-Effort = Literal["auto", "minimal", "low", "medium", "high"]
+Effort = Literal["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
 """Esforço de raciocínio escolhido no seletor ao lado do modelo.
 
 `auto` (padrão) deixa o botão Reasoning decidir; os outros valores vão como
 `reasoning_effort` para o provedor. Sem `none` de propósito: o host recusa esse valor em
 parte do catálogo (ver `providers/openai_compat.py`).
+
+`xhigh` e `max` entraram em 10/10/2026. O host publica os **sete** níveis para 6 dos 8
+modelos e o `NIVEIS_ESFORCO` daqui já os conhecia — só a API e o menu paravam em `high`,
+e o topo do catálogo ficava inalcançável pela interface. Modelo que não aceita o nível
+(o `layze-2` recusa `max`) é **arredondado** por `esforco_valido`, não recusado.
 """
 
 MAX_TEXTO = 100_000
@@ -81,6 +86,22 @@ class ChatRequest(BaseModel):
     Exige `conversation_id` e dispensa `text`.
     """
 
+    livre: bool = False
+    """A rodada roda **livre**: nenhuma ação pede permissão antes de acontecer.
+
+    É o que a aba Subs pede. Ela não tem cartão de permissão, e um pedido sem cartão deixaria
+    o agente **parado para sempre** esperando uma resposta que ninguém tem onde dar — pior do
+    que a pergunta que o cartão existe para fazer.
+
+    Vale só para esta rodada: o modo guardado (`approvals.modo`) não muda, e o chat de baixo
+    continua seguindo o dele.
+
+    Quem pode pedir isto é a **interface**, que fala com o backend com o token da execução.
+    O código que o agente roda não tem esse token (ver `seguranca.py`), então ele não tem
+    como se autorizar sozinho por aqui — que é exatamente o achado que a porteira de
+    permissão existe para fechar.
+    """
+
     @model_validator(mode="after")
     def _exige_conteudo(self) -> ChatRequest:
         """Limpa o texto e exige **alguma** coisa: ou uma mensagem, ou um anexo.
@@ -107,6 +128,8 @@ class ToolStepOut(BaseModel):
     duration_ms: int = 0
     call_id: str = ""
     ok: bool = True
+    """A chamada como o modelo a escreveu, em texto (ver `contracts.turn.ToolStep`)."""
+    raw_arguments: str = ""
     """De qual servidor MCP e de qual ferramenta é o passo (`{"servidor", "ferramenta"}`).
 
     Vazio nas ferramentas do Koda. É o **recurso acionado** que a interface mostra: o nome
@@ -144,13 +167,28 @@ class Message(BaseModel):
     """
     model: str | None = None
     elapsed_ms: int | None = None
+    tokens: int | None = None
     """
-    Tokens que a resposta custou, somando todos os passos do agente.
+    O que a resposta **escreveu**, somando os passos do agente (`completion_tokens`).
+
+    É o tamanho da resposta, não o custo dela. O custo seria a soma de `total_tokens` — e aí
+    o mesmo contexto entra uma vez por passo (cada passo reenvia o histórico inteiro), o que
+    dava um número de aparência absurda na ficha. Para o custo, ver o log do provedor.
 
     `None` quando o provedor não conta (servidor local, provedor sem `usage`): a ficha da
     resposta simplesmente não mostra o uso, em vez de mostrar um zero mentiroso.
     """
-    tokens: int | None = None
+    tokens_total: int | None = None
+    """
+    O **custo** da resposta, em tokens: a soma de `total_tokens` dos passos.
+
+    É o número grande — cada passo reenvia o contexto inteiro, e é isso que o provedor cobra.
+    Ele não aparece como «tamanho» na ficha (para isso existe `tokens`), mas é dele que sai a
+    conta das **moedas**: é a única medida que corresponde ao que a resposta custou de verdade.
+
+    `None` nas mensagens gravadas antes desta coluna existir, e quando o provedor não conta.
+    """
+    contexto: int | None = None
     """
     Tamanho do contexto no **último passo** da resposta, em tokens de entrada.
 
@@ -158,12 +196,28 @@ class Message(BaseModel):
     estimativa — é ele que o medidor de contexto ao lado do modelo mostra. `None` quando o
     provedor não conta.
     """
-    contexto: int | None = None
     at: int
-    """Ferramentas chamadas nesta resposta (vazio fora do modo agente)."""
     steps: list[ToolStepOut] = Field(default_factory=list)
-    """Lista de tarefas da resposta, quando o agente montou uma (tarefa grande)."""
+    """Ferramentas chamadas nesta resposta (vazio fora do modo agente)."""
     todos: list[TodoItem] = Field(default_factory=list)
+    """Lista de tarefas da resposta, quando o agente montou uma (tarefa grande)."""
+    incompleto: bool = False
+    """A rodada parou antes de terminar o que foi pedido.
+
+    Fica **gravado** junto da mensagem de propósito: o cartão de «tarefa não concluída» tem
+    de voltar quando a conversa é reaberta. Antes ele vivia só na tela, e reabrir mostrava um
+    plano com um item «em andamento» e nada rodando — sem dizer que a tarefa tinha parado
+    nem oferecer o Retomar.
+    """
+    motivo: str | None = None
+    """O **código** do motivo (`loop.PARADA_*`), não a frase — quem traduz é a tela."""
+    pendentes: list[str] = Field(default_factory=list)
+    """Itens do plano que ficaram em aberto, com o nome que o próprio agente deu."""
+    executou: int = 0
+    """Quantas ferramentas rodaram de verdade: separa «nada foi executado» de «parte está no
+    disco»."""
+    retomavel: bool = True
+    """Dá para continuar de onde parou? Falso só quando o mesmo pedido não caberia de novo."""
 
 
 class ConversationSummary(BaseModel):
@@ -179,8 +233,33 @@ class Conversation(ConversationSummary):
 
 
 class UsageWindow(BaseModel):
-    used: int
-    limit: int
+    """
+    O que a pessoa gastou numa janela — em tempo e em tokens.
+
+    **Sem teto.** A tela mostra o uso; comparar com um limite de *mensagens* deixou de fazer
+    sentido quando o plano passou a ser medido em horas e moedas. Um teto que não é o que se
+    cobra é um número que confunde mais do que informa.
+    """
+
+    tempo_ms: int
+    """
+    Quanto tempo o agente **trabalhou** na janela (soma de `elapsed_ms`).
+
+    É a «hora» do plano: conversa parada na tela não consome nada, só resposta conta. Mensagem
+    de pessoa não entra — ela não tem `elapsed_ms`.
+    """
+
+    tokens_por_modelo: dict[str, int]
+    """
+    Tokens **cobrados** por modelo (soma de `tokens_total`).
+
+    Fica em tokens, e não em moedas, de propósito: a tabela que transforma token em moeda é uma
+    decisão de produto e mora num lugar só (`src/custo.ts`). O servidor ter uma segunda cópia
+    dela seria a garantia de que um dia os dois números divergem.
+
+    Por **modelo** e não num total porque o preço é por modelo: somar tokens de modelos
+    diferentes e aplicar um preço só daria um número errado em qualquer conta com dois modelos.
+    """
 
 
 class Usage(BaseModel):
@@ -247,6 +326,33 @@ class ModelInfo(BaseModel):
     percentual bonito e falso.
     """
     janela: int | None = None
+
+
+class AgenteInfo(BaseModel):
+    """Um sub-agente, do jeito que a seção Agentes mostra e que o `@` lista."""
+
+    nome: str
+    prompt: str = ""
+    """As skills que ele pode carregar. Vazio = nenhuma — agente novo não herda poder."""
+    skills: list[str] = Field(default_factory=list)
+    """Os servidores MCP que ele pode usar. Vazio = nenhum."""
+    mcps: list[str] = Field(default_factory=list)
+    """Modelo dele, quando valer um diferente do principal. Vazio = o que o principal mandar."""
+    modelo: str = ""
+
+
+class AgenteInput(BaseModel):
+    """O que a tela manda ao criar ou editar um sub-agente.
+
+    O nome é o identificador: salvar com um nome que já existe **substitui** aquele agente.
+    É editar, e não duplicar — quem quer outro agente dá outro nome.
+    """
+
+    nome: str = Field(min_length=1, max_length=60)
+    prompt: str = Field(default="", max_length=20_000)
+    skills: list[str] = Field(default_factory=list, max_length=40)
+    mcps: list[str] = Field(default_factory=list, max_length=40)
+    modelo: str = Field(default="", max_length=80)
 
 
 class SkillInfo(BaseModel):

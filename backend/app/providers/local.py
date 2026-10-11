@@ -26,6 +26,7 @@ MODEL_LABELS = {
     "liz-mini-2": "Liz Mini 2",
     "koda-1": "Koda 1",
     "layze-2": "Layze 2",
+    "nable-4-mini-preview": "Nable 4 Mini Preview",
 }
 
 

@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Download, Loader2, X } from 'lucide-react'
+import { Check, ChevronDown, Download, Loader2, X } from 'lucide-react'
 import Composer from './components/Composer'
 import type { SendPayload } from './components/Composer'
 import Header from './components/Header'
 import type { ConversationSummary } from './components/Header'
 import KodaLogo from './components/KodaLogo'
 import LoginScreen from './components/LoginScreen'
+import Presente, { type Aba } from './components/Presente'
+import type { PlanoDaConta } from './api/cloud'
+import CheckoutScreen, { type CompraDoCheckout } from './components/CheckoutScreen'
+
+import { definirConta, definirHorasDoDia, ligar, sincronizar } from './tempo'
 import SettingsScreen from './components/SettingsScreen'
 import MessageFooter from './components/MessageFooter'
 import Reasoning from './components/Reasoning'
@@ -19,6 +24,8 @@ import CartaoDeCompactacao from './components/Compactacao'
 import { separarCompactacoes } from './compactacao'
 import type { Compactacao as AvisoDeCompactacao } from './compactacao'
 import WorkingLine from './components/WorkingLine'
+import { SUBS_POR_RODADA } from './components/Subs'
+import type { SessaoDeSub } from './components/Subs'
 import {
   DENTRO_DO_TAURI,
   useAtalhosDaJanela,
@@ -30,15 +37,19 @@ import PainelLateral from './components/PainelLateral'
 import { findModel, MODELO_PADRAO } from './models'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
-import { PLAN, dayKey, monthStart, weekStart } from './plan'
+import { dayStart, dayKey, monthStart, weekStart } from './plan'
+import { PLANO_FREE } from './plano'
+import { moedasDeTokensPorModelo } from './custo'
 import { DEFAULT_APPEARANCE } from './appearance'
 import type { Appearance } from './appearance'
 import {
   contaGuardada,
   msAteRenovar,
+  reportarUso,
   sair,
   sessaoAtual,
   sessaoParaOHost,
+  usoDaConta,
   verificarSessao,
 } from './api/cloud'
 import type { Conta } from './api/cloud'
@@ -53,8 +64,10 @@ import {
   fraseDeFalha,
   createMcp,
   createSkill,
+  deleteAgent,
   getConversation,
   health,
+  listAgents,
   listConversations,
   listMcps,
   listModels,
@@ -63,6 +76,7 @@ import {
   listSkills,
   newProject,
   releaseProject,
+  saveAgent,
   setPermissionMode as salvarModoPermissao,
   statusDoDownload,
   streamChat,
@@ -71,6 +85,7 @@ import {
   toggleSkill,
 } from './api/client'
 import type {
+  ApiAgente,
   ApiCloudUpdate,
   ApiConversationSummary,
   ApiAnexo,
@@ -84,12 +99,31 @@ import type {
   DecisaoPermissao,
   Health,
   ModoPermissao,
+  NovoAgente,
   NovoMcp,
   NovoSkill,
   PedidoPermissao,
   ProjectsEstado,
   ToolStep,
+  UsageWindow,
 } from './api/client'
+
+/** Uma janela de uso já com as moedas contadas — o que a tela de Uso desenha. */
+type ResumoDaJanela = { tempoMs: number; creditos: number }
+
+/**
+ * A janela que o servidor mandou, com os tokens virados em moedas.
+ *
+ * A conversão é aqui, e não no servidor, porque a tabela de preços mora num lugar só
+ * (`src/custo.ts`) — o servidor ter uma segunda cópia dela seria a garantia de que um dia os
+ * dois números divergem.
+ */
+function janelaDoServidor(janela: UsageWindow): ResumoDaJanela {
+  return {
+    tempoMs: janela.tempo_ms,
+    creditos: moedasDeTokensPorModelo(janela.tokens_por_modelo),
+  }
+}
 
 type Message = {
   id: string
@@ -100,8 +134,20 @@ type Message = {
   model?: string | null
   /** Tempo de processamento da resposta — vai para a ficha no fim dela. */
   elapsedMs?: number
-  /** Tokens que a resposta custou, quando o provedor conta. */
+  /**
+   * O que a resposta **escreveu** (soma de `completion_tokens` dos passos), quando o
+   * provedor conta. É o tamanho da resposta, não o custo — o custo multiplicaria o
+   * contexto reenviado em cada passo.
+   */
   tokens?: number | null
+  /**
+   * O **custo** da resposta, em tokens (soma de `total_tokens` dos passos).
+   *
+   * É o irmão de `tokens` e não o mesmo número: `tokens` é o tamanho do que a resposta
+   * escreveu, e este é o que o provedor cobrou — várias vezes maior, porque cada passo reenvia
+   * o contexto inteiro. É dele que sai a conta das moedas na ficha.
+   */
+  tokensTotal?: number | null
   /**
    * Contexto do **último passo** da resposta, em tokens de entrada (`prompt_tokens`).
    *
@@ -145,8 +191,9 @@ type Message = {
    * "ainda falta terminar" aparecer no fim desta resposta, em vez de a pessoa ter que
    * descobrir sozinha e digitar "continue".
    *
-   * Só vale para a rodada viva: não há coluna para isso no banco, então reabrir a conversa
-   * depois não promete uma retomada que ninguém pode garantir.
+   * Vai **gravado com a mensagem** (coluna `incompleto`): reabrir a conversa depois mostra
+   * o mesmo cartão, com o Retomar. Sem isso, o plano voltava com um item «em andamento» e
+   * nada rodando — sem sinal de que a tarefa tinha parado.
    */
   incompleto?: boolean
   /**
@@ -161,6 +208,73 @@ type Message = {
   pendentes?: string[]
   executou?: number
   retomavel?: boolean
+}
+
+/**
+ * Uma rodada viva: a resposta que está sendo escrita **agora**, e a conversa dela.
+ *
+ * Ela não mora em `messages` de propósito. `messages` é a conversa que está na tela, e a
+ * rodada não é dela — é do pedido que a criou. Morando junto, trocar de conversa levava a
+ * resposta embora junto, e era isso que fazia o trabalho morrer quando a pessoa ia olhar
+ * outra conversa (ou os Ajustes) enquanto o agente trabalhava.
+ *
+ * Quando a rodada termina, a resposta passa para `messages` — se a conversa dela for a que
+ * está na tela. Se não for, quem a tem é o banco: ela volta ao abrir a conversa.
+ */
+type RodadaViva = {
+  /** Id da rodada. Único na tela, e não é o id da mensagem: são coisas diferentes. */
+  id: string
+  /** A conversa dela. `null` entre o envio e o `start` — o id quem dá é o backend. */
+  conversa: string | null
+  /** A resposta sendo escrita. */
+  mensagem: Message
+  controller: AbortController
+}
+
+/** Um passo de dentro de um sub-agente, como ele chega no evento `sub`. */
+type EventoDeSub = {
+  /** O id da chamada `sub_agente` que o lançou — é a identidade da aba dele. */
+  chamada: string
+  agente: string
+  /** O evento de dentro: `delta`, `tool_call`, `tool_result`, `todos`… */
+  evento: string
+  dados: Record<string, unknown>
+}
+
+/** Um evento de dentro do sub-agente, aplicado no que a aba dele mostra. */
+function aplicarEventoDoSub(sessao: SessaoDeSub, evento: EventoDeSub): SessaoDeSub {
+  if (evento.evento === 'delta') {
+    return { ...sessao, texto: sessao.texto + String(evento.dados.text ?? '') }
+  }
+  if (evento.evento === 'tool_call') {
+    const passo: ToolStep = {
+      name: String(evento.dados.name ?? ''),
+      arguments: (evento.dados.arguments ?? {}) as Record<string, unknown>,
+      output: '',
+      duration_ms: 0,
+      call_id: String(evento.dados.id ?? ''),
+      ok: true,
+      mcp: (evento.dados.mcp ?? null) as ToolStep['mcp'],
+    }
+    return { ...sessao, passos: [...sessao.passos, passo] }
+  }
+  if (evento.evento === 'tool_result') {
+    const alvo = String(evento.dados.id ?? '')
+    return {
+      ...sessao,
+      passos: sessao.passos.map((passo) =>
+        passo.call_id === alvo
+          ? {
+              ...passo,
+              output: String(evento.dados.output ?? ''),
+              duration_ms: Number(evento.dados.duration_ms ?? 0),
+              ok: Boolean(evento.dados.ok ?? true),
+            }
+          : passo,
+      ),
+    }
+  }
+  return sessao
 }
 
 /**
@@ -512,6 +626,40 @@ function AvisoDaSessao() {
 }
 
 /**
+ * A caixinha do canto enquanto a rodada **espera**: o provedor falhou ou respondeu vazio, e o
+ * app vai tentar de novo.
+ *
+ * Existe para uma espera longa não ser uma tela muda. Antes, a insistência do loop (até
+ * `MAX_VAZIAS`, ~12 min com o teto de 30 s) aparecia como um "trabalhando…" girando sem
+ * motivo: quem estava olhando não tinha como saber se era lento, travado ou desistindo. O
+ * texto diz o que está acontecendo, quanto falta e que o Parar interrompe.
+ *
+ * Some sozinha quando a rodada segue — o próximo aviso substitui, e o `done`/`error` limpa.
+ */
+function AvisoDaEspera({ texto }: { texto: string }) {
+  return (
+    <div className="msg-in fixed right-6 bottom-6 z-40" role="status">
+      <div
+        className={[
+          'w-72 rounded-2xl p-4 backdrop-blur-2xl backdrop-saturate-150',
+          'bg-koda-surface/55 bg-gradient-to-b from-koda-fg/6 to-transparent',
+          'ring-1 ring-koda-fg/12',
+          'shadow-[0_28px_60px_-24px_var(--koda-shadow)]',
+        ].join(' ')}
+      >
+        <p className="flex items-start gap-2.5 text-[12.5px] leading-5 text-koda-fg/70">
+          <Loader2
+            className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-koda-accent"
+            strokeWidth={1.8}
+          />
+          {texto}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
  * O que a janela mostra enquanto a sessão é conferida ou o backend inicia.
  *
  * Com sessão e backend prontos esta tela passa voando. Se a API Python demorar, ela
@@ -577,10 +725,19 @@ const fromApiMessage = (message: ApiMessage): Message => {
     model: message.model,
     elapsedMs: message.elapsed_ms ?? undefined,
     tokens: message.tokens,
+    tokensTotal: message.tokens_total,
     contexto: message.contexto,
     at: message.at,
     steps: message.steps,
     todos: message.todos ?? [],
+    // O desfecho da rodada vem do banco: é ele que faz o cartão de «tarefa não concluída»
+    // voltar ao reabrir a conversa. Antes ficava só na tela, e a conversa reaberta mostrava
+    // o plano com um item «em andamento» e nada rodando.
+    incompleto: message.incompleto,
+    motivo: message.motivo,
+    pendentes: message.pendentes ?? [],
+    executou: message.executou,
+    retomavel: message.retomavel,
   }
 
   const partes = message.role === 'assistant' ? separarCompactacoes(message.text) : []
@@ -626,22 +783,35 @@ const ESPERA_BACKEND_LENTA_MS = 5000
  */
 const SONDA_DE_SESSAO_MS = 45_000
 
-/** Uma rodada de leitura no servidor: estado, cotas, histórico, conta, skills e MCPs. */
+/**
+ * Uma rodada de leitura no servidor: estado, cotas, histórico, conta, skills, MCPs e agentes.
+ *
+ * Os agentes vêm junto porque os dois lugares que os usam — a seção Agentes e o menu do `@` —
+ * aparecem na mesma tela em que esta leitura roda.
+ */
 async function loadSession() {
-  const [info, usage, conversations, models, skills, mcps] = await Promise.all([
+  const [info, usage, conversations, models, skills, mcps, agents] = await Promise.all([
     health(),
     fetchUsage(),
     listConversations(),
     listModels(),
     listSkills(),
     listMcps(),
+    listAgents(),
   ])
-  return { info, usage, conversations, models, skills, mcps }
+  return { info, usage, conversations, models, skills, mcps, agents }
 }
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([])
-  const [busy, setBusy] = useState(false)
+  /**
+   * As rodadas vivas — a resposta sendo escrita agora, e de qual conversa ela é.
+   *
+   * É uma lista, e não um `busy` de liga/desliga, porque cada rodada pertence a uma
+   * conversa. Com um interruptor só, trocar de conversa só tinha dois caminhos: parar o
+   * trabalho (era o que acontecia) ou dizer «trabalhando» na conversa errada.
+   */
+  const [rodadas, setRodadas] = useState<RodadaViva[]>([])
   /**
    * Como está a credencial da conta no serviço de modelos.
    *
@@ -672,7 +842,6 @@ function App() {
    * precisa aparecer.
    */
   const [agora, setAgora] = useState(() => Date.now())
-  const [interrupted, setInterrupted] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   /** Pastas de verdade: o projeto é sempre uma pasta do disco, com o caminho salvo. */
@@ -707,7 +876,45 @@ function App() {
    */
   const [mostrarTraces, setMostrarTraces] = useState(true)
   const [history, setHistory] = useState<Conversation[]>([])
-  const [view, setView] = useState<'chat' | 'settings'>('chat')
+  const [view, setView] = useState<'chat' | 'settings' | 'presente' | 'checkout'>('chat')
+  // A área do presente é a única tela que guarda em que vista abre, e são dois caminhos que
+  // discordam: o botão do cabeçalho abre no «Free» — o que a pessoa já tem, porque abrir no que
+  // ela não tem é vender antes de deixar olhar — e o checkout devolve para «Planos», que é a
+  // comparação de onde ela saiu. Guardado no `App` porque a área desmonta ao trocar de vista.
+  const [abaDoPresente, setAbaDoPresente] = useState<Aba>('free')
+  // O que o checkout está cobrando — um plano ou um pacote de créditos. `null` só existe antes
+  // da primeira escolha: o checkout não é alcançável sem um produto escolhido, e as linhas que
+  // o abrem são juntas.
+  const [compraDoCheckout, setCompraDoCheckout] = useState<CompraDoCheckout | null>(null)
+  // O plano em vigor na conta, como o painel o conta. `null` é o Free. Chega pela **sonda de
+  // sessão** — a mesma resposta que já diz se a sessão está viva —, e é o que o perfil mostra
+  // na etiqueta. Sem guardar isto, a tela teria de adivinhar o plano, e adivinhar plano é
+  // mostrar «Free» para quem paga.
+  const [planoDaConta, setPlanoDaConta] = useState<PlanoDaConta | null>(null)
+  /**
+   * Os créditos **avulsos** da conta — comprados ou dados pelo painel.
+   *
+   * Entram no saldo da aba junto com as moedas do plano: é o que a pessoa tem além dele, e
+   * deixá-los de fora fazia o número **não mudar** quando o suporte dava moedas (o plano
+   * mudava, as moedas não). Vem na mesma sonda de sessão, sem ida extra à rede.
+   */
+  const [creditosAvulsos, setCreditosAvulsos] = useState(0)
+
+  /**
+   * Recolhe o plano da conta no painel.
+   *
+   * A sonda de sessão já traz isso de tempo em tempo, mas ela é lenta de propósito (minutos).
+   * Depois de assinar ou cancelar, esperar por ela deixaria o perfil dizendo «Free» para quem
+   * acabou de pagar — ou o contrário, para quem acabou de cancelar.
+   */
+  const atualizarPlano = () => {
+    void verificarSessao().then((resultado) => {
+      if (resultado.estado === 'viva') {
+        setPlanoDaConta(resultado.plano)
+        setCreditosAvulsos(resultado.creditosAvulsos)
+      }
+    })
+  }
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
   const [model, setModel] = useState(MODELO_PADRAO)
   const [appearance, setAppearance] = useState<Appearance>(DEFAULT_APPEARANCE)
@@ -738,6 +945,10 @@ function App() {
   const [skills, setSkills] = useState<ApiSkill[]>([])
   /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
   const [mcps, setMcps] = useState<ApiMcp[]>([])
+  /** Os sub-agentes do `subs.agentes.md` — a seção Agentes e o menu do `@` leem daqui. */
+  const [agents, setAgents] = useState<ApiAgente[]>([])
+  /** As sessões de sub-agente lançadas — a área Subs abre uma aba por uma destas. */
+  const [subs, setSubs] = useState<SessaoDeSub[]>([])
   /** Versão que a pessoa já dispensou no aviso do canto. */
   const [versaoDispensada, setVersaoDispensada] = useState<string | null>(
     lerVersaoDispensada,
@@ -746,9 +957,16 @@ function App() {
   const [download, setDownload] = useState<ApiDownload | null>(null)
   /** Resultado da consulta que a tela faz à nuvem ao abrir (além do resumo do health). */
   const [nuvemDetalhe, setNuvemDetalhe] = useState<ApiCloudUpdate | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
   /** A caixa que rola a conversa — é dela que sai a posição real do usuário. */
   const listaRef = useRef<HTMLDivElement>(null)
+  /**
+   * A coluna de conteúdo **dentro** da caixa.
+   *
+   * É ela que cresce a cada palavra, a cada ferramenta e a cada ficha, e é por isso que é
+   * ela que o observador vigia. Vigiando só a caixa, um passo de ferramenta — que não mexe
+   * no texto da resposta — crescia a conversa sem ninguém descer.
+   */
+  const conteudoRef = useRef<HTMLDivElement>(null)
   /**
    * A rolagem automática só entra quando a pessoa **já está** no fim da conversa.
    *
@@ -758,24 +976,153 @@ function App() {
    * liga de novo.
    */
   const seguirOFimRef = useRef(true)
-
+  /** O mesmo que `seguirOFimRef`, mas em estado — é ele que mostra e esconde o botão. */
+  const [noFim, setNoFim] = useState(true)
   /**
-   * O usuário está colado no fim? A folga de 80 px cobre o arredondamento do zoom e a
-   * última linha meio cortada — sem ela, a rolagem automática se desligaria sozinha.
+   * A folga de quem conta como "no fim", em pixels.
+   *
+   * Pequena de propósito. Com os 80 px de antes, quem subia um pouco continuava contando
+   * como "no fim" e era puxado de volta na palavra seguinte; e como o acompanhamento
+   * descia **antes** de a rolagem acumular 80 px, a pessoa nunca chegava a desligá-lo
+   * rolando de leve. Era esse o "fica bugado" de quem tentava subir durante a resposta.
    */
+  const FOLGA_DO_FIM = 24
+
+  /** Liga/desliga o acompanhamento e, junto dele, o botão do fim. */
+  const marcarFim = (estaNoFim: boolean) => {
+    seguirOFimRef.current = estaNoFim
+    setNoFim((atual) => (atual === estaNoFim ? atual : estaNoFim))
+  }
+
+  /** O usuário está colado no fim? */
   const aoRolar = () => {
     const caixa = listaRef.current
     if (!caixa) return
-    seguirOFimRef.current = caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight < 80
+    marcarFim(caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight <= FOLGA_DO_FIM)
+  }
+
+  /**
+   * A roda desliga o acompanhamento **na hora**, antes da próxima palavra.
+   *
+   * É o conserto do defeito: esperar pelo evento de rolagem só valia depois de o dedo
+   * acumular distância suficiente, e o acompanhamento descia antes disso — a tela voltava
+   * sozinha e parecia travada. Olhando a **intenção** (roda para cima), o primeiro
+   * movimento já basta.
+   */
+  const aoRolarComRoda = (deltaY: number) => {
+    if (deltaY < 0) marcarFim(false)
+  }
+
+  /** O botão do fim: desce de uma vez e volta a acompanhar. */
+  const irParaOFim = () => {
+    marcarFim(true)
+    const caixa = listaRef.current
+    if (!caixa) return
+    caixa.scrollTo({ top: caixa.scrollHeight, behavior: 'smooth' })
   }
   /** Último sinal de vida vindo do backend (pensamento, palavra, ferramenta). */
   const ultimoSinalRef = useRef(0)
+  /** O aviso transitório da rodada (espera do provedor) — ver `StreamData['aviso']`. */
+  const [avisoDaEspera, setAvisoDaEspera] = useState<string | null>(null)
   /** Quando a resposta em curso começou (a linha de trabalho conta a partir daqui). */
   const inicioDaRespostaRef = useRef(0)
   const timersRef = useRef<number[]>([])
-  const runIdRef = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
   const conversationIdRef = useRef<string | null>(null)
+  /**
+   * A conversa na tela, também no estado.
+   *
+   * A ref serve aos retornos assíncronos — ler o valor de agora sem depender do render. O
+   * estado serve à tela, que precisa **desenhar** a partir dele: é ele que decide qual
+   * rodada viva pertence a esta conversa. Um só dos dois não dá conta dos dois papéis.
+   */
+  const [conversa, setConversa] = useState<string | null>(null)
+  /**
+   * Muda a cada troca de conversa.
+   *
+   * Serve para o `start` do stream saber se ele ainda fala da conversa que está na tela. Ele
+   * chega de forma assíncrona, e sem isto uma conversa nova aberta nesse meio-tempo levava o
+   * id de uma rodada antiga — a tela pulava para uma conversa que ninguém pediu.
+   */
+  const visitaRef = useRef(0)
+
+  /** Troca a conversa da tela: a ref (para os retornos assíncronos), o estado (para
+   *  desenhar) e a visita (para o `start` saber se ainda é ele quem manda). */
+  const definirConversa = (id: string | null) => {
+    conversationIdRef.current = id
+    visitaRef.current += 1
+    setConversa(id)
+  }
+
+  /**
+   * As rodadas vivas, para leitura de dentro dos retornos assíncronos.
+   *
+   * `escreverRodadas` é o **único** caminho de escrita, e ele atualiza a ref e o estado
+   * juntos. Quem está dentro do stream (o `done`, o `catch`) capturou o estado **antes** de
+   * a rodada existir; sem a ref leria uma lista velha, não acharia a própria rodada, e a
+   * resposta ficaria presa no limbo para sempre.
+   */
+  const rodadasRef = useRef<RodadaViva[]>([])
+  const escreverRodadas = (mudar: (atual: RodadaViva[]) => RodadaViva[]) => {
+    rodadasRef.current = mudar(rodadasRef.current)
+    setRodadas(rodadasRef.current)
+  }
+
+  /** Muda a resposta de uma rodada sem tirá-la de curso. */
+  const patchRodada = (id: string, patch: (mensagem: Message) => Message) =>
+    escreverRodadas((atual) =>
+      atual.map((item) =>
+        item.id === id ? { ...item, mensagem: patch(item.mensagem) } : item,
+      ),
+    )
+
+  /** A resposta cortada no meio: o que saiu fica, e ela passa a dizer que parou. */
+  const marcarInterrompida = (mensagem: Message): Message => ({
+    ...mensagem,
+    incompleto: true,
+    motivo: 'interrupted',
+    // O que faltou sai do próprio plano: o que não foi marcado como feito.
+    pendentes: (mensagem.todos ?? []).filter((item) => !item.feito).map((item) => item.texto),
+    retomavel: true,
+  })
+
+  /**
+   * Fecha a rodada: a resposta entra na conversa e a rodada sai.
+   *
+   * Só entra em `messages` quando a conversa dela é a que está na tela. Nas outras, quem a
+   * tem é o banco — ela volta ao abrir a conversa, e empilhá-la aqui a mostraria na conversa
+   * errada.
+   */
+  const concluirRodada = (id: string, patch: (mensagem: Message) => Message) => {
+    const alvo = rodadasRef.current.find((item) => item.id === id)
+    if (!alvo) return
+    const pronta = patch(alvo.mensagem)
+    if (alvo.conversa === conversationIdRef.current) {
+      setMessages((atual) => [...atual, pronta])
+    }
+    escreverRodadas((atual) => atual.filter((item) => item.id !== id))
+  }
+
+  /**
+   * Para uma rodada — o botão Parar.
+   *
+   * A rodada simulada (backend fora do ar) não tem `catch` para fechá-la, então quem fecha é
+   * quem parou. Na de verdade, o `catch` do envio chega logo depois e não acha mais nada
+   * para fazer, que é o certo.
+   */
+  const pararRodada = (id: string) => {
+    const alvo = rodadasRef.current.find((item) => item.id === id)
+    if (!alvo) return
+    alvo.controller.abort()
+    concluirRodada(id, marcarInterrompida)
+  }
+
+  /** Derruba tudo: sessão que morreu, saída da conta. */
+  const pararTudo = () => {
+    rodadasRef.current.forEach((item) => item.controller.abort())
+    escreverRodadas(() => [])
+    timersRef.current.forEach((timer) => window.clearTimeout(timer))
+    timersRef.current = []
+  }
   /**
    * O último pedido que saiu daqui, inteiro (modelo, reasoning, web, esforço, pasta).
    *
@@ -784,10 +1131,75 @@ function App() {
    */
   const ultimoPayloadRef = useRef<PayloadDeEnvio | null>(null)
 
-  const hasMessages = messages.length > 0
+  /** A rodada desta conversa — a resposta sendo escrita agora, se houver. */
+  const rodada = rodadas.find((item) => item.conversa === conversa) ?? null
+  /**
+   * O que a conversa mostra: o que está gravado **mais** a resposta em curso.
+   *
+   * É daqui que sai tudo o que a tela desenha. Trocar `messages` por esta lista nos pontos
+   * de leitura é o que faz a resposta continuar aparecendo depois de ir e voltar de outra
+   * conversa — e o que faz o agente continuar trabalhando quando ela não é a da tela.
+   */
+  const visiveis = rodada ? [...messages, rodada.mensagem] : messages
+  /**
+   * Há trabalho em curso **nesta** conversa.
+   *
+   * Era um `useState` global, e por isso uma rodada numa conversa punha o botão Parar em
+   * todas. Agora sai da rodada da conversa: o prompt box desta mostra «trabalhando», o das
+   * outras deixa mandar mensagem.
+   */
+  const busy = rodada !== null
+
+  /*
+   * O relógio do dia anda **enquanto o agente trabalha**, e só. Quem liga e desliga é daqui, e
+   * não do `Composer`, por um motivo: a caixa é desmontada quando a pessoa sai do chat, e o
+   * agente continua trabalhando enquanto isso. Se o `ligar` morasse lá, sair para os Ajustes
+   * pararia a contagem no meio de uma resposta — e a hora gasta deixaria de ser contada.
+   */
+  useEffect(() => {
+    ligar(busy)
+  }, [busy])
+
+  /*
+   * O mostrador do dia é **do servidor**, não do rascunho.
+   *
+   * Cada resposta grava o tempo dela no banco do backend, e `/api/usage` soma a janela do dia
+   * — é esse número que a aba tem de mostrar. Sem esta reapontagem a aba era só o rascunho
+   * local: apagar os dados do app (ou reinstalar) devolvia as horas já gastas, e o mostrador
+   * podia discordar da tela de Uso, que sempre leu o banco. O rascunho fica para o caso de o
+   * backend não responder.
+   */
+  useEffect(() => {
+    if (remoteUsage) sincronizar(remoteUsage.daily.tempo_ms / 1000)
+  }, [remoteUsage])
+
+  /*
+   * O orçamento do dia é o do **plano da conta**, não o do Free.
+   *
+   * O plano chega pela sonda de sessão (`/api/account/me` → `plano.horas_por_dia`). Sem isto a
+   * aba mostrava sempre a hora do Free: quem assinava o Plus continuava vendo `01:00:00`, e a
+   * troca de plano não aparecia em lugar nenhum do chat.
+   */
+  useEffect(() => {
+    definirHorasDoDia(planoDaConta?.horas_por_dia ?? PLANO_FREE.horasPorDia)
+  }, [planoDaConta])
+
+  /*
+   * O rascunho do dia é **por conta**.
+   *
+   * O limite pertence a quem gasta: trocar de conta no mesmo PC não pode carregar o tempo que
+   * a anterior deixou. O backend separa o gasto pelo mesmo e-mail (`host_auth.email_da_conta`),
+   * e a chave do rascunho local acompanha — senão o paliativo do `localStorage` desmentiria o
+   * número do servidor justamente na hora em que ele não responde.
+   */
+  useEffect(() => {
+    definirConta(conta?.email ?? null)
+  }, [conta])
+
+  const hasMessages = visiveis.length > 0
   const normalizedQuery = query.trim().toLowerCase()
   const searching = searchOpen && normalizedQuery.length > 0
-  const lastMessage = messages.at(-1)
+  const lastMessage = visiveis.at(-1)
   /**
    * O plano em vigor, para o menu acima do prompt box.
    *
@@ -804,12 +1216,14 @@ function App() {
    */
   const contextoPorModelo = useMemo(() => {
     const mapa: Record<string, number> = {}
-    for (const mensagem of messages) {
+    // `visiveis` e não `messages`: a rodada em curso é justamente quem tem a medida mais
+    // nova, e é ela que o anel ao lado do modelo deve mostrar enquanto o agente trabalha.
+    for (const mensagem of visiveis) {
       if (mensagem.role !== 'assistant' || !mensagem.model || !mensagem.contexto) continue
       mapa[mensagem.model] = mensagem.contexto
     }
     return mapa
-  }, [messages])
+  }, [visiveis])
 
   /**
    * O catálogo que o seletor pode mostrar: o do host, menos o que o painel tirou.
@@ -836,9 +1250,9 @@ function App() {
   }, [backend, modelosVisiveis])
 
   const todosAtivos = useMemo(() => {
-    const ultima = [...messages].reverse().find((message) => message.role === 'assistant')
+    const ultima = [...visiveis].reverse().find((message) => message.role === 'assistant')
     return ultima?.todos ?? []
-  }, [messages])
+  }, [visiveis])
   /**
    * A resposta que está sendo escrita agora: a última mensagem, ainda sem tempo de
    * processamento. É nela que a linha de trabalho mora.
@@ -886,7 +1300,7 @@ function App() {
   const matchingIds = useMemo(() => {
     if (!searching) return new Set<string>()
     return new Set(
-      messages
+      visiveis
         .filter((message) =>
           [message.text, ...(message.attachments ?? []).map((anexo) => anexo.nome)]
             .join(' ')
@@ -895,16 +1309,49 @@ function App() {
         )
         .map((message) => message.id),
     )
-  }, [messages, normalizedQuery, searching])
+  }, [visiveis, normalizedQuery, searching])
 
-  const lastText = messages.at(-1)?.text
+  const lastText = visiveis.at(-1)?.text
+
+  /**
+   * Desce a rolagem **direto na caixa**.
+   *
+   * Nunca por `scrollIntoView`: ele sobe a árvore e empurra **todo** ancestral rolável —
+   * inclusive os `overflow: hidden`, que também guardam `scrollTop`. A casca do app tem de
+   * ficar parada; quem rola é a conversa, e só ela.
+   */
+  const descerAoFim = () => {
+    const caixa = listaRef.current
+    if (!caixa) return
+    caixa.scrollTop = caixa.scrollHeight
+  }
+
   useEffect(() => {
     if (!seguirOFimRef.current) return
     // Sem `behavior: 'smooth'` de propósito: a rolagem suave fica **atrás** do texto que
     // chega, e a distância medida durante a animação parecia "saiu do fim" — o
     // acompanhamento se desligava sozinho no meio da resposta.
-    bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages.length, busy, lastText])
+    descerAoFim()
+  }, [visiveis.length, busy, lastText])
+
+  /**
+   * E o mesmo para **qualquer** crescimento da conversa — inclusive o que não mexe no texto
+   * da última resposta: um passo de ferramenta a mais, a ficha que fecha, o raciocínio que
+   * abre. É o que faz o pedido valer inteiro: a IA falou **ou** usou ferramenta, a tela
+   * desce.
+   */
+  useEffect(() => {
+    const conteudo = conteudoRef.current
+    if (!conteudo) return
+    const observador = new ResizeObserver(() => {
+      if (!seguirOFimRef.current) return
+      const caixa = listaRef.current
+      if (!caixa) return
+      caixa.scrollTop = caixa.scrollHeight
+    })
+    observador.observe(conteudo)
+    return () => observador.disconnect()
+  }, [])
 
   // Enquanto a resposta está em curso, um relógio de 400 ms move a linha de trabalho: os
   // segundos correndo são o que distingue "está trabalhando" de "travou".
@@ -1179,13 +1626,12 @@ function App() {
         // O painel barrou a conta. Não há o que insistir: a cópia local já foi apagada pela
         // própria sonda. Aqui a tela obedece na hora — e leva o motivo junto, para o login
         // não parecer que a pessoa foi expulsa sem explicação.
-        resetRun()
-        conversationIdRef.current = null
+        // A sessão morreu: aí sim derruba tudo. Não há credencial para o trabalho continuar.
+        pararTudo()
+        definirConversa(null)
         tokenEntregueRef.current = null
         setMessages([])
         setHistory([])
-        setBusy(false)
-        setInterrupted(false)
         setQuery('')
         setSearchOpen(false)
         setRemoteUsage(null)
@@ -1197,8 +1643,12 @@ function App() {
       }
 
       // Só a resposta afirmativa mexe no catálogo: "sem rede" não é motivo para reabrir um
-      // modelo que o painel tirou.
-      if (resultado.estado === 'viva') setModelosBloqueados(resultado.bloqueados)
+      // modelo que o painel tirou. O plano entra pela mesma porta, e pela mesma razão.
+      if (resultado.estado === 'viva') {
+        setModelosBloqueados(resultado.bloqueados)
+        setPlanoDaConta(resultado.plano)
+        setCreditosAvulsos(resultado.creditosAvulsos)
+      }
 
       timer = window.setTimeout(() => void rodar(), SONDA_DE_SESSAO_MS)
     }
@@ -1269,7 +1719,8 @@ function App() {
 
     const connect = async (tentativa: number) => {
       try {
-        const { info, usage, conversations, models, skills, mcps } = await loadSession()
+        const { info, usage, conversations, models, skills, mcps, agents } =
+          await loadSession()
         if (cancelled) return
         setBackend(info)
         setBackendInicializado(true)
@@ -1279,6 +1730,7 @@ function App() {
         setRemoteModels(models)
         setSkills(skills)
         setMcps(mcps)
+        setAgents(agents)
         // As pastas e a permissão vivem no banco do backend: é o que ele tem, não o que a
         // tela lembra.
         void carregarPastas()
@@ -1304,25 +1756,44 @@ function App() {
 
   // Contagem local, usada quando não há backend (e como base do modo offline).
   const usageCounts = useMemo(() => {
-    const all = [...history.flatMap((conversation) => conversation.messages), ...messages]
-    const today = dayKey(new Date())
-    const weekFrom = weekStart().getTime()
-    const monthFrom = monthStart().getTime()
+    const all = [...history.flatMap((conversation) => conversation.messages), ...visiveis]
     // O mapa do ano sem backend: o mesmo cálculo por dia, com o que está na tela.
     const dias: Record<string, number> = {}
     for (const message of all) {
       const key = dayKey(new Date(message.at))
       dias[key] = (dias[key] ?? 0) + 1
     }
+
+    /**
+     * O que uma janela gastou, com o que está na tela.
+     *
+     * A conta é a **mesma do servidor**: o tempo é a soma de `elapsedMs` (a hora gasta
+     * respondendo — conversa parada não consome) e os tokens vão **por modelo**, para o preço
+     * sair certo. Mensagem de pessoa não entra em nenhum dos dois: ela não tem nem tempo nem
+     * modelo.
+     */
+    const janela = (desde: number) => {
+      const dentro = all.filter((message) => message.at >= desde)
+      const porModelo: Record<string, number> = {}
+      for (const message of dentro) {
+        if (!message.model || !message.tokensTotal) continue
+        porModelo[message.model] = (porModelo[message.model] ?? 0) + message.tokensTotal
+      }
+      return {
+        tempoMs: dentro.reduce((soma, message) => soma + (message.elapsedMs ?? 0), 0),
+        creditos: moedasDeTokensPorModelo(porModelo),
+      }
+    }
+
     return {
       messages: all.length,
-      todayMessages: all.filter((message) => dayKey(new Date(message.at)) === today).length,
-      weekMessages: all.filter((message) => message.at >= weekFrom).length,
-      monthMessages: all.filter((message) => message.at >= monthFrom).length,
-      conversations: history.length + (messages.length > 0 ? 1 : 0),
+      conversations: history.length + (visiveis.length > 0 ? 1 : 0),
       dias,
+      daily: janela(dayStart().getTime()),
+      weekly: janela(weekStart().getTime()),
+      monthly: janela(monthStart().getTime()),
     }
-  }, [history, messages])
+  }, [history, visiveis])
 
   const conversationSummaries = useMemo<ConversationSummary[]>(
     () =>
@@ -1338,33 +1809,62 @@ function App() {
 
   /** Guarda a conversa atual no histórico local (modo offline). */
   const archivedCurrent = (rest: Conversation[]): Conversation[] =>
-    messages.length > 0
+    visiveis.length > 0
       ? [
           {
             id: conversationIdRef.current ?? newId(),
-            title: titleFor(messages),
-            preview: previewFor(messages),
-            messages,
+            title: titleFor(visiveis),
+            preview: previewFor(visiveis),
+            messages: visiveis,
           },
           ...rest,
         ]
       : rest
 
-  const resetRun = () => {
-    runIdRef.current += 1
-    abortRef.current?.abort()
-    abortRef.current = null
-    timersRef.current.forEach((timer) => window.clearTimeout(timer))
-    timersRef.current = []
-  }
-
+  /**
+   * O uso vem do **painel**; o backend local é a reserva.
+   *
+   * É o painel que guarda o gasto **da conta** — o local é do PC, e some ao reinstalar ou ao
+   * trocar de máquina. A reserva existe para a tela não ficar vazia quando a nuvem não
+   * responde: ela é medida nesta máquina, então é o melhor número que existe sem rede.
+   */
   const refreshUsage = async () => {
+    try {
+      setRemoteUsage(await usoDaConta())
+      return
+    } catch {
+      // Sem sessão ou sem rede: quem responde é a medição local.
+    }
     try {
       setRemoteUsage(await fetchUsage())
     } catch {
       setBackend(null)
     }
   }
+
+  /**
+   * As moedas que a conta ainda tem no mês: o que o plano dá, **mais os créditos avulsos**,
+   * menos o que já foi gasto.
+   *
+   * O avulso entra porque é dinheiro da pessoa: o suporte dá moedas e o número da aba tem de
+   * mudar — antes ele só olhava o plano, e dar crédito não mexia em nada na tela.
+   *
+   * O gasto sai do uso (que vem do painel) convertido pela tabela de preços. `floor` de
+   * propósito: prometer a moeda que o saldo não fecha é o erro que a régua das conversas já
+   * evita do mesmo jeito. `null` quando não há nem plano nem uso (a aba cai na constante do
+   * Free, que é o degrau de baixo).
+   */
+  const saldoDeMoedas =
+    planoDaConta || remoteUsage || creditosAvulsos > 0
+      ? Math.max(
+          0,
+          Math.floor(
+            (planoDaConta?.moedas_por_mes ?? PLANO_FREE.moedasPorMes) +
+              creditosAvulsos -
+              (remoteUsage ? moedasDeTokensPorModelo(remoteUsage.monthly.tokens_por_modelo) : 0),
+          ),
+        )
+      : null
 
   const refreshHistory = async () => {
     try {
@@ -1380,22 +1880,28 @@ function App() {
     if (!next) setQuery('')
   }
 
+  /**
+   * Conversa nova.
+   *
+   * A rodada em curso **não** é abortada: ela é de outra conversa, e o pedido é que continue
+   * trabalhando enquanto a pessoa olha outra coisa. Antes, este clique matava o trabalho.
+   */
   const handleNewChat = () => {
-    resetRun()
-    conversationIdRef.current = null
+    definirConversa(null)
     if (backend) void refreshHistory()
     else setHistory((current) => archivedCurrent(current))
     setMessages([])
-    setBusy(false)
-    setInterrupted(false)
     setQuery('')
     setSearchOpen(false)
   }
 
+  /**
+   * Abre uma conversa do histórico.
+   *
+   * Também **não** aborta nada. Se a conversa aberta for a de uma rodada viva, a resposta que
+   * está sendo escrita reaparece no fim dela — quem junta as duas coisas é o `visiveis`.
+   */
   const handleOpenConversation = (id: string) => {
-    resetRun()
-    setBusy(false)
-    setInterrupted(false)
     setQuery('')
     setSearchOpen(false)
 
@@ -1404,7 +1910,7 @@ function App() {
         try {
           const conversation = await getConversation(id)
           setMessages(conversation.messages.map(fromApiMessage))
-          conversationIdRef.current = conversation.id
+          definirConversa(conversation.id)
         } catch {
           // servidor caiu no meio: mantém a conversa que está na tela
         }
@@ -1418,13 +1924,17 @@ function App() {
       archivedCurrent(current.filter((conversation) => conversation.id !== id)),
     )
     setMessages(target.messages)
-    conversationIdRef.current = target.id
+    definirConversa(target.id)
   }
 
+  /**
+   * O botão Parar — para a rodada **desta** conversa.
+   *
+   * A marca de «parou» não é posta aqui à mão: quem a põe é o `pararRodada`, que fecha a
+   * rodada com o mesmo cartão que o «interrompido» de qualquer outro caminho.
+   */
   const handleStop = () => {
-    resetRun()
-    setBusy(false)
-    setInterrupted(true)
+    if (rodada) pararRodada(rodada.id)
   }
 
   // O aviso de versão nova depende de alguém ter consultado a nuvem — e quem consulta é o
@@ -1546,6 +2056,21 @@ function App() {
   }
 
   /**
+   * Salva um sub-agente e fica com a lista que o backend devolveu.
+   *
+   * A lista vem do backend, e não de um `[...current, agente]` montado aqui: salvar com um
+   * nome que já existe **substitui** aquele agente, e uma lista montada na tela mostraria
+   * dois. Quem sabe o que ficou escrito é o arquivo.
+   */
+  const handleSaveAgent = async (agente: NovoAgente) => {
+    setAgents(await saveAgent(agente))
+  }
+
+  const handleDeleteAgent = async (nome: string) => {
+    setAgents(await deleteAgent(nome))
+  }
+
+  /**
    * O que a interface precisa saber das pastas e da permissão, vindo sempre do backend.
    *
    * Nada de pasta inventada na tela: a lista e a pasta aberta são as que estão salvas no
@@ -1642,12 +2167,11 @@ function App() {
    * A sessão do painel é encerrada em paralelo (o token de renovação é revogado lá).
    */
   const handleSignOut = () => {
-    resetRun()
-    conversationIdRef.current = null
+    // Sair da conta derruba as rodadas: sem sessão, o trabalho não teria como continuar.
+    pararTudo()
+    definirConversa(null)
     setMessages([])
     setHistory([])
-    setBusy(false)
-    setInterrupted(false)
     setQuery('')
     setSearchOpen(false)
     setRemoteUsage(null)
@@ -1661,10 +2185,12 @@ function App() {
   }
 
   const handleSend = async (payload: PayloadDeEnvio) => {
-    setInterrupted(false)
+    // De qual visita à conversa é este envio. O `start` do stream chega depois, e é esta
+    // marca que diz se ele ainda fala da conversa que está na tela.
+    const visitaNoEnvio = visitaRef.current
     // Mandar (ou retomar) é dizer "me mostre isto": o acompanhamento volta a valer mesmo
     // que a pessoa estivesse lendo algo mais acima na conversa.
-    seguirOFimRef.current = true
+    marcarFim(true)
     // Retomar **não** é uma mensagem da pessoa: o backend continua o histórico e não grava
     // turno de usuário, então desenhar uma bolha aqui criaria na tela uma fala que não
     // existe no banco. Era o defeito antigo: o botão virava uma bolha com "continue".
@@ -1680,7 +2206,31 @@ function App() {
         },
       ])
     }
-    setBusy(true)
+    // A rodada nasce **aqui**, antes de saber se o backend está no ar: ela é a resposta sendo
+    // escrita, e as duas formas de escrevê-la (o stream e a resposta simulada) terminam do
+    // mesmo jeito — fechando a rodada. É ela que diz à tela que há trabalho em curso, e é
+    // por ela que a resposta sobrevive à troca de conversa.
+    const rodadaId = newId()
+    const controller = new AbortController()
+    escreverRodadas((atual) => [
+      ...atual,
+      {
+        id: rodadaId,
+        // A conversa é a de agora. Numa conversa nova ela ainda não tem id; quem o traz é o
+        // `start` do stream, e é ele que reaponta a rodada para lá.
+        conversa: conversationIdRef.current,
+        mensagem: {
+          id: newId(),
+          role: 'assistant',
+          text: '',
+          model: payload.model,
+          at: Date.now(),
+          steps: [],
+          todos: [],
+        },
+        controller,
+      },
+    ])
     ultimoPayloadRef.current = payload
     const startedAt = performance.now()
     // O relógio da linha de trabalho começa aqui: daqui a pouco, se o backend ficar 800 ms
@@ -1693,13 +2243,15 @@ function App() {
     let online = backend !== null
     if (!online) {
       try {
-        const { info, usage, conversations, models, skills, mcps } = await loadSession()
+        const { info, usage, conversations, models, skills, mcps, agents } =
+          await loadSession()
         setBackend(info)
         setRemoteUsage(usage)
         setHistory(conversations.map(fromApiSummary))
         setRemoteModels(models)
         setSkills(skills)
         setMcps(mcps)
+        setAgents(agents)
         online = true
       } catch {
         online = false
@@ -1708,42 +2260,22 @@ function App() {
 
     // Sem backend: mantém o comportamento antigo, com resposta simulada.
     if (!online) {
-      const currentRun = runIdRef.current
       const timer = window.setTimeout(() => {
-        if (currentRun !== runIdRef.current) return
-        setMessages((current) => [
-          ...current,
-          {
-            id: newId(),
-            role: 'assistant',
-            text: buildReply(payload),
-            elapsedMs: performance.now() - startedAt,
-            at: Date.now(),
-          },
-        ])
-        setBusy(false)
+        // Pararam a rodada no meio dos 800 ms: quem a fechou foi o `pararRodada`, e escrever
+        // por cima aqui desfaria a marca de interrompida.
+        if (controller.signal.aborted) return
+        concluirRodada(rodadaId, (mensagem) => ({
+          ...mensagem,
+          text: buildReply(payload),
+          elapsedMs: performance.now() - startedAt,
+        }))
       }, 800)
       timersRef.current.push(timer)
       return
     }
 
-    const assistantId = newId()
-    setMessages((current) => [
-      ...current,
-      {
-        id: assistantId,
-        role: 'assistant',
-        text: '',
-        model: payload.model,
-        at: Date.now(),
-        steps: [],
-        todos: [],
-      },
-    ])
-    const patchAssistant = (patch: (message: Message) => Message) =>
-      setMessages((current) =>
-        current.map((message) => (message.id === assistantId ? patch(message) : message)),
-      )
+    /** Tudo o que o stream faz daqui para baixo mexe na resposta **daquela** rodada. */
+    const patchAssistant = (patch: (message: Message) => Message) => patchRodada(rodadaId, patch)
     /** Ferramenta anunciada: entra na lista como "rodando" até o resultado voltar. */
     const abrirPasso = (
       id: string,
@@ -1794,8 +2326,6 @@ function App() {
         blocos: fecharPassoNosBlocos(message.blocos, patch),
       }))
 
-    const controller = new AbortController()
-    abortRef.current = controller
     /** Cada evento que chega do backend reinicia o silêncio que faz a linha de trabalho aparecer. */
     const sinal = () => {
       ultimoSinalRef.current = Date.now()
@@ -1820,7 +2350,17 @@ function App() {
         {
           signal: controller.signal,
           onStart: (data) => {
-            conversationIdRef.current = data.conversation_id
+            // O backend é quem dá o id da conversa. A rodada passa a ser dela — é isto que
+            // faz a resposta continuar sendo desenhada na conversa certa, e não na que
+            // estiver na tela quando o primeiro pedaço de texto chegar.
+            escreverRodadas((atual) =>
+              atual.map((item) =>
+                item.id === rodadaId ? { ...item, conversa: data.conversation_id } : item,
+              ),
+            )
+            // A tela só passa a ser esta conversa se ela ainda for a mesma de quando a
+            // mensagem saiu: se a pessoa já abriu outra, quem manda é ela, não o backend.
+            if (visitaRef.current === visitaNoEnvio) definirConversa(data.conversation_id)
           },
           onDelta: (text) => {
             sinal()
@@ -1837,6 +2377,12 @@ function App() {
               reasoning: (message.reasoning ?? '') + text,
               blocos: anexarRaciocinio(message.blocos, text),
             }))
+          },
+          // A rodada está esperando e diz por quê. É estado, não fala: vai para a caixinha do
+          // canto em vez de entrar na resposta.
+          onAviso: (texto) => {
+            sinal()
+            setAvisoDaEspera(texto)
           },
           onToolCall: (data) => {
             sinal()
@@ -1855,12 +2401,38 @@ function App() {
             setErroPermissao(null)
             setPermissaoPendente(data)
           },
+          // O sub-agente narra numa aba da área Subs, e não na conversa de cima: aqui só se
+          // guarda o que ele contou, endereçado à chamada que o lançou.
+          onSub: (evento) => {
+            sinal()
+            setSubs((atual) => {
+              const indice = atual.findIndex((item) => item.chamada === evento.chamada)
+              const base: SessaoDeSub =
+                indice >= 0
+                  ? atual[indice]
+                  : {
+                      chamada: evento.chamada,
+                      agente: evento.agente,
+                      texto: '',
+                      passos: [],
+                      vivo: true,
+                    }
+              const atualizada = aplicarEventoDoSub(base, evento)
+              const lista =
+                indice >= 0
+                  ? atual.map((item, posicao) => (posicao === indice ? atualizada : item))
+                  : [...atual, atualizada]
+              // O teto de abas é do Subs: ficam as últimas, e as de rodadas antigas saem.
+              return lista.slice(-SUBS_POR_RODADA)
+            })
+          },
           onDone: (data) => {
-            patchAssistant((message) => ({
-              ...message,
+            concluirRodada(rodadaId, (mensagem) => ({
+              ...mensagem,
               elapsedMs: data.elapsed_ms,
               tokens: data.tokens ?? null,
-              contexto: data.contexto ?? message.contexto ?? null,
+              tokensTotal: data.tokens_total ?? null,
+              contexto: data.contexto ?? mensagem.contexto ?? null,
               // O backend é quem sabe: ele só diz `false` depois de insistir sozinho.
               incompleto: data.completed === false,
               // O contrato estruturado da rodada incompleta — é dele que o cartão vive.
@@ -1870,48 +2442,71 @@ function App() {
               retomavel: data.resumable ?? false,
               at: Date.now(),
             }))
-            setBusy(false)
-            // O pedido de permissão morre junto com a resposta que o fez.
+            // O pedido de permissão morre junto com a resposta que o fez — e a espera acabou.
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
+            /*
+             * O gasto desta resposta **sobe para o painel** — é ele que guarda o limite da
+             * conta. O backend local mediu (é ele que viu a resposta acontecer), mas quem
+             * conta é o painel: o número que fica no PC some ao reinstalar e não acompanha a
+             * pessoa noutra máquina.
+             *
+             * Repetir é seguro (a chave da contagem é o id da mensagem), então não há fila
+             * nem retry: se o relato falhar, a próxima resposta relata a dela e o limite
+             * segue valendo pelo que já entrou.
+             */
+            void reportarUso({
+              message_id: data.message_id,
+              conversation_id: data.conversation_id,
+              model: ultimoPayloadRef.current?.model ?? null,
+              tempo_ms: data.elapsed_ms ?? 0,
+              tokens: data.tokens_total ?? 0,
+            }).catch(() => undefined)
             void refreshUsage()
             void refreshHistory()
           },
           onError: (message) => {
-            patchAssistant((current) => ({
-              ...current,
-              text: current.text ? `${current.text}\n\n${message}` : message,
-            }))
             // Achado 9: o erro encerra a rodada, e a tela tem de sair de "Pensando" /
             // "Trabalhando…". Antes só o `done` desbloqueava, e o `done` não sai quando o
             // provedor falha — a interface ficava presa para sempre.
-            setBusy(false)
+            concluirRodada(rodadaId, (mensagem) => ({
+              ...mensagem,
+              text: mensagem.text ? `${mensagem.text}\n\n${message}` : message,
+            }))
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
           },
           // Contrato de vivacidade: fluxo fechado sem terminal é rodada encerrada.
           onClosed: () => {
-            setBusy(false)
+            concluirRodada(rodadaId, (mensagem) => mensagem)
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
           },
         },
       )
     } catch (error) {
+      // A rodada morreu por falha de rede ou pelo Parar: a espera acabou junto.
+      setAvisoDaEspera(null)
       if (controller.signal.aborted) {
-        setInterrupted(true)
+        // A pessoa parou no botão Parar. O que já saiu fica, e a resposta passa a **dizer
+        // que parou** — o mesmo cartão de qualquer outra interrupção.
+        concluirRodada(rodadaId, marcarInterrompida)
       } else {
         // Backend caiu durante a resposta: a próxima já cai na simulação local.
         setBackend(null)
         const detail = fraseDeFalha(error)
-        patchAssistant((current) => ({
-          ...current,
-          text: current.text
-            ? `${current.text}\n\n[A conexão com o serviço local caiu: ${detail}]`
+        concluirRodada(rodadaId, (mensagem) => ({
+          ...mensagem,
+          text: mensagem.text
+            ? `${mensagem.text}\n\n[A conexão com o serviço local caiu: ${detail}]`
             : `Não consegui falar com o serviço local do Koda. ${detail} ${COMO_DIAGNOSTICAR}`,
         }))
       }
     } finally {
-      if (abortRef.current === controller) abortRef.current = null
       setPermissaoPendente(null)
-      setBusy(false)
+      // A rodada acabou: nenhum sub-agente dela está trabalhando. As abas ficam — o que ele
+      // fez continua à vista —, mas nenhuma delas diz que ainda tem alguém ali.
+      setSubs((atual) => atual.map((item) => ({ ...item, vivo: false })))
     }
   }
 
@@ -2013,7 +2608,7 @@ function App() {
         <Header
           searchOpen={searchOpen}
           searchQuery={query}
-          resultLabel={searching ? `${matchingIds.size} de ${messages.length}` : null}
+          resultLabel={searching ? `${matchingIds.size} de ${visiveis.length}` : null}
           projects={projects}
           projectId={projectId}
           conta={conta}
@@ -2029,6 +2624,10 @@ function App() {
           onOpenFolders={() => setPastasAberto(true)}
           onOpenConversation={handleOpenConversation}
           onOpenSettings={openSettings}
+          onOpenPresente={() => {
+            setAbaDoPresente('free')
+            setView('presente')
+          }}
           painelAberto={painelAberto}
           onTogglePainel={() => setPainelAberto((aberto) => !aberto)}
         />
@@ -2041,7 +2640,16 @@ function App() {
        * a tela é inteira e não há conversa para listar.
        */}
       {view === 'chat' ? (
-        <PainelLateral aberto={painelAberto} onFechar={() => setPainelAberto(false)} />
+        <PainelLateral
+          aberto={painelAberto}
+          onFechar={() => setPainelAberto(false)}
+          // A aba Código mostra a pasta do projeto aberto. Não há outra fonte: o painel não
+          // escolhe pasta, ele mostra a que já está em uso.
+          projeto={projects.find((item) => item.id === projectId) ?? null}
+          // As sessões de sub-agente vivas: a área Subs abre uma aba por uma delas. Vêm
+          // daqui porque quem as alimenta é o stream da conversa, que é deste lado.
+          subs={subs}
+        />
       ) : null}
 
       {/*
@@ -2052,7 +2660,9 @@ function App() {
       {view === 'chat' ? (
         <div className="pointer-events-none relative z-20 -mt-2 flex shrink-0 justify-end px-5">
           <div className="pointer-events-auto">
-            <ToDosMenu todos={todosAtivos} />
+            {/* `busy` é o que diz se o agente está mesmo trabalhando: sem ele o painel
+                girava para sempre numa conversa interrompida. */}
+            <ToDosMenu todos={todosAtivos} rodando={busy} />
           </div>
         </div>
       ) : null}
@@ -2072,16 +2682,11 @@ function App() {
           onClose={() => setView('chat')}
           usage={{
             messages: remoteUsage?.messages ?? usageCounts.messages,
-            todayMessages: remoteUsage?.daily.used ?? usageCounts.todayMessages,
-            weekMessages: remoteUsage?.weekly.used ?? usageCounts.weekMessages,
-            monthMessages: remoteUsage?.monthly.used ?? usageCounts.monthMessages,
             conversations: remoteUsage?.conversations ?? usageCounts.conversations,
             dias: remoteUsage?.dias ?? usageCounts.dias,
-            limits: {
-              daily: remoteUsage?.daily.limit ?? PLAN.dailyMessages,
-              weekly: remoteUsage?.weekly.limit ?? PLAN.weeklyMessages,
-              monthly: remoteUsage?.monthly.limit ?? PLAN.monthlyMessages,
-            },
+            daily: remoteUsage ? janelaDoServidor(remoteUsage.daily) : usageCounts.daily,
+            weekly: remoteUsage ? janelaDoServidor(remoteUsage.weekly) : usageCounts.weekly,
+            monthly: remoteUsage ? janelaDoServidor(remoteUsage.monthly) : usageCounts.monthly,
             // Os rótulos do catálogo da casa são strings; o tipo do menu aceita JSX
             // por causa dos contadores do submenu de skills.
             model: findModel(modeloAtivo, modelosVisiveis).label as string,
@@ -2110,6 +2715,9 @@ function App() {
           mcps={mcps}
           onAddSkill={handleAddSkill}
           onAddMcp={handleAddMcp}
+          agents={agents}
+          onSaveAgent={handleSaveAgent}
+          onDeleteAgent={handleDeleteAgent}
           mostrarRodape={mostrarRodape}
           onToggleRodape={() => setMostrarRodape((value) => !value)}
           mostrarTraces={mostrarTraces}
@@ -2119,22 +2727,66 @@ function App() {
             setAppearance((current) => ({ ...current, ...patch }))
           }
           contaKoda={conta}
+          planoDaConta={planoDaConta}
+          onAssinaturaMudou={atualizarPlano}
           onSignOut={handleSignOut}
           initialSection={settingsSection}
         />
+      ) : view === 'presente' ? (
+        // A página do presente entra **no mesmo if/else** dos ajustes, e não como irmã solta:
+        // quem não está em `settings` cai no chat, então um `{view === 'presente' ? … : null}`
+        // desenhava a página por cima da tela inicial — o defeito que ele viu.
+        <Presente
+          onClose={() => setView('chat')}
+          abaInicial={abaDoPresente}
+          planoDaConta={planoDaConta}
+          aoAssinar={(plano) => {
+            setCompraDoCheckout({ tipo: 'plano', plano })
+            setView('checkout')
+          }}
+          // O pacote de créditos entra no **mesmo** checkout: o caminho do dinheiro é um só.
+          aoComprarCreditos={(creditos, valorCentavos) => {
+            setCompraDoCheckout({ tipo: 'creditos', creditos, valorCentavos })
+            setView('checkout')
+          }}
+        />
+      ) : view === 'checkout' && compraDoCheckout ? (
+        // O checkout é uma **vista**, e não uma terceira aba da área: ele não é alcançável sem
+        // um produto escolhido, e uma aba aberta por engano mostraria a tela sem saber o que
+        // está cobrando. Voltar leva de onde a pessoa saiu — «Planos» ou «Moedas».
+        <CheckoutScreen
+          compra={compraDoCheckout}
+          // Assinou: o plano mudou no painel e a tela precisa saber **agora**. A sonda de
+          // sessão roda de tempo em tempo, e esperar por ela deixaria o perfil dizendo «Free»
+          // para quem acabou de pagar.
+          onAssinou={atualizarPlano}
+          // Depois de comemorar, a tela leva a pessoa para o chat sozinha — que é onde ela
+          // quer estar. «Voltar» (a seta) continua levando para a área, para quem quiser
+          // conferir o que acabou de comprar.
+          onIrParaOChat={() => setView('chat')}
+          onClose={() => {
+            setAbaDoPresente(compraDoCheckout.tipo === 'plano' ? 'planos' : 'moedas')
+            setView('presente')
+          }}
+        />
       ) : (
         <main className="flex min-h-0 flex-1 flex-col">
+        {/*
+         * A roda (e o trackpad) avisam a intenção **antes** de a rolagem acontecer: é o que
+         * faz o acompanhamento parar no primeiro movimento para cima, e não depois.
+         */}
         <div
           ref={listaRef}
           onScroll={aoRolar}
+          onWheel={(evento) => aoRolarComRoda(evento.deltaY)}
           className={[
             'min-h-0 overflow-y-auto transition-all duration-500',
             EASE,
             hasMessages ? 'flex-1 opacity-100' : 'flex-none opacity-0',
           ].join(' ')}
         >
-          <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6">
-            {messages.map((message) => {
+          <div ref={conteudoRef} className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6">
+            {visiveis.map((message) => {
               const dimmed = searching && !matchingIds.has(message.id)
               const blocos = message.blocos ?? []
               /** A resposta sendo escrita agora: é nela que a linha de trabalho aparece. */
@@ -2240,6 +2892,8 @@ function App() {
                     <MessageFooter
                       texto={message.text}
                       tokens={message.tokens ?? null}
+                      tokensTotal={message.tokensTotal ?? null}
+                      modelo={message.model ?? null}
                       elapsedMs={message.elapsedMs}
                       at={message.at}
                       numeros={mostrarRodape}
@@ -2251,7 +2905,7 @@ function App() {
                    * Só na última resposta: numa rodada antiga, "continuar" retomaria um
                    * assunto que a conversa já deixou para trás.
                    */}
-                  {message.incompleto && message.id === messages.at(-1)?.id ? (
+                  {message.incompleto && message.id === visiveis.at(-1)?.id ? (
                     <TarefaIncompleta
                       motivo={message.motivo}
                       pendentes={message.pendentes}
@@ -2265,13 +2919,7 @@ function App() {
               )
             })}
 
-            {interrupted && !busy ? (
-              <p className="text-[13px] text-koda-fg/35 msg-in">Geração interrompida</p>
-            ) : null}
-
             {waiting ? <WorkingLine segundos={segundosDaResposta} /> : null}
-
-            <div ref={bottomRef} />
           </div>
         </div>
 
@@ -2295,7 +2943,25 @@ function App() {
             </h1>
           </div>
 
-          <div className="flex w-full max-w-3xl flex-col gap-2.5">
+          <div className="relative flex w-full max-w-3xl flex-col gap-2.5">
+            {/*
+             * O atalho do fim.
+             *
+             * Só existe quando há para onde descer — ou seja, quando a pessoa subiu e o
+             * acompanhamento está desligado. É ele que resolve o incômodo de ter de rolar
+             * uma resposta longa na mão: um clique desce tudo e o acompanhamento volta.
+             */}
+            {hasMessages && !noFim ? (
+              <button
+                type="button"
+                onClick={irParaOFim}
+                aria-label="Ir para o fim da conversa"
+                title="Ir para o fim"
+                className="menu-in absolute -top-12 right-0 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-koda-surface text-koda-fg/75 ring-1 ring-koda-fg/12 shadow-[0_10px_30px_-12px_var(--koda-shadow)] transition-colors duration-150 hover:bg-koda-fg/10 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+              >
+                <ChevronDown className="h-[18px] w-[18px]" strokeWidth={1.8} />
+              </button>
+            ) : null}
             <Composer
               onSend={handleSend}
               onStop={handleStop}
@@ -2321,7 +2987,13 @@ function App() {
               modelosBloqueados={modelosBloqueados}
               contextoPorModelo={contextoPorModelo}
               contextoJanela={janelaDoContexto}
+              moedas={saldoDeMoedas}
+              agentes={agents}
+              skills={skills}
+              mcps={mcps}
             />
+            {/* A espera do provedor vem antes de tudo: é o que explica a tela parada. */}
+            {avisoDaEspera ? <AvisoDaEspera texto={avisoDaEspera} /> : null}
             {/* A sessão que não vale mais vem antes de qualquer novidade: uma conversa
                 respondida pelo servidor local é mais urgente que uma versão nova. */}
             {semModeloDaConta ? (
