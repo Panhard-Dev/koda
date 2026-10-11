@@ -6,6 +6,11 @@ import Header from './components/Header'
 import type { ConversationSummary } from './components/Header'
 import KodaLogo from './components/KodaLogo'
 import LoginScreen from './components/LoginScreen'
+import Presente, { type Aba } from './components/Presente'
+import type { PlanoDaConta } from './api/cloud'
+import CheckoutScreen, { type CompraDoCheckout } from './components/CheckoutScreen'
+
+import { definirConta, definirHorasDoDia, ligar, sincronizar } from './tempo'
 import SettingsScreen from './components/SettingsScreen'
 import MessageFooter from './components/MessageFooter'
 import Reasoning from './components/Reasoning'
@@ -32,15 +37,19 @@ import PainelLateral from './components/PainelLateral'
 import { findModel, MODELO_PADRAO } from './models'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
-import { PLAN, dayKey, monthStart, weekStart } from './plan'
+import { dayStart, dayKey, monthStart, weekStart } from './plan'
+import { PLANO_FREE } from './plano'
+import { moedasDeTokensPorModelo } from './custo'
 import { DEFAULT_APPEARANCE } from './appearance'
 import type { Appearance } from './appearance'
 import {
   contaGuardada,
   msAteRenovar,
+  reportarUso,
   sair,
   sessaoAtual,
   sessaoParaOHost,
+  usoDaConta,
   verificarSessao,
 } from './api/cloud'
 import type { Conta } from './api/cloud'
@@ -90,12 +99,31 @@ import type {
   DecisaoPermissao,
   Health,
   ModoPermissao,
+  NovoAgente,
   NovoMcp,
   NovoSkill,
   PedidoPermissao,
   ProjectsEstado,
   ToolStep,
+  UsageWindow,
 } from './api/client'
+
+/** Uma janela de uso já com as moedas contadas — o que a tela de Uso desenha. */
+type ResumoDaJanela = { tempoMs: number; creditos: number }
+
+/**
+ * A janela que o servidor mandou, com os tokens virados em moedas.
+ *
+ * A conversão é aqui, e não no servidor, porque a tabela de preços mora num lugar só
+ * (`src/custo.ts`) — o servidor ter uma segunda cópia dela seria a garantia de que um dia os
+ * dois números divergem.
+ */
+function janelaDoServidor(janela: UsageWindow): ResumoDaJanela {
+  return {
+    tempoMs: janela.tempo_ms,
+    creditos: moedasDeTokensPorModelo(janela.tokens_por_modelo),
+  }
+}
 
 type Message = {
   id: string
@@ -112,6 +140,14 @@ type Message = {
    * contexto reenviado em cada passo.
    */
   tokens?: number | null
+  /**
+   * O **custo** da resposta, em tokens (soma de `total_tokens` dos passos).
+   *
+   * É o irmão de `tokens` e não o mesmo número: `tokens` é o tamanho do que a resposta
+   * escreveu, e este é o que o provedor cobrou — várias vezes maior, porque cada passo reenvia
+   * o contexto inteiro. É dele que sai a conta das moedas na ficha.
+   */
+  tokensTotal?: number | null
   /**
    * Contexto do **último passo** da resposta, em tokens de entrada (`prompt_tokens`).
    *
@@ -590,6 +626,40 @@ function AvisoDaSessao() {
 }
 
 /**
+ * A caixinha do canto enquanto a rodada **espera**: o provedor falhou ou respondeu vazio, e o
+ * app vai tentar de novo.
+ *
+ * Existe para uma espera longa não ser uma tela muda. Antes, a insistência do loop (até
+ * `MAX_VAZIAS`, ~12 min com o teto de 30 s) aparecia como um "trabalhando…" girando sem
+ * motivo: quem estava olhando não tinha como saber se era lento, travado ou desistindo. O
+ * texto diz o que está acontecendo, quanto falta e que o Parar interrompe.
+ *
+ * Some sozinha quando a rodada segue — o próximo aviso substitui, e o `done`/`error` limpa.
+ */
+function AvisoDaEspera({ texto }: { texto: string }) {
+  return (
+    <div className="msg-in fixed right-6 bottom-6 z-40" role="status">
+      <div
+        className={[
+          'w-72 rounded-2xl p-4 backdrop-blur-2xl backdrop-saturate-150',
+          'bg-koda-surface/55 bg-gradient-to-b from-koda-fg/6 to-transparent',
+          'ring-1 ring-koda-fg/12',
+          'shadow-[0_28px_60px_-24px_var(--koda-shadow)]',
+        ].join(' ')}
+      >
+        <p className="flex items-start gap-2.5 text-[12.5px] leading-5 text-koda-fg/70">
+          <Loader2
+            className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-koda-accent"
+            strokeWidth={1.8}
+          />
+          {texto}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
  * O que a janela mostra enquanto a sessão é conferida ou o backend inicia.
  *
  * Com sessão e backend prontos esta tela passa voando. Se a API Python demorar, ela
@@ -655,6 +725,7 @@ const fromApiMessage = (message: ApiMessage): Message => {
     model: message.model,
     elapsedMs: message.elapsed_ms ?? undefined,
     tokens: message.tokens,
+    tokensTotal: message.tokens_total,
     contexto: message.contexto,
     at: message.at,
     steps: message.steps,
@@ -805,7 +876,45 @@ function App() {
    */
   const [mostrarTraces, setMostrarTraces] = useState(true)
   const [history, setHistory] = useState<Conversation[]>([])
-  const [view, setView] = useState<'chat' | 'settings'>('chat')
+  const [view, setView] = useState<'chat' | 'settings' | 'presente' | 'checkout'>('chat')
+  // A área do presente é a única tela que guarda em que vista abre, e são dois caminhos que
+  // discordam: o botão do cabeçalho abre no «Free» — o que a pessoa já tem, porque abrir no que
+  // ela não tem é vender antes de deixar olhar — e o checkout devolve para «Planos», que é a
+  // comparação de onde ela saiu. Guardado no `App` porque a área desmonta ao trocar de vista.
+  const [abaDoPresente, setAbaDoPresente] = useState<Aba>('free')
+  // O que o checkout está cobrando — um plano ou um pacote de créditos. `null` só existe antes
+  // da primeira escolha: o checkout não é alcançável sem um produto escolhido, e as linhas que
+  // o abrem são juntas.
+  const [compraDoCheckout, setCompraDoCheckout] = useState<CompraDoCheckout | null>(null)
+  // O plano em vigor na conta, como o painel o conta. `null` é o Free. Chega pela **sonda de
+  // sessão** — a mesma resposta que já diz se a sessão está viva —, e é o que o perfil mostra
+  // na etiqueta. Sem guardar isto, a tela teria de adivinhar o plano, e adivinhar plano é
+  // mostrar «Free» para quem paga.
+  const [planoDaConta, setPlanoDaConta] = useState<PlanoDaConta | null>(null)
+  /**
+   * Os créditos **avulsos** da conta — comprados ou dados pelo painel.
+   *
+   * Entram no saldo da aba junto com as moedas do plano: é o que a pessoa tem além dele, e
+   * deixá-los de fora fazia o número **não mudar** quando o suporte dava moedas (o plano
+   * mudava, as moedas não). Vem na mesma sonda de sessão, sem ida extra à rede.
+   */
+  const [creditosAvulsos, setCreditosAvulsos] = useState(0)
+
+  /**
+   * Recolhe o plano da conta no painel.
+   *
+   * A sonda de sessão já traz isso de tempo em tempo, mas ela é lenta de propósito (minutos).
+   * Depois de assinar ou cancelar, esperar por ela deixaria o perfil dizendo «Free» para quem
+   * acabou de pagar — ou o contrário, para quem acabou de cancelar.
+   */
+  const atualizarPlano = () => {
+    void verificarSessao().then((resultado) => {
+      if (resultado.estado === 'viva') {
+        setPlanoDaConta(resultado.plano)
+        setCreditosAvulsos(resultado.creditosAvulsos)
+      }
+    })
+  }
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
   const [model, setModel] = useState(MODELO_PADRAO)
   const [appearance, setAppearance] = useState<Appearance>(DEFAULT_APPEARANCE)
@@ -913,6 +1022,8 @@ function App() {
   }
   /** Último sinal de vida vindo do backend (pensamento, palavra, ferramenta). */
   const ultimoSinalRef = useRef(0)
+  /** O aviso transitório da rodada (espera do provedor) — ver `StreamData['aviso']`. */
+  const [avisoDaEspera, setAvisoDaEspera] = useState<string | null>(null)
   /** Quando a resposta em curso começou (a linha de trabalho conta a partir daqui). */
   const inicioDaRespostaRef = useRef(0)
   const timersRef = useRef<number[]>([])
@@ -1038,6 +1149,52 @@ function App() {
    * outras deixa mandar mensagem.
    */
   const busy = rodada !== null
+
+  /*
+   * O relógio do dia anda **enquanto o agente trabalha**, e só. Quem liga e desliga é daqui, e
+   * não do `Composer`, por um motivo: a caixa é desmontada quando a pessoa sai do chat, e o
+   * agente continua trabalhando enquanto isso. Se o `ligar` morasse lá, sair para os Ajustes
+   * pararia a contagem no meio de uma resposta — e a hora gasta deixaria de ser contada.
+   */
+  useEffect(() => {
+    ligar(busy)
+  }, [busy])
+
+  /*
+   * O mostrador do dia é **do servidor**, não do rascunho.
+   *
+   * Cada resposta grava o tempo dela no banco do backend, e `/api/usage` soma a janela do dia
+   * — é esse número que a aba tem de mostrar. Sem esta reapontagem a aba era só o rascunho
+   * local: apagar os dados do app (ou reinstalar) devolvia as horas já gastas, e o mostrador
+   * podia discordar da tela de Uso, que sempre leu o banco. O rascunho fica para o caso de o
+   * backend não responder.
+   */
+  useEffect(() => {
+    if (remoteUsage) sincronizar(remoteUsage.daily.tempo_ms / 1000)
+  }, [remoteUsage])
+
+  /*
+   * O orçamento do dia é o do **plano da conta**, não o do Free.
+   *
+   * O plano chega pela sonda de sessão (`/api/account/me` → `plano.horas_por_dia`). Sem isto a
+   * aba mostrava sempre a hora do Free: quem assinava o Plus continuava vendo `01:00:00`, e a
+   * troca de plano não aparecia em lugar nenhum do chat.
+   */
+  useEffect(() => {
+    definirHorasDoDia(planoDaConta?.horas_por_dia ?? PLANO_FREE.horasPorDia)
+  }, [planoDaConta])
+
+  /*
+   * O rascunho do dia é **por conta**.
+   *
+   * O limite pertence a quem gasta: trocar de conta no mesmo PC não pode carregar o tempo que
+   * a anterior deixou. O backend separa o gasto pelo mesmo e-mail (`host_auth.email_da_conta`),
+   * e a chave do rascunho local acompanha — senão o paliativo do `localStorage` desmentiria o
+   * número do servidor justamente na hora em que ele não responde.
+   */
+  useEffect(() => {
+    definirConta(conta?.email ?? null)
+  }, [conta])
 
   const hasMessages = visiveis.length > 0
   const normalizedQuery = query.trim().toLowerCase()
@@ -1486,8 +1643,12 @@ function App() {
       }
 
       // Só a resposta afirmativa mexe no catálogo: "sem rede" não é motivo para reabrir um
-      // modelo que o painel tirou.
-      if (resultado.estado === 'viva') setModelosBloqueados(resultado.bloqueados)
+      // modelo que o painel tirou. O plano entra pela mesma porta, e pela mesma razão.
+      if (resultado.estado === 'viva') {
+        setModelosBloqueados(resultado.bloqueados)
+        setPlanoDaConta(resultado.plano)
+        setCreditosAvulsos(resultado.creditosAvulsos)
+      }
 
       timer = window.setTimeout(() => void rodar(), SONDA_DE_SESSAO_MS)
     }
@@ -1596,22 +1757,41 @@ function App() {
   // Contagem local, usada quando não há backend (e como base do modo offline).
   const usageCounts = useMemo(() => {
     const all = [...history.flatMap((conversation) => conversation.messages), ...visiveis]
-    const today = dayKey(new Date())
-    const weekFrom = weekStart().getTime()
-    const monthFrom = monthStart().getTime()
     // O mapa do ano sem backend: o mesmo cálculo por dia, com o que está na tela.
     const dias: Record<string, number> = {}
     for (const message of all) {
       const key = dayKey(new Date(message.at))
       dias[key] = (dias[key] ?? 0) + 1
     }
+
+    /**
+     * O que uma janela gastou, com o que está na tela.
+     *
+     * A conta é a **mesma do servidor**: o tempo é a soma de `elapsedMs` (a hora gasta
+     * respondendo — conversa parada não consome) e os tokens vão **por modelo**, para o preço
+     * sair certo. Mensagem de pessoa não entra em nenhum dos dois: ela não tem nem tempo nem
+     * modelo.
+     */
+    const janela = (desde: number) => {
+      const dentro = all.filter((message) => message.at >= desde)
+      const porModelo: Record<string, number> = {}
+      for (const message of dentro) {
+        if (!message.model || !message.tokensTotal) continue
+        porModelo[message.model] = (porModelo[message.model] ?? 0) + message.tokensTotal
+      }
+      return {
+        tempoMs: dentro.reduce((soma, message) => soma + (message.elapsedMs ?? 0), 0),
+        creditos: moedasDeTokensPorModelo(porModelo),
+      }
+    }
+
     return {
       messages: all.length,
-      todayMessages: all.filter((message) => dayKey(new Date(message.at)) === today).length,
-      weekMessages: all.filter((message) => message.at >= weekFrom).length,
-      monthMessages: all.filter((message) => message.at >= monthFrom).length,
       conversations: history.length + (visiveis.length > 0 ? 1 : 0),
       dias,
+      daily: janela(dayStart().getTime()),
+      weekly: janela(weekStart().getTime()),
+      monthly: janela(monthStart().getTime()),
     }
   }, [history, visiveis])
 
@@ -1641,13 +1821,50 @@ function App() {
         ]
       : rest
 
+  /**
+   * O uso vem do **painel**; o backend local é a reserva.
+   *
+   * É o painel que guarda o gasto **da conta** — o local é do PC, e some ao reinstalar ou ao
+   * trocar de máquina. A reserva existe para a tela não ficar vazia quando a nuvem não
+   * responde: ela é medida nesta máquina, então é o melhor número que existe sem rede.
+   */
   const refreshUsage = async () => {
+    try {
+      setRemoteUsage(await usoDaConta())
+      return
+    } catch {
+      // Sem sessão ou sem rede: quem responde é a medição local.
+    }
     try {
       setRemoteUsage(await fetchUsage())
     } catch {
       setBackend(null)
     }
   }
+
+  /**
+   * As moedas que a conta ainda tem no mês: o que o plano dá, **mais os créditos avulsos**,
+   * menos o que já foi gasto.
+   *
+   * O avulso entra porque é dinheiro da pessoa: o suporte dá moedas e o número da aba tem de
+   * mudar — antes ele só olhava o plano, e dar crédito não mexia em nada na tela.
+   *
+   * O gasto sai do uso (que vem do painel) convertido pela tabela de preços. `floor` de
+   * propósito: prometer a moeda que o saldo não fecha é o erro que a régua das conversas já
+   * evita do mesmo jeito. `null` quando não há nem plano nem uso (a aba cai na constante do
+   * Free, que é o degrau de baixo).
+   */
+  const saldoDeMoedas =
+    planoDaConta || remoteUsage || creditosAvulsos > 0
+      ? Math.max(
+          0,
+          Math.floor(
+            (planoDaConta?.moedas_por_mes ?? PLANO_FREE.moedasPorMes) +
+              creditosAvulsos -
+              (remoteUsage ? moedasDeTokensPorModelo(remoteUsage.monthly.tokens_por_modelo) : 0),
+          ),
+        )
+      : null
 
   const refreshHistory = async () => {
     try {
@@ -2161,6 +2378,12 @@ function App() {
               blocos: anexarRaciocinio(message.blocos, text),
             }))
           },
+          // A rodada está esperando e diz por quê. É estado, não fala: vai para a caixinha do
+          // canto em vez de entrar na resposta.
+          onAviso: (texto) => {
+            sinal()
+            setAvisoDaEspera(texto)
+          },
           onToolCall: (data) => {
             sinal()
             abrirPasso(data.id, data.name, data.arguments, data.mcp)
@@ -2208,6 +2431,7 @@ function App() {
               ...mensagem,
               elapsedMs: data.elapsed_ms,
               tokens: data.tokens ?? null,
+              tokensTotal: data.tokens_total ?? null,
               contexto: data.contexto ?? mensagem.contexto ?? null,
               // O backend é quem sabe: ele só diz `false` depois de insistir sozinho.
               incompleto: data.completed === false,
@@ -2218,8 +2442,26 @@ function App() {
               retomavel: data.resumable ?? false,
               at: Date.now(),
             }))
-            // O pedido de permissão morre junto com a resposta que o fez.
+            // O pedido de permissão morre junto com a resposta que o fez — e a espera acabou.
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
+            /*
+             * O gasto desta resposta **sobe para o painel** — é ele que guarda o limite da
+             * conta. O backend local mediu (é ele que viu a resposta acontecer), mas quem
+             * conta é o painel: o número que fica no PC some ao reinstalar e não acompanha a
+             * pessoa noutra máquina.
+             *
+             * Repetir é seguro (a chave da contagem é o id da mensagem), então não há fila
+             * nem retry: se o relato falhar, a próxima resposta relata a dela e o limite
+             * segue valendo pelo que já entrou.
+             */
+            void reportarUso({
+              message_id: data.message_id,
+              conversation_id: data.conversation_id,
+              model: ultimoPayloadRef.current?.model ?? null,
+              tempo_ms: data.elapsed_ms ?? 0,
+              tokens: data.tokens_total ?? 0,
+            }).catch(() => undefined)
             void refreshUsage()
             void refreshHistory()
           },
@@ -2232,15 +2474,19 @@ function App() {
               text: mensagem.text ? `${mensagem.text}\n\n${message}` : message,
             }))
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
           },
           // Contrato de vivacidade: fluxo fechado sem terminal é rodada encerrada.
           onClosed: () => {
             concluirRodada(rodadaId, (mensagem) => mensagem)
             setPermissaoPendente(null)
+            setAvisoDaEspera(null)
           },
         },
       )
     } catch (error) {
+      // A rodada morreu por falha de rede ou pelo Parar: a espera acabou junto.
+      setAvisoDaEspera(null)
       if (controller.signal.aborted) {
         // A pessoa parou no botão Parar. O que já saiu fica, e a resposta passa a **dizer
         // que parou** — o mesmo cartão de qualquer outra interrupção.
@@ -2378,6 +2624,10 @@ function App() {
           onOpenFolders={() => setPastasAberto(true)}
           onOpenConversation={handleOpenConversation}
           onOpenSettings={openSettings}
+          onOpenPresente={() => {
+            setAbaDoPresente('free')
+            setView('presente')
+          }}
           painelAberto={painelAberto}
           onTogglePainel={() => setPainelAberto((aberto) => !aberto)}
         />
@@ -2432,16 +2682,11 @@ function App() {
           onClose={() => setView('chat')}
           usage={{
             messages: remoteUsage?.messages ?? usageCounts.messages,
-            todayMessages: remoteUsage?.daily.used ?? usageCounts.todayMessages,
-            weekMessages: remoteUsage?.weekly.used ?? usageCounts.weekMessages,
-            monthMessages: remoteUsage?.monthly.used ?? usageCounts.monthMessages,
             conversations: remoteUsage?.conversations ?? usageCounts.conversations,
             dias: remoteUsage?.dias ?? usageCounts.dias,
-            limits: {
-              daily: remoteUsage?.daily.limit ?? PLAN.dailyMessages,
-              weekly: remoteUsage?.weekly.limit ?? PLAN.weeklyMessages,
-              monthly: remoteUsage?.monthly.limit ?? PLAN.monthlyMessages,
-            },
+            daily: remoteUsage ? janelaDoServidor(remoteUsage.daily) : usageCounts.daily,
+            weekly: remoteUsage ? janelaDoServidor(remoteUsage.weekly) : usageCounts.weekly,
+            monthly: remoteUsage ? janelaDoServidor(remoteUsage.monthly) : usageCounts.monthly,
             // Os rótulos do catálogo da casa são strings; o tipo do menu aceita JSX
             // por causa dos contadores do submenu de skills.
             model: findModel(modeloAtivo, modelosVisiveis).label as string,
@@ -2482,8 +2727,47 @@ function App() {
             setAppearance((current) => ({ ...current, ...patch }))
           }
           contaKoda={conta}
+          planoDaConta={planoDaConta}
+          onAssinaturaMudou={atualizarPlano}
           onSignOut={handleSignOut}
           initialSection={settingsSection}
+        />
+      ) : view === 'presente' ? (
+        // A página do presente entra **no mesmo if/else** dos ajustes, e não como irmã solta:
+        // quem não está em `settings` cai no chat, então um `{view === 'presente' ? … : null}`
+        // desenhava a página por cima da tela inicial — o defeito que ele viu.
+        <Presente
+          onClose={() => setView('chat')}
+          abaInicial={abaDoPresente}
+          planoDaConta={planoDaConta}
+          aoAssinar={(plano) => {
+            setCompraDoCheckout({ tipo: 'plano', plano })
+            setView('checkout')
+          }}
+          // O pacote de créditos entra no **mesmo** checkout: o caminho do dinheiro é um só.
+          aoComprarCreditos={(creditos, valorCentavos) => {
+            setCompraDoCheckout({ tipo: 'creditos', creditos, valorCentavos })
+            setView('checkout')
+          }}
+        />
+      ) : view === 'checkout' && compraDoCheckout ? (
+        // O checkout é uma **vista**, e não uma terceira aba da área: ele não é alcançável sem
+        // um produto escolhido, e uma aba aberta por engano mostraria a tela sem saber o que
+        // está cobrando. Voltar leva de onde a pessoa saiu — «Planos» ou «Moedas».
+        <CheckoutScreen
+          compra={compraDoCheckout}
+          // Assinou: o plano mudou no painel e a tela precisa saber **agora**. A sonda de
+          // sessão roda de tempo em tempo, e esperar por ela deixaria o perfil dizendo «Free»
+          // para quem acabou de pagar.
+          onAssinou={atualizarPlano}
+          // Depois de comemorar, a tela leva a pessoa para o chat sozinha — que é onde ela
+          // quer estar. «Voltar» (a seta) continua levando para a área, para quem quiser
+          // conferir o que acabou de comprar.
+          onIrParaOChat={() => setView('chat')}
+          onClose={() => {
+            setAbaDoPresente(compraDoCheckout.tipo === 'plano' ? 'planos' : 'moedas')
+            setView('presente')
+          }}
         />
       ) : (
         <main className="flex min-h-0 flex-1 flex-col">
@@ -2608,6 +2892,8 @@ function App() {
                     <MessageFooter
                       texto={message.text}
                       tokens={message.tokens ?? null}
+                      tokensTotal={message.tokensTotal ?? null}
+                      modelo={message.model ?? null}
                       elapsedMs={message.elapsedMs}
                       at={message.at}
                       numeros={mostrarRodape}
@@ -2701,10 +2987,13 @@ function App() {
               modelosBloqueados={modelosBloqueados}
               contextoPorModelo={contextoPorModelo}
               contextoJanela={janelaDoContexto}
+              moedas={saldoDeMoedas}
               agentes={agents}
               skills={skills}
               mcps={mcps}
             />
+            {/* A espera do provedor vem antes de tudo: é o que explica a tela parada. */}
+            {avisoDaEspera ? <AvisoDaEspera texto={avisoDaEspera} /> : null}
             {/* A sessão que não vale mais vem antes de qualquer novidade: uma conversa
                 respondida pelo servidor local é mais urgente que uma versão nova. */}
             {semModeloDaConta ? (

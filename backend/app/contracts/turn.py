@@ -50,6 +50,12 @@ class StepResult:
     #: isso para avisar em vez de aceitar um JSON de argumentos pela metade como se fosse
     #: uma chamada válida.
     truncado: bool = False
+    #: O **raciocínio** virou laço (a mesma coisa repetida por dezenas de milhares de
+    #: caracteres) e o provedor cortou a leitura antes do fim. É diferente de `truncado`:
+    #: ali quem cortou foi o teto de tokens do modelo, aqui foi o vigia de repetição do Koda.
+    #: O laço usa isto para **dar um alô** ao modelo em vez de encerrar a rodada — matar o
+    #: pensamento à força tira dele a chance de responder o que já tinha.
+    repetiu: bool = False
 @dataclass(slots=True)
 class ToolStep:
     """Passo de ferramenta, o que fica gravado junto da mensagem."""

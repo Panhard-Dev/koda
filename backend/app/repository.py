@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .plan import ACCOUNT_DEFAULTS, PLAN
+from .plan import ACCOUNT_DEFAULTS
 from .schemas import (
     Account,
     AttachmentInfo,
@@ -89,6 +89,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         model=row["model"],
         elapsed_ms=row["elapsed_ms"],
         tokens=row["tokens"] if "tokens" in colunas else None,
+        tokens_total=row["tokens_total"] if "tokens_total" in colunas else None,
         contexto=row["contexto"] if "contexto" in colunas else None,
         at=row["at"],
         steps=passos,
@@ -127,13 +128,25 @@ def ensure_conversation(
     return target
 
 
-def append_message(conn: sqlite3.Connection, conversation_id: str, message: Message) -> None:
+def append_message(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    message: Message,
+    conta: str | None = None,
+) -> None:
+    """Grava a mensagem — e **de quem ela é**.
+
+    `conta` é o e-mail de quem estava logado. É o que separa o uso por conta: sem ela, o
+    tempo do dia e as moedas eram da máquina, e trocar de conta no mesmo PC continuava
+    mostrando o que a conta anterior tinha gasto.
+    """
     conn.execute(
         """
         INSERT INTO messages
           (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
-           contexto, at, steps, todos, incompleto, motivo, pendentes, executou, retomavel)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           tokens_total, contexto, at, steps, todos, incompleto, motivo, pendentes, executou,
+           retomavel, conta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -146,6 +159,7 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
             message.model,
             message.elapsed_ms,
             message.tokens,
+            message.tokens_total,
             message.contexto,
             message.at,
             json.dumps(
@@ -159,11 +173,42 @@ def append_message(conn: sqlite3.Connection, conversation_id: str, message: Mess
             json.dumps(message.pendentes, ensure_ascii=False),
             message.executou,
             1 if message.retomavel else 0,
+            conta,
         ),
     )
     conn.execute(
         "UPDATE conversations SET updated_at = ? WHERE id = ?",
         (message.at, conversation_id),
+    )
+
+
+def resumo_da_conversa(conn: sqlite3.Connection, conversation_id: str) -> tuple[str, int]:
+    """O resumo da compactação já guardado, e quantas mensagens antigas ele cobre.
+
+    Devolve `("", 0)` para conversa nova (ou inexistente) — que é o estado de «nada
+    resumido ainda».
+    """
+    row = conn.execute(
+        "SELECT resumo, resumo_mensagens FROM conversations WHERE id = ?", (conversation_id,)
+    ).fetchone()
+    if row is None:
+        return ("", 0)
+    return (str(row["resumo"] or ""), int(row["resumo_mensagens"] or 0))
+
+
+def salvar_resumo(
+    conn: sqlite3.Connection, conversation_id: str, resumo: str, cobertas: int
+) -> None:
+    """Guarda o resumo da compactação — e **quantas** mensagens antigas ele cobre.
+
+    É isto que faz a compactação acontecer **uma vez**. Sem guardar, ela era recalculada a
+    cada pedido, das mesmas mensagens: o mesmo resumo, o mesmo aviso na tela e o mesmo
+    trabalho repetido em toda resposta. No pedido seguinte o histórico começa depois de
+    `cobertas`, então o que já virou resumo não volta a virar.
+    """
+    conn.execute(
+        "UPDATE conversations SET resumo = ?, resumo_mensagens = ? WHERE id = ?",
+        (resumo or None, int(cobertas), conversation_id),
     )
 
 
@@ -219,6 +264,25 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> Conversa
     )
 
 
+def mensagens_da_conversa(
+    conn: sqlite3.Connection, conversation_id: str, desde: int = 0
+) -> list[Message]:
+    """As mensagens da conversa **a partir de `desde`** — e não todas.
+
+    Quem monta o prompt só precisa do que vem **depois** do que já virou resumo: o trecho
+    coberto nunca é reenviado. Ler a conversa inteira para usar só o rabo custava caro e
+    crescia com o tamanho dela — numa conversa de 2.000 mensagens eram ~460 ms **antes do
+    primeiro token**, a cada mensagem. Aqui o banco devolve só o que vai ser usado, e o
+    índice `idx_messages_conversation` faz o pulo das primeiras ser barato.
+    """
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY at ASC, rowid ASC "
+        "LIMIT -1 OFFSET ?",
+        (conversation_id, max(0, int(desde))),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
 def delete_conversation(conn: sqlite3.Connection, conversation_id: str) -> bool:
     cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
     return cursor.rowcount > 0
@@ -245,7 +309,11 @@ def _window_start_ms(now_ms: int, tz_offset_minutes: int, window: str) -> int:
 
 
 def _dias_com_uso(
-    conn: sqlite3.Connection, now_ms: int, tz_offset_minutes: int, dias: int = 365
+    conn: sqlite3.Connection,
+    now_ms: int,
+    tz_offset_minutes: int,
+    dias: int = 365,
+    conta: str | None = None,
 ) -> dict[str, int]:
     """Mensagens por dia **no relógio do cliente**, para o mapa de atividade.
 
@@ -253,6 +321,9 @@ def _dias_com_uso(
     máquina naquele dia. O dia sai do deslocamento do fuso que o cliente manda (o mesmo da
     cota diária), e não do UTC do servidor — senão a noite de quem usa cairia no dia
     seguinte e o mapa pareceria errado justamente em quem conversa tarde.
+
+    `conta` recorta o mapa para quem está logado: o que a outra conta conversou não é
+    atividade desta.
     """
     inicio = _window_start_ms(now_ms, tz_offset_minutes, "daily") - (dias - 1) * 86_400_000
     linhas = conn.execute(
@@ -260,42 +331,74 @@ def _dias_com_uso(
         SELECT strftime('%Y-%m-%d', (at - ?) / 1000, 'unixepoch') AS dia,
                COUNT(*) AS total
           FROM messages
-         WHERE at >= ?
+         WHERE at >= ? AND conta IS ?
          GROUP BY dia
         """,
-        (tz_offset_minutes * 60_000, inicio),
+        (tz_offset_minutes * 60_000, inicio, conta),
     ).fetchall()
     return {str(linha["dia"]): int(linha["total"]) for linha in linhas if linha["dia"]}
 
 
-def usage(conn: sqlite3.Connection, now_ms: int, tz_offset_minutes: int) -> Usage:
-    def count_since(start_ms: int) -> int:
-        row = conn.execute(
-            "SELECT COUNT(*) AS total FROM messages WHERE at >= ?", (start_ms,)
-        ).fetchone()
-        return int(row["total"])
+def usage(
+    conn: sqlite3.Connection,
+    now_ms: int,
+    tz_offset_minutes: int,
+    conta: str | None = None,
+) -> Usage:
+    """As cotas **da conta** — e não as da máquina.
 
+    `conta` é o e-mail de quem está logado, e é o recorte que faltava: o gasto pertence a
+    quem gastou. Sem ele, trocar de conta no mesmo PC continuava mostrando o tempo do dia e
+    as moedas da conta anterior — foi exatamente o que o dono viu.
+
+    Sem conta (ninguém logado) a resposta é **zero**, e não a soma de tudo o que já passou
+    por esta máquina: cota sem dono é cota de ninguém. `IS ?` (e não `= ?`) é o que faz a
+    comparação funcionar com `NULL`.
+    """
+
+    def janela(kind: str) -> UsageWindow:
+        inicio = _window_start_ms(now_ms, tz_offset_minutes, kind)
+
+        tempo = conn.execute(
+            "SELECT COALESCE(SUM(elapsed_ms), 0) AS ms FROM messages"
+            " WHERE at >= ? AND conta IS ?",
+            (inicio, conta),
+        ).fetchone()
+
+        # `tokens_total` e não `tokens`: é o **custo** — o que o provedor cobrou, com o contexto
+        # reenviado em cada passo. É dele que sai a conta das moedas na ficha da resposta, e é
+        # ele que tem de sair daqui também, senão a tela de uso e a ficha discordariam.
+        modelos = conn.execute(
+            "SELECT model, COALESCE(SUM(tokens_total), 0) AS tokens FROM messages"
+            " WHERE at >= ? AND model IS NOT NULL AND conta IS ?"
+            " GROUP BY model",
+            (inicio, conta),
+        ).fetchall()
+
+        return UsageWindow(
+            tempo_ms=int(tempo["ms"]),
+            tokens_por_modelo={
+                str(linha["model"]): int(linha["tokens"])
+                for linha in modelos
+                if int(linha["tokens"]) > 0
+            },
+        )
+
+    # As contagens também são da conta: a conversa entra se tem mensagem **dela**.
     totals = conn.execute(
-        "SELECT (SELECT COUNT(*) FROM messages) AS messages,"
-        "       (SELECT COUNT(*) FROM conversations) AS conversations"
+        "SELECT (SELECT COUNT(*) FROM messages WHERE conta IS ?) AS messages,"
+        "       (SELECT COUNT(DISTINCT conversation_id) FROM messages WHERE conta IS ?)"
+        "       AS conversations",
+        (conta, conta),
     ).fetchone()
 
     return Usage(
-        daily=UsageWindow(
-            used=count_since(_window_start_ms(now_ms, tz_offset_minutes, "daily")),
-            limit=PLAN.daily_messages,
-        ),
-        weekly=UsageWindow(
-            used=count_since(_window_start_ms(now_ms, tz_offset_minutes, "weekly")),
-            limit=PLAN.weekly_messages,
-        ),
-        monthly=UsageWindow(
-            used=count_since(_window_start_ms(now_ms, tz_offset_minutes, "monthly")),
-            limit=PLAN.monthly_messages,
-        ),
+        daily=janela("daily"),
+        weekly=janela("weekly"),
+        monthly=janela("monthly"),
         conversations=int(totals["conversations"]),
         messages=int(totals["messages"]),
-        dias=_dias_com_uso(conn, now_ms, tz_offset_minutes),
+        dias=_dias_com_uso(conn, now_ms, tz_offset_minutes, conta=conta),
     )
 
 

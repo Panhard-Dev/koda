@@ -1,5 +1,11 @@
 @import 'tailwindcss';
 
+/* Scrollbar para Firefox */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--koda-fg) 14%, transparent) transparent;
+}
+
 /*
  * Tokens semânticos. As utilidades (`bg-koda-bg`, `text-koda-fg/60`, …) apontam
  * para estas variáveis, então trocar `data-theme`/`data-accent`/`data-font` no
@@ -92,6 +98,33 @@ body {
   overflow: hidden;
 }
 
+/* Navegação suave para âncoras e scroll programático */
+html {
+  scroll-behavior: smooth;
+}
+
+/*
+ * Foco visível para navegação por teclado.
+ *
+ * **Dentro de `@layer base`, e isso não é detalhe de arrumação.** Regra sem camada ganha das
+ * utilities do Tailwind (camada vence fora de camada), então este `outline` estava vencendo o
+ * `focus:outline-none` do textarea da caixa de escrever — e o resultado era um **retângulo
+ * roxo em volta da área de escrever** sempre que ela recebia foco. Num `<textarea>` o
+ * navegador considera o foco «visível» até no clique, então o retângulo aparecia para quem
+ * nem usa teclado. O dono apontou e mandou tirar.
+ *
+ * Na camada certa, o padrão continua valendo para o que não declara foco próprio, e quem
+ * declara (as utilities `focus-visible:ring-…` dos componentes, o `focus:outline-none` da
+ * caixa) volta a mandar — que é como o app foi desenhado.
+ */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--koda-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
 @keyframes msg-in {
   from {
     opacity: 0;
@@ -176,6 +209,30 @@ body {
   animation-delay: 0.25s;
 }
 
+/*
+ * O visto da assinatura. É o **único** movimento do app que estoura de propósito: entra
+ * pequeno, passa do tamanho e volta. Todo o resto entra deslizando — e uma tela de
+ * «parabéns» que se comporta como as outras não parece parabéns.
+ */
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.pop {
+  animation: pop 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 @keyframes bar-grow {
   from {
     transform: scaleX(0);
@@ -221,15 +278,16 @@ body {
 
 @keyframes compact-shine {
   from {
-    transform: translateX(0);
+    transform: translateX(-100%);
   }
   to {
-    transform: translateX(560%);
+    transform: translateX(100%);
   }
 }
 
 .compact-shine {
   animation: compact-shine 1.5s cubic-bezier(0.5, 0, 0.5, 1) 0.2s both;
+  will-change: transform;
 }
 
 
@@ -257,16 +315,17 @@ body {
 /* Brilho que atravessa a coroa enquanto o Koda pensa. */
 @keyframes thinking-shine {
   from {
-    transform: translateX(0);
+    transform: translateX(-100%);
   }
   to {
-    transform: translateX(1130px);
+    transform: translateX(100%);
   }
 }
 
 .thinking-shine {
   fill: var(--koda-accent);
   animation: thinking-shine 1.5s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  will-change: transform;
 }
 
 /* Arco da ferramenta em execução. */
@@ -282,6 +341,29 @@ body {
 }
 
 /*
+ * O halo do presente no header: um brilho na cor de destaque, atrás do ícone, que respira.
+ * É o único do header que se mexe — os outros são atalhos de coisas que já estão à vista, e
+ * ele é a porta de uma que a pessoa ainda não viu. `currentColor` é o que faz o halo seguir
+ * o destaque escolhido em Aparência sem uma segunda variável para manter em dia.
+ */
+.presente-halo {
+  background: radial-gradient(circle at center, currentColor 0%, transparent 70%);
+  animation: presente-pulsa 2.8s ease-in-out infinite;
+}
+
+@keyframes presente-pulsa {
+  0%,
+  100% {
+    opacity: 0.14;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.32;
+    transform: scale(1.15);
+  }
+}
+
+/*
  * Reduzir animações é escolha explícita em Aparência. Não seguimos
  * `prefers-reduced-motion` sozinhos: em máquinas com "mostrar animações" desligado nas
  * configurações do Windows isso desligava o app inteiro sem o usuário pedir.
@@ -292,6 +374,13 @@ body {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+
+/* Alto contraste: reforça bordas e separadores para quem precisa */
+@media (prefers-contrast: high) {
+  * {
+    border-color: color-mix(in srgb, var(--koda-fg) 40%, transparent) !important;
+  }
 }
 
 *::-webkit-scrollbar {
@@ -312,6 +401,16 @@ body {
 }
 
 *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/*
+ * O canto onde a barra de baixo cruza com a da direita não é coberto pelo polegar nem pelo
+ * trilho: quem pinta ele é o navegador, e sem regra ele sai **branco puro**. Numa caixa escura
+ * isso não parece canto de barra — parece um quadrado aceso e um buraco no painel. É o único
+ * pedaço da barra que não estava desenhado aqui.
+ */
+*::-webkit-scrollbar-corner {
   background: transparent;
 }
 

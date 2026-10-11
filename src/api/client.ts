@@ -204,6 +204,17 @@ export type ApiMessage = {
    * passos e a ficha mostraria um número absurdo.
    */
   tokens: number | null
+  /**
+   * O **custo** da resposta, em tokens (soma de `total_tokens` dos passos).
+   *
+   * É o irmão de `tokens` e não o mesmo número: `tokens` é o tamanho do que a resposta
+   * escreveu, e este é o que o provedor cobra — várias vezes maior, porque cada passo reenvia
+   * o contexto inteiro. É dele que sai a conta das **moedas**.
+   *
+   * `null` nas mensagens gravadas antes desta coluna existir: a ficha não mostra o gasto, em
+   * vez de mostrar um número inventado.
+   */
+  tokens_total: number | null
   /** Contexto do último passo (tokens de entrada) — o medidor ao lado do modelo. */
   contexto: number | null
   at: number
@@ -238,7 +249,22 @@ export type ApiConversationSummary = {
 
 export type ApiConversation = ApiConversationSummary & { messages: ApiMessage[] }
 
-export type UsageWindow = { used: number; limit: number }
+/**
+ * O que a conta gastou numa janela — em tempo e em tokens.
+ *
+ * **Sem teto.** A tela de Uso mostra o uso; comparar com um limite de *mensagens* deixou de
+ * fazer sentido quando o plano passou a ser medido em horas e moedas.
+ *
+ * Os tokens vêm **por modelo** porque o preço é por modelo: juntar tudo num total e aplicar um
+ * preço só daria conta errada em qualquer conversa com dois modelos. Quem vira moeda é o
+ * `src/custo.ts` — a tabela de preços mora lá, e não deve ter segunda cópia no servidor.
+ */
+export type UsageWindow = {
+  /** Tempo que o agente **trabalhou**: a «hora» do plano. Conversa parada não consome. */
+  tempo_ms: number
+  /** Tokens **cobrados** por modelo (soma de `tokens_total`). */
+  tokens_por_modelo: Record<string, number>
+}
 
 export type ApiUsage = {
   daily: UsageWindow
@@ -976,6 +1002,13 @@ type StreamData = {
   delta: { text: string }
   /** O modelo pensando: vem antes do texto e pode durar minutos. Não é a resposta. */
   reasoning: { text: string }
+  /**
+   * Estado da rodada, **transitório**: o app está esperando (o provedor falhou e vai tentar
+   * de novo, ou respondeu vazio e o loop insiste). Não é fala do modelo, então não entra na
+   * conversa — aparece enquanto dura e some quando a rodada segue. Sem isto, uma espera longa
+   * era uma tela muda girando "trabalhando…" sem dizer por quê.
+   */
+  aviso: { text: string }
   tool_call: {
     id: string
     name: string
@@ -1040,6 +1073,8 @@ type StreamData = {
     resumable?: boolean
     /** O que a resposta escreveu (soma de `completion_tokens`); `null` se o provedor não conta. */
     tokens?: number | null
+    /** O custo da resposta em tokens — ver `Message.tokens_total`. */
+    tokens_total?: number | null
     /**
      * Contexto do último passo, em tokens de entrada — o medidor ao lado do modelo.
      *
@@ -1056,6 +1091,8 @@ export type StreamHandlers = {
   onDelta: (text: string) => void
   /** O modelo pensando, para a tela não ficar parada enquanto ele não escreve. */
   onReasoning?: (text: string) => void
+  /** A rodada está esperando — e diz por quê (transitório; ver `StreamData['aviso']`). */
+  onAviso?: (text: string) => void
   /** O modelo pediu uma ferramenta (antes de ela rodar). */
   onToolCall?: (data: StreamData['tool_call']) => void
   /** A ferramenta terminou, com a saída que voltou para o modelo. */
@@ -1120,6 +1157,7 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
       if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
       else if (event === 'delta') handlers.onDelta(String(parsed.text ?? ''))
       else if (event === 'reasoning') handlers.onReasoning?.(String(parsed.text ?? ''))
+      else if (event === 'aviso') handlers.onAviso?.(String(parsed.text ?? ''))
       else if (event === 'tool_call')
         handlers.onToolCall?.(parsed as unknown as StreamData['tool_call'])
       else if (event === 'tool_result')

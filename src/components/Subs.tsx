@@ -253,7 +253,6 @@ export default function Subs({
       ocupado: true,
       inicio: Date.now(),
       segundos: 0,
-      erroDaPermissao: null,
     })
 
     const controller = new AbortController()
@@ -356,7 +355,7 @@ export default function Subs({
   const parar = () => {
     pararAtual?.abort()
     pararAtual = null
-    mudar({ ocupado: false, pedido: null })
+    mudar({ ocupado: false })
   }
 
   const rotuloDoModelo =

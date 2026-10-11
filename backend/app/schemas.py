@@ -10,12 +10,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 Role = Literal["user", "assistant"]
 
 
-Effort = Literal["auto", "minimal", "low", "medium", "high"]
+Effort = Literal["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
 """Esforço de raciocínio escolhido no seletor ao lado do modelo.
 
 `auto` (padrão) deixa o botão Reasoning decidir; os outros valores vão como
 `reasoning_effort` para o provedor. Sem `none` de propósito: o host recusa esse valor em
 parte do catálogo (ver `providers/openai_compat.py`).
+
+`xhigh` e `max` entraram em 10/10/2026. O host publica os **sete** níveis para 6 dos 8
+modelos e o `NIVEIS_ESFORCO` daqui já os conhecia — só a API e o menu paravam em `high`,
+e o topo do catálogo ficava inalcançável pela interface. Modelo que não aceita o nível
+(o `layze-2` recusa `max`) é **arredondado** por `esforco_valido`, não recusado.
 """
 
 MAX_TEXTO = 100_000
@@ -173,6 +178,16 @@ class Message(BaseModel):
     `None` quando o provedor não conta (servidor local, provedor sem `usage`): a ficha da
     resposta simplesmente não mostra o uso, em vez de mostrar um zero mentiroso.
     """
+    tokens_total: int | None = None
+    """
+    O **custo** da resposta, em tokens: a soma de `total_tokens` dos passos.
+
+    É o número grande — cada passo reenvia o contexto inteiro, e é isso que o provedor cobra.
+    Ele não aparece como «tamanho» na ficha (para isso existe `tokens`), mas é dele que sai a
+    conta das **moedas**: é a única medida que corresponde ao que a resposta custou de verdade.
+
+    `None` nas mensagens gravadas antes desta coluna existir, e quando o provedor não conta.
+    """
     contexto: int | None = None
     """
     Tamanho do contexto no **último passo** da resposta, em tokens de entrada.
@@ -218,8 +233,33 @@ class Conversation(ConversationSummary):
 
 
 class UsageWindow(BaseModel):
-    used: int
-    limit: int
+    """
+    O que a pessoa gastou numa janela — em tempo e em tokens.
+
+    **Sem teto.** A tela mostra o uso; comparar com um limite de *mensagens* deixou de fazer
+    sentido quando o plano passou a ser medido em horas e moedas. Um teto que não é o que se
+    cobra é um número que confunde mais do que informa.
+    """
+
+    tempo_ms: int
+    """
+    Quanto tempo o agente **trabalhou** na janela (soma de `elapsed_ms`).
+
+    É a «hora» do plano: conversa parada na tela não consome nada, só resposta conta. Mensagem
+    de pessoa não entra — ela não tem `elapsed_ms`.
+    """
+
+    tokens_por_modelo: dict[str, int]
+    """
+    Tokens **cobrados** por modelo (soma de `tokens_total`).
+
+    Fica em tokens, e não em moedas, de propósito: a tabela que transforma token em moeda é uma
+    decisão de produto e mora num lugar só (`src/custo.ts`). O servidor ter uma segunda cópia
+    dela seria a garantia de que um dia os dois números divergem.
+
+    Por **modelo** e não num total porque o preço é por modelo: somar tokens de modelos
+    diferentes e aplicar um preço só daria um número errado em qualquer conta com dois modelos.
+    """
 
 
 class Usage(BaseModel):

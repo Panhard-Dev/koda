@@ -241,10 +241,7 @@ function Tabela({
   chave: string
 }) {
   return (
-    // `data-rolagem` diz à bancada visual que a rolagem lateral daqui é de propósito (uma
-    // tabela de dez colunas não pode esticar a resposta). Sem a marca, ela entra no relatório
-    // como se fosse defeito e a lista de problemas deixa de ser confiável.
-    <div data-rolagem="ok" className="overflow-x-auto rounded-xl ring-1 ring-koda-fg/8">
+    <div className="overflow-x-auto rounded-xl ring-1 ring-koda-fg/8">
       <table className="w-full border-collapse text-[12.5px]">
         <thead>
           <tr className="bg-koda-fg/5">

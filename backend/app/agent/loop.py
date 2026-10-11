@@ -264,7 +264,16 @@ EXIGIR_PLANO = (
 
 #: Quantas vezes o anúncio insistente é retomado por mensagem **interna** antes de o loop
 #: aceitar que o modelo não vai agir.
-MAX_RETOMADAS_ANUNCIO = 10
+#:
+#: Eram **10**, e o dono viu o que isso faz numa tela: o modelo degenera, anuncia o mesmo
+#: passo com outras palavras e a conversa vira **dez linhas iguais** antes de o loop desistir.
+#: Medido com a `nable-4-mini-preview` num contexto longo: ela devolve `finish_reason: stop`
+#: sem texto e sem chamada (o host responde 200 e vazio em ~1 s) — não é o app que perde a
+#: chamada, é o modelo que não a faz. Quem precisa de cutucão legítimo age no primeiro ou no
+#: segundo; do terceiro em diante já é degeneração, e o certo é **fechar a rodada** com o
+#: cartão de tarefa não concluída (que tem o botão Retomar) em vez de insistir na frente de
+#: quem está olhando.
+MAX_RETOMADAS_ANUNCIO = 3
 
 #: Quantas vezes o loop cobra execução antes de aceitar que o modelo só quis falar.
 MAX_COBRANCAS = 2
@@ -420,6 +429,31 @@ CONTINUAR_TRUNCADA = (
     "Continue exatamente do ponto em que parou; não repita ações que já foram executadas. "
     "Se algum pedido de ferramenta veio incompleto, envie novamente essa chamada com os "
     "argumentos completos. Não encerre a tarefa até concluir o pedido original."
+)
+
+#: O **alô** ao modelo quando o raciocínio dele entra em laço — a mesma coisa repetida por
+#: dezenas de milhares de caracteres. Em vez de encerrar a rodada, devolve-se a vez a ele com
+#: um cutucão: o trabalho estava em andamento, e o que ele já pensou pode bastar para
+#: responder. Matar o pensamento à força tirava dele essa chance.
+#:
+#: Medido: a `nable-4` repetiu **97 mil caracteres** da mesma coisa e não parou sozinha. O
+#: teto de tokens de saída (131 072) está longe demais para servir de freio — por isso o corte
+#: vem do vigia de repetição (`agent/repeticao.py`), e não do teto.
+ALO_DE_RACIOCINIO = (
+    "Você está repetindo o mesmo raciocínio em laço e o pensamento foi interrompido. Pare de "
+    "pensar e aja agora: se já tem o que precisa, escreva a resposta em texto; se precisa de "
+    "uma ferramenta, chame-a com os argumentos completos."
+)
+
+#: Quantos alôs antes de aceitar que o modelo não sai do laço sozinho. Baixo de propósito: um
+#: modelo que precisa do cutucão age no primeiro; do terceiro em diante já é degeneração, e
+#: insistir só gasta cota na frente de quem está olhando.
+MAX_ALOS_DE_RACIOCINIO = 3
+
+#: O que fica na tela quando o laço de raciocínio não cede aos alôs e a rodada é encerrada.
+AVISO_DE_RACIOCINIO_EM_LOOP = (
+    "_(o raciocínio do modelo entrou em repetição e a rodada foi interrompida — retome para "
+    "ele continuar)_"
 )
 
 #: A retomada pedida pelo **botão** da interface, e não por uma mensagem digitada.
@@ -1608,6 +1642,10 @@ PARADA_REPETICAO = "repeated_tool"
 #: O modelo degenerou em eco: o mesmo trecho repetido até gastar o orçamento de saída.
 #: Motivo próprio porque a resposta que sai é o aviso, não o eco — e a rodada é retomável.
 PARADA_LOOP_DE_TEXTO = "text_repetition"
+#: O **raciocínio** degenerou em repetição e o vigia cortou a leitura. Motivo próprio (e não
+#: `text_repetition`) porque o corte é nosso, acontece **antes** de o modelo escrever a
+#: resposta, e a rodada é retomável — o trabalho estava em andamento.
+PARADA_LOOP_DE_RACIOCINIO = "reasoning_repetition"
 PARADA_VAZIO = "empty_response"
 PARADA_PROVEDOR = "provider_error"
 PARADA_CONTEXTO = "context_overflow"
@@ -1897,6 +1935,8 @@ async def executar(
     completou = False
     motivo = ""
     vazias = 0
+    #: Quantos alôs de raciocínio em laço já foram dados nesta rodada (ver `ALO_DE_RACIOCINIO`).
+    alos = 0
     #: Quantas vezes o orçamento já foi reduzido por recusa de tamanho do provedor.
     reducoes = 0
     #: Passos seguidos com ferramenta e sem uma linha de texto. Chegando em
@@ -2152,6 +2192,23 @@ async def executar(
                 },
             )
 
+        if resultado.repetiu:
+            # O **raciocínio** virou laço e o provedor cortou a leitura (ver
+            # `VigiaDeRepeticao`). Não é o caso do `truncado` acima: ali o modelo gastou o
+            # orçamento escrevendo o eco; aqui ele não chegou a escrever — só repetiu o
+            # pensamento, e o texto do passo sai vazio. Por isso este teste vem **antes** do
+            # contador de respostas vazias: sem ele, um laço de raciocínio seria contado como
+            # "provedor devolvendo vazio" e a rodada morreria por um motivo errado.
+            alos += 1
+            if alos > MAX_ALOS_DE_RACIOCINIO:
+                motivo = PARADA_LOOP_DE_RACIOCINIO
+                texto_final = AVISO_DE_RACIOCINIO_EM_LOOP
+                await emit("delta", {"text": f"\n\n{AVISO_DE_RACIOCINIO_EM_LOOP}\n\n"})
+                break
+            # O alô: devolve a vez ao modelo, dizendo o que aconteceu e o que fazer agora.
+            historico.append({"role": "user", "content": ALO_DE_RACIOCINIO})
+            continue
+
         if not resultado.calls and not resultado.text.strip():
             if resultado.truncado:
                 # Alguns modelos gastam o orçamento pensando e devolvem conteúdo vazio com
@@ -2166,7 +2223,17 @@ async def executar(
             if vazias >= MAX_VAZIAS:
                 motivo = PARADA_VAZIO
                 break
-            if not await _esperar(min(ESPERA_BASE * vazias, 30.0), limite):
+            espera = min(ESPERA_BASE * vazias, 30.0)
+            # **A tela não pode ficar muda.** Sem este aviso, o provedor devolvendo vazio
+            # significava até `MAX_VAZIAS` esperas caladas (≈12 min com o teto de 30 s), com a
+            # linha de trabalho girando e nada dizendo por quê. O aviso é transitório: diz o
+            # que está acontecendo, quanto falta e que o Parar interrompe.
+            await _avisar_espera(
+                emit,
+                f"O provedor respondeu vazio — insistindo ({vazias}/{MAX_VAZIAS}) em "
+                f"{espera:.0f} s. O Parar interrompe.",
+            )
+            if not await _esperar(espera, limite):
                 motivo = PARADA_TEMPO
                 break
             historico.append({"role": "user", "content": CONTINUAR})
@@ -2616,7 +2683,10 @@ async def executar(
                 else:
                     sub_agentes_lancados += 1
                     saida = await subagente.executar(
-                        engine,
+                        # `modelo` é o provedor **deste** laço. Chamá-lo de `engine` aqui
+                        # era um nome que não existe nesta função — e o erro só aparece
+                        # quando a linha roda, não ao compilar.
+                        modelo,
                         settings or get_settings(),
                         nome=str(argumentos.get("agente", "")),
                         tarefa=str(argumentos.get("tarefa", "")),
@@ -2908,6 +2978,17 @@ async def _esperar(segundos: float, limite: float | None) -> bool:
     return True
 
 
+async def _avisar_espera(emit: Emit, texto: str) -> None:
+    """Diz na tela que a rodada está **esperando** — a tela nunca fica muda.
+
+    Vai como evento próprio (`aviso`), e **não** como `delta`: é estado da rodada, não fala
+    do modelo. Um `delta` entraria no texto gravado da mensagem, e uma espera de doze minutos
+    encheria a resposta de linhas de progresso. O `aviso` aparece enquanto dura e sai de cena
+    quando a rodada segue.
+    """
+    await emit("aviso", {"text": texto})
+
+
 async def _trocar_conta(modelo: ToolModel, emit: Emit, numero: int) -> bool:
     """Pede outra conta ao provedor, quando ele sabe fazer isso (proxy com painel de contas)."""
     rotacionar = getattr(modelo, "rotate", None)
@@ -3010,12 +3091,23 @@ async def _com_tentativas(
             if restantes > 0:
                 usadas = max(1, tentativas - restantes)
                 await _trocar_conta(modelo, emit, numero)
-                if not await _esperar(min(ESPERA_BASE * usadas, 10), limite):
+                espera = min(ESPERA_BASE * usadas, 10)
+                # A espera do retry também é avisada: sem isto ela era um silêncio de até 10 s
+                # por tentativa, com a tela girando sem dizer que o provedor tinha falhado.
+                await _avisar_espera(
+                    emit,
+                    f"O provedor falhou — tentando de novo em {espera:.0f} s "
+                    f"(restam {restantes}).",
+                )
+                if not await _esperar(espera, limite):
                     return None
                 continue
             if ultima_cartada:
                 ultima_cartada = False
                 restantes = 1
+                await _avisar_espera(
+                    emit, f"O provedor caiu — última tentativa em {espera_final:.0f} s."
+                )
                 if not await _esperar(espera_final, limite):
                     return None
                 continue

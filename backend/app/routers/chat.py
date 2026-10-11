@@ -9,6 +9,7 @@ Dois caminhos, escolhidos por `tools` no corpo:
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +28,15 @@ from ..deps import call, database, provider
 from ..identidade import regras as regras_identidade
 from ..identidade import remover_intro
 from ..providers import ChatOptions, ChatTurn, ProviderError, conteudo_do_turno, system_prompt
-from ..repository import append_message, ensure_conversation, get_conversation, new_id
+from ..repository import (
+    append_message,
+    ensure_conversation,
+    get_conversation,
+    mensagens_da_conversa,
+    new_id,
+    resumo_da_conversa,
+    salvar_resumo,
+)
 from ..repository import usage as usage_for
 from ..schemas import (
     ApprovalDecision,
@@ -43,7 +52,10 @@ from ..skills import SkillStore
 from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas, registry
 from ..agent.loop import (
+    ALO_DE_RACIOCINIO,
+    AVISO_DE_RACIOCINIO_EM_LOOP,
     CONTINUAR_TRUNCADA,
+    MAX_ALOS_DE_RACIOCINIO,
     PARADA_ABORTADA,
     PARADA_PROVEDOR,
     RETOMAR_TAREFA,
@@ -143,9 +155,18 @@ async def _texto(
     store = _store_de_anexos(request)
     anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
     visao = _visao_ativa(request.app.state.settings, payload.model, anexos_do_pedido)
-    conversation_id, turns = await call(_prepare, db, store, payload, now_ms(), visao)
-    resumo, turns, compactados = contexto.compactar_turnos(
-        turns, request.app.state.settings.contexto_tokens
+    conversation_id, turns, origens, resumo_guardado, cobertas = await call(
+        _prepare, db, store, payload, now_ms(), visao
+    )
+    resumo, turns, compactados = await call(
+        _compactar_e_guardar,
+        db,
+        conversation_id,
+        turns,
+        origens,
+        resumo_guardado,
+        cobertas,
+        request.app.state.settings.contexto_tokens,
     )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": False})
 
@@ -171,9 +192,12 @@ async def _texto(
         pieces.append(nota)
         yield sse("delta", {"text": nota})
     try:
+        #: Quantos alôs de raciocínio em laço já foram dados (ver `ALO_DE_RACIOCINIO`).
+        alos = 0
         while True:
             trecho: list[str] = []
             truncado = False
+            repetiu = False
             async for piece in engine.stream(turns, options):
                 # Rodapé do stream: traz os tokens, não é texto nem raciocínio.
                 if piece.usage is not None:
@@ -181,6 +205,10 @@ async def _texto(
                     continue
                 if piece.truncated:
                     truncado = True
+                    continue
+                # O raciocínio virou laço e o provedor cortou a leitura (ver `Piece.repetiu`).
+                if piece.repetiu:
+                    repetiu = True
                     continue
                 if piece.reasoning:
                     # O raciocínio não é a resposta: vai para a tela para o usuário acompanhar o
@@ -190,6 +218,20 @@ async def _texto(
                 trecho.append(piece.text)
                 pieces.append(piece.text)
                 yield sse("delta", {"text": piece.text})
+            if repetiu:
+                # O mesmo tratamento do modo agente (ver `loop.py`): dá o alô e devolve a vez,
+                # em vez de encerrar a rodada por um pensamento que não parou.
+                alos += 1
+                if alos > MAX_ALOS_DE_RACIOCINIO:
+                    aviso = f"\n\n{AVISO_DE_RACIOCINIO_EM_LOOP}\n\n"
+                    pieces.append(aviso)
+                    yield sse("delta", {"text": aviso})
+                    break
+                texto_parcial = "".join(trecho)
+                if texto_parcial:
+                    turns.append(ChatTurn(role="assistant", text=texto_parcial))
+                turns.append(ChatTurn(role="user", text=ALO_DE_RACIOCINIO))
+                continue
             if not truncado:
                 break
             texto_parcial = "".join(trecho)
@@ -213,6 +255,8 @@ async def _texto(
             _tokens(uso),
             None,
             int(uso.get("prompt_tokens", 0) or 0) or None,
+            # O custo vai junto porque é dele que sai a conta das moedas na ficha.
+            tokens_total=_custo_tokens(uso),
         )
         stored = True
         yield sse(
@@ -271,12 +315,23 @@ async def _agente(
     store = _store_de_anexos(request)
     anexos_do_pedido = await call(store.buscar_varios, payload.attachments)
     visao = _visao_ativa(settings, payload.model, anexos_do_pedido)
-    conversation_id, turns = await call(_prepare, db, store, payload, now_ms(), visao)
+    conversation_id, turns, origens, resumo_guardado, cobertas = await call(
+        _prepare, db, store, payload, now_ms(), visao
+    )
     # Conversa longa: o que é antigo vira resumo no prompt de sistema, em vez de sair do
     # pedido inteiro. Sem isso, uma conversa de projeto grande estoura o contexto e a
     # tarefa morre no meio, com erro do provedor que nem parece ter a ver com o trabalho.
-    resumo, turns, compactados = contexto.compactar_turnos(
-        turns, settings.contexto_tokens
+    # O resumo fica **guardado na conversa**: compacta uma vez, e só de novo quando o que
+    # sobrou encher o orçamento outra vez.
+    resumo, turns, compactados = await call(
+        _compactar_e_guardar,
+        db,
+        conversation_id,
+        turns,
+        origens,
+        resumo_guardado,
+        cobertas,
+        settings.contexto_tokens,
     )
     yield sse("start", {"conversation_id": conversation_id, "at": now_ms(), "tools": True})
 
@@ -470,6 +525,12 @@ async def _agente(
             resultado.pendentes,
             resultado.executou,
             resultado.retomavel,
+            # O **custo** vai por nome, no fim da assinatura: é dele que sai a conta das moedas —
+            # na ficha da resposta e na tela de Uso. Sem esta linha as duas mostravam zero, e o
+            # `_tokens` acima (que é o **tamanho** da resposta) não serve para conta nenhuma.
+            # Por nome e não por posição de propósito: quinze argumentos posicionais é onde um
+            # dia alguém troca dois de lugar sem perceber.
+            tokens_total=_custo_tokens(resultado.uso),
         )
         stored = True
         yield sse(
@@ -490,6 +551,10 @@ async def _agente(
                 "executed": resultado.executou,
                 "resumable": resultado.retomavel,
                 "tokens": message.tokens,
+                # O custo da resposta, para a ficha dizer quantas moedas ela gastou. Vai em
+                # separado de `tokens` porque são números diferentes: um é o tamanho, o outro
+                # é a conta.
+                "tokens_total": message.tokens_total,
                 # O medidor de contexto ao lado do modelo lê daqui, sem recarregar nada.
                 "contexto": resultado.contexto or None,
                 "usage": await call(_usage, db, payload.tz_offset_minutes),
@@ -559,6 +624,10 @@ async def _agente(
                     # Retomável nos dois casos: o trabalho parou, mas o pedido continua de
                     # pé. Só o contexto estourado é que não volta a caber.
                     True,
+                    # O custo entra **também aqui**: a resposta parou no meio, mas o que já foi
+                    # respondido foi cobrado do mesmo jeito. Uma gravação sem ele viraria uso
+                    # não contado.
+                    tokens_total=_custo_tokens(resultado.uso),
                 )
 
 
@@ -576,6 +645,57 @@ def _pendentes_do_plano(plano: list[dict[str, object]]) -> list[str]:
         and not item.get("feito")
         and str(item.get("texto") or "").strip()
     ]
+
+
+def _compactar_e_guardar(
+    db: Database,
+    conversation_id: str,
+    turns: list[ChatTurn],
+    origens: list[int],
+    resumo_guardado: str,
+    cobertas: int,
+    orcamento: int,
+) -> tuple[str, list[ChatTurn], int]:
+    """Compacta o histórico **e guarda o resultado na conversa**.
+
+    É o que faz a compactação acontecer **uma vez**. Antes, ela era recalculada a cada
+    pedido, das mesmas mensagens antigas: o mesmo resumo, o mesmo aviso na tela e o mesmo
+    trabalho repetido em toda resposta. Agora o resumo (o de antes mais o que acabou de
+    sair) e o número de mensagens cobertas ficam gravados na conversa, e o pedido seguinte
+    já começa depois delas — só voltando a compactar quando o que sobrou encher de novo.
+
+    `origens` é o mapa turno→mensagem que vem do `_turns`: é por ele que os **turnos** que
+    a compactação corta viram **mensagens** cobertas, que é a unidade que fica guardada.
+
+    Devolve `(resumo_do_prompt, turnos, quantas_mensagens_saíram)` — o terceiro é o que a
+    nota da tela mostra, em **mensagens** (não em turnos), e é **zero** quando não houve
+    compactação nova (e aí não há nota).
+    """
+    resumo_novo, turns, compactados = contexto.compactar_turnos(turns, orcamento)
+    if not compactados:
+        return (resumo_guardado, turns, 0)
+
+    # `compactar_turnos` conta **turnos**; o que fica guardado é índice de **mensagem** — e os
+    # dois números não batem (uma resposta com ferramenta vira vários turnos, uma apresentação
+    # não vira nenhum). A conversão é pelo `origens`: o primeiro turno que **ficou** aponta
+    # para a primeira mensagem ainda não coberta; tudo antes dela saiu inteiro. Sem isto, o
+    # pedido seguinte fatiava `mensagens` contando turnos como se fossem mensagens e pulava
+    # conversa de verdade — o resumo cobria mais do que devia, em silêncio.
+    if compactados < len(origens):
+        novas = origens[compactados]
+    else:
+        novas = origens[-1] + 1 if origens else 0
+    if novas <= 0:
+        # O corte caiu **dentro** de uma mesma mensagem (a chamada saiu, o resultado ficou):
+        # nenhuma mensagem inteira virou resumo, então não há o que guardar — nem nota a dar.
+        return (resumo_guardado, turns, 0)
+
+    junto = "\n\n".join(
+        parte.strip() for parte in (resumo_guardado, resumo_novo) if parte and parte.strip()
+    )
+    with db.connect() as conn:
+        salvar_resumo(conn, conversation_id, junto, cobertas + novas)
+    return (junto, turns, novas)
 
 
 def _nota_de_compactacao(compactados: int) -> str:
@@ -690,10 +810,10 @@ def _visao_ativa(settings: Settings, model: str, do_pedido: list[anexos.Anexo]) 
     caso, o anexo segue pelos metadados, como sempre foi.
 
     Quem decide é a **lista curada** do `Settings`, e **não** o `images` do catálogo do
-    host: medido, o host anuncia `images: true` para o `liz-nano` e o upstream por trás
-    responde 400 («model "mai-experimental" not supported for vision»). Mandar imagem para
-    quem o host diz que enxerga, mas o upstream não, derruba o pedido inteiro — a lista é
-    medida e vence.
+    host: a lista é medida contra o upstream, e mandar imagem para quem não enxerga derruba
+    o pedido inteiro. Ela já esteve errada nos dois sentidos — medição de 10/10/2026 mostrou
+    que o `liz-nano` e o `nable-4` enxergam, e o comentário que os excluía citava um id
+    (`mai-experimental`) que o host não usa mais.
     """
     return settings.aceita_imagem(model) and any(item.imagem for item in do_pedido)
 
@@ -718,7 +838,7 @@ def _prepare(
     payload: ChatRequest,
     at_ms: int,
     visao: bool = False,
-) -> tuple[str, list[ChatTurn]]:
+) -> tuple[str, list[ChatTurn], list[int], str, int]:
     """Grava a mensagem do usuário e monta o histórico que vai ao provedor.
 
     Os ids dos anexos são resolvidos no store **uma vez**, aqui: o que fica gravado na
@@ -729,6 +849,12 @@ def _prepare(
     `visao` diz se as imagens do histórico devem ir **no corpo** do pedido (data URL). É
     decisão do modelo escolhido, e vale para o histórico inteiro: uma imagem enviada três
     turnos atrás continua à vista enquanto o modelo que a viu estiver respondendo.
+
+    Devolve também o **resumo guardado**, quantas mensagens antigas ele cobre, e o mapa
+    `origens` (a mensagem do banco por trás de cada turno): o histórico montado já começa
+    **depois** delas. É o que faz a compactação acontecer uma vez — sem isso, as mesmas
+    mensagens antigas voltavam a ser resumidas em todo pedido. O `origens` é o que permite
+    converter, de volta, os turnos que a compactação cortar em **mensagens** cobertas.
     """
     # Retomar pelo **botão**: a rodada anterior não terminou e a pessoa quer que o agente
     # siga de onde parou. Não é uma mensagem dela — nada é gravado como turno de usuário.
@@ -738,14 +864,19 @@ def _prepare(
     if payload.resume:
         assert payload.conversation_id  # validado na rota, antes do stream começar
         with db.connect() as conn:
-            conversa = get_conversation(conn, payload.conversation_id)
-        if conversa is None or not conversa.messages:
+            resumo, cobertas = resumo_da_conversa(conn, payload.conversation_id)
+            # Só o trecho **depois** do resumo: o que já virou resumo não é reenviado.
+            mensagens = mensagens_da_conversa(conn, payload.conversation_id, cobertas)
+        if not mensagens and not cobertas:
             # Inalcançável pela rota (a checagem é feita antes do stream): se acontecer, a
             # conversa sumiu entre a checagem e a montagem do histórico.
             raise LookupError("não há conversa para retomar")
-        turns = _turns(conversa.messages, store, visao)
+        turns, origens = _turns(mensagens, store, visao)
         turns.append(ChatTurn(role="user", text=RETOMAR_TAREFA))
-        return payload.conversation_id, turns
+        # O turno do «retomar» não vem do banco: fica **depois** de tudo, para que a conta de
+        # mensagens cobertas nunca o inclua.
+        origens.append(origens[-1] + 1 if origens else 0)
+        return payload.conversation_id, turns, origens, resumo, cobertas
 
     do_pedido = store.buscar_varios(payload.attachments)
     semente = payload.text or (do_pedido[0].nome if do_pedido else "")
@@ -767,11 +898,18 @@ def _prepare(
                 model=payload.model,
                 at=at_ms,
             ),
+            host_auth.email_da_conta(),
         )
-        # Já com a mensagem recém-gravada, para o provider ter o contexto todo.
-        conversation = get_conversation(conn, conversation_id)
-        turns = _turns(conversation.messages if conversation else [], store, visao)
-    return conversation_id, turns
+        # Já com a mensagem recém-gravada, para o provider ter o contexto todo. E **só o
+        # trecho que vai ao provedor**: o que o resumo já cobre não é lido nem reenviado.
+        # Ler a conversa inteira para usar o rabo custava ~460 ms, por mensagem, numa
+        # conversa de 2.000 — tudo antes do primeiro token.
+        resumo, cobertas = resumo_da_conversa(conn, conversation_id)
+        # O histórico começa **depois** do que o resumo já cobre: é isto que impede a
+        # compactação de resumir de novo, em todo pedido, o que já foi resumido.
+        mensagens = mensagens_da_conversa(conn, conversation_id, cobertas)
+        turns, origens = _turns(mensagens, store, visao)
+    return conversation_id, turns, origens, resumo, cobertas
 
 
 def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo], visao: bool = False) -> str:
@@ -834,7 +972,7 @@ def _turns(
     mensagens: list[Message],
     store: anexos.AnexoStore | None = None,
     visao: bool = False,
-) -> list[ChatTurn]:
+) -> tuple[list[ChatTurn], list[int]]:
     """Histórico para o provedor, sem as apresentações que ficaram gravadas.
 
     O modelo aprende pelo próprio histórico: uma resposta antiga começando com "oii, eu
@@ -847,9 +985,17 @@ def _turns(
 
     Com `visao` e o store à mão, as imagens do turno vão **também** como `image_url` no
     corpo do pedido: é o que faz o modelo ver a foto em vez de ler a descrição dela.
+
+    Devolve também, lado a lado, **de qual mensagem do banco veio cada turno**: `origens[i]`
+    é o índice de `mensagens` que produziu `turns[i]`. Os dois números **não** batem — uma
+    mensagem só de apresentação não vira turno, e uma resposta que usou ferramenta vira
+    vários (a chamada e um `tool` por resultado). Quem fatia o histórico pelo que já virou
+    resumo precisa dessa correspondência: contar turnos como se fossem mensagens corta a
+    conversa no lugar errado.
     """
     turns: list[ChatTurn] = []
-    for item in mensagens:
+    origens: list[int] = []
+    for posicao, item in enumerate(mensagens):
         texto = remover_intro(item.text) if item.role == "assistant" else item.text
         bloco = _bloco_de_anexos(item.attachments, visao) if item.role == "user" else ""
         corpo = texto.strip()
@@ -857,6 +1003,37 @@ def _turns(
             corpo = f"{corpo}\n\n{bloco}" if corpo else bloco
         if not corpo:
             # Mensagem que era só apresentação: melhor sair do histórico do que ir vazia.
+            # **Menos** quando houve ferramenta: aí o turno não é fala, é a chamada, e
+            # descartá-lo apagaria justamente o exemplo que o modelo precisa ver.
+            if not (item.role == "assistant" and item.steps):
+                continue
+        # Resposta que usou ferramenta volta **com as chamadas**, e cada resultado como um
+        # turno `tool` que aponta para a dele. É o que faz o histórico reaberto parecer uma
+        # conversa que agiu; sem isso o modelo vê só as próprias falas e aprende com elas a
+        # **narrar em vez de chamar** — o defeito que só aparecia depois de alguns pedidos na
+        # mesma conversa, porque é a repetição do exemplo ruim que ensina.
+        if item.role == "assistant" and item.steps:
+            chamadas = [
+                {
+                    "id": passo.call_id or f"call_{indice}",
+                    "type": "function",
+                    "function": {
+                        "name": passo.name,
+                        # A chamada **como o modelo a escreveu** quando existe: é ela que o
+                        # host reconhece. Sem ela, o dicionário de volta em JSON.
+                        "arguments": passo.raw_arguments
+                        or json.dumps(passo.arguments, ensure_ascii=False),
+                    },
+                }
+                for indice, passo in enumerate(item.steps)
+            ]
+            turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas))
+            origens.append(posicao)
+            turns += [
+                ChatTurn(role="tool", text=passo.output or "", chamada_id=chamadas[indice]["id"])
+                for indice, passo in enumerate(item.steps)
+            ]
+            origens += [posicao] * len(item.steps)
             continue
         imagens = (
             _imagens_do_turno(item.attachments, store)
@@ -864,7 +1041,8 @@ def _turns(
             else []
         )
         turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens))
-    return turns
+        origens.append(posicao)
+    return turns, origens
 
 
 def _tokens(uso: dict[str, Any]) -> int | None:
@@ -878,6 +1056,20 @@ def _tokens(uso: dict[str, Any]) -> int | None:
     dela, não da conta) ele só confundia. `None` quando o provedor não conta.
     """
     return int(uso.get("completion_tokens") or 0) or None
+
+
+def _custo_tokens(uso: dict[str, Any]) -> int | None:
+    """O que a resposta **custou**: a soma de `total_tokens` dos passos.
+
+    É o irmão de `_tokens`, e a diferença entre os dois é o motivo de existirem separados. O
+    `_tokens` mede o tamanho do que a resposta escreveu; este mede o que ela custou — e como
+    cada passo reenvia o contexto inteiro, o custo é várias vezes o tamanho. O número grande
+    não serve para a ficha («o tamanho da resposta»), mas é o único que serve para a conta das
+    moedas, porque é o que o provedor cobra.
+
+    `None` quando o provedor não conta.
+    """
+    return int(uso.get("total_tokens") or 0) or None
 
 
 def _store(
@@ -895,6 +1087,9 @@ def _store(
     pendentes: list[str] | None = None,
     executou: int = 0,
     retomavel: bool = True,
+    # No **fim** da assinatura de propósito: as chamadas existentes passam os primeiros por
+    # posição, e um parâmetro novo no meio mudaria o significado delas em silêncio.
+    tokens_total: int | None = None,
 ) -> Message:
     """Grava a resposta.
 
@@ -909,6 +1104,7 @@ def _store(
         model=model,
         elapsed_ms=elapsed_ms,
         tokens=tokens,
+        tokens_total=tokens_total,
         contexto=contexto,
         at=now_ms(),
         steps=steps,
@@ -920,10 +1116,12 @@ def _store(
         retomavel=retomavel,
     )
     with db.connect() as conn:
-        append_message(conn, conversation_id, message)
+        append_message(conn, conversation_id, message, host_auth.email_da_conta())
     return message
 
 
 def _usage(db: Database, tz_offset_minutes: int) -> dict[str, object]:
     with db.connect() as conn:
-        return usage_for(conn, now_ms(), tz_offset_minutes).model_dump()
+        return usage_for(
+            conn, now_ms(), tz_offset_minutes, host_auth.email_da_conta()
+        ).model_dump()

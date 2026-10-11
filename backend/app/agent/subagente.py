@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import mcp, subagentes
 from ..config import Settings
+from ..limits import LIMITES
 from ..skills import SkillStore
 
 if TYPE_CHECKING:  # pragma: no cover — só para os tipos
@@ -39,8 +40,14 @@ if TYPE_CHECKING:  # pragma: no cover — só para os tipos
 #: divergirem — quem oferece e quem despacha leem a mesma constante.
 FERRAMENTA = "sub_agente"
 
-#: Teto de requisições ao provedor, **por segundo**, de cada sub-agente.
-REQUISICOES_POR_SEGUNDO = 30
+# O teto de requisições do sub-agente, **por segundo**, mora no `LIMITES`
+# (`requisicoes_por_segundo_sub`) e é lido na hora de montar o contador — não numa constante
+# deste módulo: constante de módulo guarda o valor do dia do import, e um ajuste na subida
+# passaria a valer só em quem lê pelo módulo.
+#
+# Ele não substitui o teto de **minuto do app inteiro**: os dois valem ao mesmo tempo, e é de
+# propósito. O RPS segura um sub-agente sozinho; o RPM segura o conjunto — inclusive vários
+# chats abertos.
 
 #: Teto de sub-agentes lançados numa mesma rodada do principal.
 #:
@@ -284,7 +291,7 @@ async def executar(
     ]
 
     resultado: Resultado = await rodar(
-        _ModeloContado(engine, REQUISICOES_POR_SEGUNDO),
+        _ModeloContado(engine, LIMITES.requisicoes_por_segundo_sub),
         mensagens,
         workspace=workspace,
         max_steps=settings.max_steps,

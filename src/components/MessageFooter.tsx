@@ -2,8 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, Clock, Coins, Copy, RotateCcw, ThumbsDown, ThumbsUp } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { formatarDuracao } from '../duracao'
+import MoedaKoda from './MoedaKoda'
+import { moedasDeTokens } from '../custo'
 
 /** Tokens em número curto: `870`, `9,2K`, `1,4M` (a ficha não é lugar de número comprido). */
+/**
+ * As moedas como se lê: inteiro quando é inteiro, uma casa quando tem fração.
+ *
+ * A fração existe de verdade — uma conversa no modelo médio custa 1,5 moeda —, e arredondar
+ * para cima faria a ficha cobrar mais do que a conta. `toFixed` com vírgula porque é pt-BR.
+ */
+const formatarMoedas = (moedas: number): string =>
+  Number.isInteger(moedas) ? `${moedas}` : moedas.toFixed(1).replace('.', ',')
+
 const formatarTokens = (tokens: number): string => {
   if (tokens < 1000) return `${tokens}`
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1).replace('.', ',')}K`
@@ -101,6 +112,8 @@ function Marca({ titulo, children }: { titulo: string; children: ReactNode }) {
 export default function MessageFooter({
   texto,
   tokens = null,
+  tokensTotal = null,
+  modelo = null,
   elapsedMs = null,
   at,
   numeros = true,
@@ -115,6 +128,16 @@ export default function MessageFooter({
    * número que parecia impossível (ver `_tokens` no backend).
    */
   tokens?: number | null
+  /**
+   * O que a resposta **custou**, em tokens (soma de `total_tokens` dos passos).
+   *
+   * Não é o mesmo que `tokens`, e é de propósito: `tokens` mede o tamanho do que a resposta
+   * escreveu, este mede o que o provedor cobrou — várias vezes maior, porque cada passo
+   * reenvia o contexto inteiro. Só este serve para a conta das moedas.
+   */
+  tokensTotal?: number | null
+  /** O modelo que respondeu — é ele que diz quanto o token custa em moedas. */
+  modelo?: string | null
   elapsedMs?: number | null
   /** Quando a resposta entrou na conversa (hora mostrada na ficha). */
   at: number
@@ -128,6 +151,12 @@ export default function MessageFooter({
   const [copiado, setCopiado] = useState(false)
   const [voto, setVoto] = useState<'bom' | 'ruim' | null>(null)
   const timer = useRef<number | null>(null)
+
+  // O gasto desta resposta, em moedas. `null` quando não dá para saber — mensagem gravada
+  // antes de o custo existir, ou provedor que não conta —, e aí a ficha não mostra o gasto em
+  // vez de mostrar um zero que mente.
+  const moedas =
+    tokensTotal !== null && modelo ? moedasDeTokens(tokensTotal, modelo) : null
 
   useEffect(
     () => () => {
@@ -189,6 +218,18 @@ export default function MessageFooter({
             <Marca titulo={`${tokens.toLocaleString('pt-BR')} tokens escritos nesta resposta`}>
               <Coins className="h-3.5 w-3.5" strokeWidth={1.7} />
               <span className="tabular-nums">{formatarTokens(tokens)} tok</span>
+            </Marca>
+          ) : null}
+
+          {/* O gasto em moedas, e não o tamanho: é a conta, e é o que a pessoa quer saber
+              depois de uma resposta que trabalhou. O `title` mostra os tokens cobrados crus,
+              porque um número que vira dinheiro tem de poder ser conferido. */}
+          {moedas !== null ? (
+            <Marca
+              titulo={`${(tokensTotal ?? 0).toLocaleString('pt-BR')} tokens cobrados · ${modelo}`}
+            >
+              <MoedaKoda className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{formatarMoedas(moedas)} moedas</span>
             </Marca>
           ) : null}
 

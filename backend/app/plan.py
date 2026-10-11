@@ -1,7 +1,8 @@
 """Régua do plano e dados padrão da conta.
 
-Estes números são os mesmos que a interface mostra em Uso — quando mudarem aqui,
-mude `src/plan.ts` também para a tela continuar coerente.
+Só o **nome** do plano mora aqui agora. Os tetos de mensagens (20/dia, 100/semana, 300/mês)
+saíram: a tela de Uso passou a mostrar **tempo gasto e tokens**, sem comparar com teto — e um
+teto de mensagens que não é o que se cobra é um número que confunde mais do que informa.
 """
 
 from __future__ import annotations
@@ -12,12 +13,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class Plan:
     name: str
-    daily_messages: int
-    weekly_messages: int
-    monthly_messages: int
 
 
-PLAN = Plan(name="Free", daily_messages=20, weekly_messages=100, monthly_messages=300)
+PLAN = Plan(name="Free")
 
 ACCOUNT_DEFAULTS = {
     # Sem nome de fábrica: quem dá nome à conta é o painel, no login. Se este campo

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, ClipboardEvent, ReactNode } from 'react'
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   BrainCircuit,
   ChevronDown,
@@ -26,6 +28,8 @@ import Menu from './Menu'
 import type { MenuOption } from './Menu'
 import ApprovalCard from './ApprovalCard'
 import MoedaKoda from './MoedaKoda'
+import { tempoEmTexto, useSegundosDoDia } from '../tempo'
+import { PLANO_FREE, moedasEmTexto } from '../plano'
 import ContextRing from './ContextRing'
 import { EFFORT_MENU, EFFORT_PADRAO, effortDoModelo, effortLabel } from '../effort'
 import type { Effort } from '../effort'
@@ -114,6 +118,24 @@ const PLUS_ACTIONS = [
     icon: <Paperclip className="h-4 w-4" strokeWidth={1.7} />,
   },
 ]
+
+/**
+ * As duas contas da aba — e são **coisas diferentes**, não a mesma em duas formas.
+ *
+ * - **Cheia (`03:00:00`)** — o tempo do dia. Cada plano dá um tanto de horas por dia, a
+ *   contagem volta ao começo à meia-noite, e ela **só anda enquanto o agente trabalha** (quem
+ *   conta é `../tempo`, e não este arquivo). É o que a pessoa gasta primeiro.
+ * - **Curta (`0100`)** — as **moedas**, que são do **mês de calendário** (o tempo é do dia — os
+ *   períodos não são iguais). Elas viram à meia-noite do dia 1º, a mesma virada para todo
+ *   mundo, e entram quando o tempo do dia acaba: são o que segura a conversa depois disso. É por isso que a moeda do Koda fica ao lado do número: ele é o saldo dela.
+ *
+ * O controle das setas troca **qual das duas** está à vista. Tratá-las como o mesmo número
+ * desenhado de dois jeitos estava errado, e é o erro que este comentário existe para não
+ * deixar voltar.
+ *
+ * Os números vêm do plano (`../plano`), e não daqui: os mesmos aparecem na ficha do plano, e
+ * duas cópias deles divergiriam.
+ */
 
 /**
  * O menu do "/" vive em `../comandos` (dado puro, testável sem React): aqui só entra o que
@@ -207,6 +229,7 @@ export function Composer({
   modelosBloqueados = [],
   contextoPorModelo = {},
   contextoJanela = null,
+  moedas = null,
   agentes = [],
   skills = [],
   mcps = [],
@@ -247,6 +270,14 @@ export function Composer({
   contextoPorModelo?: Record<string, number>
   /** Teto de contexto (a janela) que o backend aplica — o denominador do anel. */
   contextoJanela?: number | null
+  /**
+   * As moedas **do plano da conta** — o número da aba no modo curto.
+   *
+   * Vem da conta, e não de uma constante: enquanto o Free era o único plano, o número era o
+   * dele, e quem assinava o Plus continuava vendo as 100 do Free. `null` (conta sem plano, ou
+   * sonda de sessão que ainda não respondeu) cai na constante do Free, que é o degrau de baixo.
+   */
+  moedas?: number | null
   /** Sub-agentes, skills e MCPs: o que o menu do `@` pode marcar. */
   agentes?: ApiAgente[]
   skills?: ApiSkill[]
@@ -266,6 +297,10 @@ export function Composer({
   const [comandoAtivo, setComandoAtivo] = useState(0)
   /** Esc fechou o menu: ele só volta quando o texto mudar. */
   const [menuFechado, setMenuFechado] = useState(false)
+  /** A aba está mostrando as moedas (`0100`) em vez do tempo do dia (`03:00:00`). */
+  const [compacto, setCompacto] = useState(false)
+  /** O tempo do dia que ainda resta — quem faz ele andar é o App (ver `../tempo`). */
+  const segundosDoDia = useSegundosDoDia()
   /** O mesmo par do menu do "/", para o menu do "@". */
   const [mencaoAtiva, setMencaoAtiva] = useState(0)
   const [menuDeMencoesFechado, setMenuDeMencoesFechado] = useState(false)
@@ -626,9 +661,14 @@ export function Composer({
           style={{ filter: 'drop-shadow(0 30px 60px var(--koda-shadow))' }}
           aria-hidden="true"
         >
+          {/* A borda da caixa **não muda com o foco**. Havia aqui um realce no
+              `focus-within` — roxo, depois neutro —, e o dono apontou: «essa borda roxa que
+              não pedi pra colocar». Ele está certo: o sinal de foco da caixa é o cursor
+              piscando dentro dela, e uma silhueta deste tamanho acendendo em volta vira
+              contorno pesado em vez de aviso. Fica a borda de sempre. */}
           <path
             ref={pathRef}
-            className="fill-koda-input stroke-koda-fg/10 transition-[stroke] duration-150 group-focus-within:stroke-koda-accent/40"
+            className="fill-koda-input stroke-koda-fg/10"
             strokeWidth={1}
           />
         </svg>
@@ -636,10 +676,46 @@ export function Composer({
         {/* A aba: a moeda do Koda e, ao lado, o tempo da conversa. */}
         <div
           ref={abaRef}
-          className="absolute top-0 left-0 flex h-[34px] items-center gap-1 pl-2 pr-1"
+          // O `pr-3` não é enfeite: a aba termina numa **rampa** (o path desce 16px na
+          // diagonal), e o cronômetro encostava nela — o último dígito ficava por baixo do
+          // traço. A largura da aba sai do próprio conteúdo, então é o padding que a alarga.
+          className="absolute top-0 left-0 flex h-[34px] items-center gap-1 pl-2 pr-3"
         >
+          {/*
+           * As duas setas empilhadas **atrás da moeda** — antes dela na fila.
+           *
+           * É **uma peça só**, e não dois botões: as duas setas são o desenho de um controle
+           * único. Dois botões aqui dariam duas áreas de clique separadas para o que a pessoa
+           * lê como uma coisa — e ainda partiam o realce do hover em dois.
+           *
+           * Ele troca a **forma do tempo**, e não o tempo: a contagem é a mesma, e o que muda
+           * é caber ou não na aba. É um alternador, e por isso é `aria-pressed` e não dois
+           * botões com nomes diferentes — a pessoa não escolhe "anterior" nem "próximo", ela
+           * aperta uma tecla só.
+           *
+           * O `-mt-1` no segundo ícone é o que **cola** as setas: cada SVG do lucide reserva
+           * uma folga interna, e empilhar os dois sem desconto deixava um vão de 4px entre os
+           * traços. Com o desconto, um encosta no outro.
+           *
+           * Sem fundo próprio: na faixa de 34px qualquer retângulo pesa mais que a própria
+           * moeda. A peça só acende no hover, e o `mr-0.5` a mantém separada da moeda.
+           */}
+          <button
+            type="button"
+            aria-label={compacto ? 'Mostrar o tempo do dia' : 'Mostrar as moedas'}
+            aria-pressed={compacto}
+            onClick={() => setCompacto((atual) => !atual)}
+            className="mr-0.5 flex w-3 flex-col items-center rounded text-koda-fg/40 transition-colors duration-150 hover:text-koda-fg focus-visible:ring-1 focus-visible:ring-koda-accent focus-visible:outline-none"
+          >
+            <ArrowLeft className="h-2.5 w-2.5" strokeWidth={2.2} />
+            <ArrowRight className="-mt-1 h-2.5 w-2.5" strokeWidth={2.2} />
+          </button>
+
           <MoedaKoda className="h-4 w-4" />
-          <span className="text-[12px] tabular-nums text-koda-fg/50">00:00:00</span>
+
+          <span className="text-[12px] tabular-nums text-koda-fg/50">
+            {compacto ? moedasEmTexto(moedas ?? PLANO_FREE.moedasPorMes) : tempoEmTexto(segundosDoDia)}
+          </span>
         </div>
 
         {/* A área de escrever — a única que fica **clara**. A faixa de baixo (controles e

@@ -12,9 +12,7 @@
  * filhos — o que transborda aqui é cortado sem rolagem, ou seja, some da vista. Por isso
  * cada bolha e cada bloco de texto quebra palavra longa por conta própria.
  *
- * Está num lugar só, e não repetido em cada tela, porque a bancada visual
- * (`chat.html` + `src/harnessChat.tsx`) monta a conversa com esta mesma classe: testar uma
- * casca diferente da que vai para o app não provaria nada.
+ * Está num lugar só, e não repetido em cada tela, para manter o layout da conversa consistente.
  */
 export const CLASSE_DA_JANELA =
   'flex h-[calc(100vh/var(--koda-zoom))] w-[calc(100vw/var(--koda-zoom))] flex-col overflow-hidden bg-koda-bg'

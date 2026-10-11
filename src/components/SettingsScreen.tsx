@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import AccountSection from './AccountSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
-import type { Conta as ContaKoda } from '../api/cloud'
+import type { Conta as ContaKoda, PlanoDaConta } from '../api/cloud'
 import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
@@ -34,15 +34,9 @@ import { WindowControls } from './WindowControls'
 import { apelidoDaConta, iniciaisDaConta } from '../account'
 import { findModel, modelMenu } from '../models'
 import type { RemoteModel } from '../models'
-import {
-  PLAN,
-  dailyReset,
-  dayKey,
-  monthlyReset,
-  percentUsed,
-  remaining,
-  weeklyReset,
-} from '../plan'
+import { dailyReset, dayKey, monthlyReset, weeklyReset } from '../plan'
+import { tempoCurto } from '../tempo'
+import { moedasLegiveis } from '../custo'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
 import { baixarAtualizacao, cloudChangelog, cloudUpdate, fraseDeFalha, statusDoDownload } from '../api/client'
@@ -61,17 +55,23 @@ import type {
 export type UsageSummary = {
   conversations: number
   messages: number
-  /** Mensagens dentro da janela de cada cota. */
-  todayMessages: number
-  weekMessages: number
-  monthMessages: number
+  /**
+   * O que cada janela gastou — **tempo** e **créditos**, sem teto.
+   *
+   * Antes eram contagens de mensagens contra um limite do plano. O limite saiu: um teto que não
+   * é o que se cobra é um número que confunde mais do que informa.
+   */
+  daily: ResumoDaJanela
+  weekly: ResumoDaJanela
+  monthly: ResumoDaJanela
   /** Mensagens por dia (`AAAA-MM-DD` local): o mapa do ano é isto, não estimativa. */
   dias: Record<string, number>
-  /** Tetos das cotas: vêm do backend quando ele está no ar. */
-  limits: { daily: number; weekly: number; monthly: number }
   model: string
   project: string
 }
+
+/** Uma janela de uso já com as moedas contadas. */
+export type ResumoDaJanela = { tempoMs: number; creditos: number }
 
 /** Estado do backend Python, mostrado em Sobre. */
 export type BackendSummary = {
@@ -980,98 +980,45 @@ const describeDay = (date: Date, mensagens: number) => {
 }
 
 /**
- * Cartão de cota no estilo do print: rótulo + porcentagem, "Ver detalhes",
- * barra de progresso e o rodapé com a série e a data de reinício.
+ * Um cartão de uso: o **tempo** e os **créditos** gastos naquela janela.
+ *
+ * Sem barra e sem porcentagem. As duas existiam para comparar com um teto de mensagens, e o teto
+ * saiu quando o plano passou a ser medido em horas e moedas — uma barra enchendo contra um limite
+ * que não é o que se cobra é um número que confunde mais do que informa.
+ *
+ * O que fica é o que a pessoa abre esta tela para ver: quanto gastou, e quando a janela vira.
  */
-function UsageLimit({
+function UsageWindowCard({
   title,
-  used,
-  limit,
-  series,
-  seriesClass,
+  janela,
   resetsOn,
-  detail,
-  unidade = 'mensagens',
 }: {
   title: string
-  used: number
-  limit: number
-  series: string
-  seriesClass: string
+  janela: ResumoDaJanela
   resetsOn: string
-  detail: string
-  /** O que a cota conta, para a frase de teto estourado. */
-  unidade?: string
 }) {
-  const [open, setOpen] = useState(false)
-  const percent = percentUsed(used, limit)
-  // Passar do teto acontece: a cota é do plano, e o que já entrou não sai do histórico.
-  // Marcar em âmbar e dizer o número de verdade é melhor do que mostrar "100,00%" com
-  // "39 de 20" embaixo, que parece erro de conta.
-  const excedeu = limit > 0 && used > limit
-  const exato = limit === 0 ? 0 : Math.round((used / limit) * 100)
-
   return (
     <section className="flex flex-col rounded-2xl bg-koda-panel p-4 ring-1 ring-koda-fg/8">
-      <div className="flex items-start justify-between gap-3">
-        <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-koda-fg/70">
-          {title}
-          <span
-            className={`text-[13.5px] font-semibold ${excedeu ? 'text-amber-400' : 'text-koda-fg'}`}
-          >
-            {excedeu ? `${exato}%` : `${percent.toFixed(2)}%`}
+      <p className="text-[13px] text-koda-fg/70">{title}</p>
+
+      <div className="mt-3 flex items-baseline gap-5">
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-[20px] font-semibold tabular-nums text-koda-fg">
+            {tempoCurto(Math.round(janela.tempoMs / 1000))}
           </span>
-          {excedeu ? (
-            <span className="rounded-full bg-amber-400/12 px-2 py-0.5 text-[10.5px] font-semibold tracking-wide text-amber-400 uppercase">
-              acima do teto
-            </span>
-          ) : null}
-        </p>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-          className="shrink-0 rounded-lg bg-koda-fg/8 px-2.5 py-1 text-[12px] font-medium text-koda-fg/80 transition-colors duration-150 hover:bg-koda-fg/12 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-        >
-          Ver detalhes
-        </button>
-      </div>
-
-      <div
-        role="progressbar"
-        aria-label={title}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(percent)}
-        className="mt-3 h-2 w-full overflow-hidden rounded-full bg-koda-fg/10"
-      >
-        <div
-          className={[
-            'bar-grow h-full rounded-full',
-            excedeu ? 'bg-amber-400/80' : seriesClass,
-          ].join(' ')}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-
-      {excedeu ? (
-        <p className="mt-2 text-[12px] leading-4 text-amber-400/90">
-          Você está {used - limit} {unidade} acima do teto do plano, que é de {limit} nesta
-          janela. O que já foi feito continua no histórico.
-        </p>
-      ) : null}
-
-      {open ? (
-        <p className="mt-2 text-[12px] leading-4 text-koda-fg/50">{detail}</p>
-      ) : null}
-
-      <div className="mt-3 flex items-center justify-between gap-3 text-[12px]">
-        <span className="flex min-w-0 items-center gap-1.5 text-koda-fg/70">
-          <span className={['h-2.5 w-2.5 shrink-0 rounded-[3px]', seriesClass].join(' ')} />
-          <span className="truncate">{series}</span>
+          <span className="text-[11.5px] text-koda-fg/45">de uso</span>
         </span>
-        <span className="shrink-0 text-koda-fg/45">Reinicia em {resetsOn}</span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-[20px] font-semibold tabular-nums text-koda-fg">
+            {moedasLegiveis(janela.creditos)}
+          </span>
+          <span className="text-[11.5px] text-koda-fg/45">
+            {janela.creditos === 1 ? 'crédito' : 'créditos'}
+          </span>
+        </span>
       </div>
+
+      <p className="mt-3 text-[12px] text-koda-fg/45">Reinicia em {resetsOn}</p>
     </section>
   )
 }
@@ -1193,6 +1140,8 @@ export function SettingsScreen({
   onAppearanceChange,
   onSignOut,
   contaKoda = null,
+  planoDaConta = null,
+  onAssinaturaMudou,
   initialSection,
   backend,
   cloud = null,
@@ -1229,6 +1178,10 @@ export function SettingsScreen({
   onAppearanceChange: (patch: Partial<Appearance>) => void
   /** Conta do painel (quem entrou na tela de login). `null` só em tese: o app não abre sem ela. */
   contaKoda?: ContaKoda | null
+  /** O plano em vigor, como o painel o conta. `null` é o Free. */
+  planoDaConta?: PlanoDaConta | null
+  /** Avisa que a assinatura mudou (assinou ou cancelou), para o plano ser recolhido de novo. */
+  onAssinaturaMudou?: () => void
   onSignOut: () => void
   /** Seção aberta ao entrar na tela (ex.: Conta, vindo do menu do header). */
   initialSection?: SettingsSection
@@ -1686,7 +1639,12 @@ export function SettingsScreen({
           ) : null}
 
           {section === 'conta' ? (
-            <AccountSection contaKoda={contaKoda} onSignOut={onSignOut} />
+            <AccountSection
+              contaKoda={contaKoda}
+              planoDaConta={planoDaConta}
+              onAssinaturaMudou={onAssinaturaMudou}
+              onSignOut={onSignOut}
+            />
           ) : null}
 
           {section === 'uso' ? (
@@ -1728,33 +1686,28 @@ export function SettingsScreen({
 
               <div className="flex flex-col gap-3">
                 <p className="px-1 text-[12.5px] text-koda-fg/45">Progresso de uso</p>
+                {/* A explicação é **uma** para os três cartões, e não uma por cartão: o que se
+                    conta é o mesmo nas três janelas, e repetir a frase três vezes faria parecer
+                    que cada uma conta de um jeito. */}
+                <p className="px-1 text-[11.5px] leading-4 text-koda-fg/35">
+                  O tempo conta só enquanto o Koda trabalha — conversa parada na tela não gasta. Os
+                  créditos são os tokens cobrados, pelo preço de cada modelo.
+                </p>
                 <div className="grid gap-3 md:grid-cols-3">
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso diário"
-                    used={usage.todayMessages}
-                    limit={usage.limits.daily}
-                    series={`Koda ${PLAN.name} · hoje`}
-                    seriesClass="bg-koda-accent"
+                    janela={usage.daily}
                     resetsOn={dailyReset()}
-                    detail={`${usage.todayMessages} de ${usage.limits.daily} mensagens hoje · restam ${remaining(usage.todayMessages, usage.limits.daily)}.`}
                   />
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso semanal"
-                    used={usage.weekMessages}
-                    limit={usage.limits.weekly}
-                    series={`Koda ${PLAN.name} · semana`}
-                    seriesClass="bg-koda-accent/70"
+                    janela={usage.weekly}
                     resetsOn={weeklyReset()}
-                    detail={`${usage.weekMessages} de ${usage.limits.weekly} mensagens nesta semana · restam ${remaining(usage.weekMessages, usage.limits.weekly)}.`}
                   />
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso mensal"
-                    used={usage.monthMessages}
-                    limit={usage.limits.monthly}
-                    series={`Koda ${PLAN.name} · mês`}
-                    seriesClass="bg-koda-accent/45"
+                    janela={usage.monthly}
                     resetsOn={monthlyReset()}
-                    detail={`${usage.monthMessages} de ${usage.limits.monthly} mensagens neste mês · restam ${remaining(usage.monthMessages, usage.limits.monthly)}.`}
                   />
                 </div>
               </div>

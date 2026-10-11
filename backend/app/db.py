@@ -16,7 +16,16 @@ CREATE TABLE IF NOT EXISTS conversations (
   id          TEXT PRIMARY KEY,
   title       TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL
+  updated_at  INTEGER NOT NULL,
+  -- O resumo do que já saiu do contexto, e **quantas mensagens antigas** ele cobre.
+  --
+  -- Guardados na conversa porque a compactação é uma decisão que se toma **uma vez**: sem
+  -- isto ela era recalculada a cada pedido, das mesmas mensagens, e o aviso «histórico
+  -- compactado» reaparecia em toda resposta. Com o resumo guardado, o pedido seguinte já
+  -- começa depois das mensagens cobertas — e só volta a compactar quando o que sobrou
+  -- encher o orçamento de novo.
+  resumo           TEXT,
+  resumo_mensagens INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -38,7 +47,11 @@ CREATE TABLE IF NOT EXISTS messages (
   motivo          TEXT,
   pendentes       TEXT NOT NULL DEFAULT '[]',
   executou        INTEGER NOT NULL DEFAULT 0,
-  retomavel       INTEGER NOT NULL DEFAULT 1
+  retomavel       INTEGER NOT NULL DEFAULT 1,
+  -- A **conta** a que esta mensagem pertence (o e-mail de quem estava logado). É por ela
+  -- que o uso — tempo do dia e moedas — é separado: sem esta coluna o gasto era da
+  -- máquina, e trocar de conta no mesmo PC continuava mostrando o da conta anterior.
+  conta           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, at);
@@ -143,6 +156,30 @@ class Database:
         if "retomavel" not in colunas:
             conn.execute(
                 "ALTER TABLE messages ADD COLUMN retomavel INTEGER NOT NULL DEFAULT 1"
+            )
+        # O **custo** da resposta, em tokens: a soma de `total_tokens`, e não de
+        # `completion_tokens`. São números diferentes de propósito — `tokens` é o tamanho do
+        # que a resposta escreveu, e este é o que o provedor cobra. É daqui que sai a conta das
+        # moedas, e por isso ele é guardado em separado: mensagem antiga fica com `NULL`, e a
+        # ficha simplesmente não mostra o gasto em vez de mostrar um número inventado.
+        if "tokens_total" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN tokens_total INTEGER")
+        # A conta dona da mensagem. As linhas antigas ficam com `NULL` — não há como saber
+        # de quem eram, e chutar a conta de hoje carimbaria o gasto de outra pessoa nela.
+        if "conta" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN conta TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conta ON messages(conta, at)")
+
+        # O resumo da compactação, na conversa. Conversa antiga nasce sem resumo e com zero
+        # mensagens cobertas — que é exatamente o estado dela: nada foi resumido ainda.
+        colunas_conversa = {
+            row["name"] for row in conn.execute("PRAGMA table_info(conversations)")
+        }
+        if "resumo" not in colunas_conversa:
+            conn.execute("ALTER TABLE conversations ADD COLUMN resumo TEXT")
+        if "resumo_mensagens" not in colunas_conversa:
+            conn.execute(
+                "ALTER TABLE conversations ADD COLUMN resumo_mensagens INTEGER NOT NULL DEFAULT 0"
             )
 
     @contextmanager
