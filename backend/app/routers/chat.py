@@ -185,12 +185,6 @@ async def _texto(
     #: O `usage` do rodapé do stream (ver `Piece.usage`). Sem ferramentas não há
     #: `StepResult`, então é daqui que sai o contador da ficha.
     uso: dict[str, int] = {}
-    if compactados:
-        # A nota entra no texto gravado junto com a resposta: quem relê a conversa depois
-        # precisa saber que parte do histórico virou resumo (e não que sumiu).
-        nota = _nota_de_compactacao(compactados)
-        pieces.append(nota)
-        yield sse("delta", {"text": nota})
     try:
         #: Quantos alôs de raciocínio em laço já foram dados (ver `ALO_DE_RACIOCINIO`).
         alos = 0
@@ -377,10 +371,6 @@ async def _agente(
     pedacos: list[str] = []
     #: Última lista de tarefas que o agente registrou — vai gravada na mensagem.
     plano: list[dict[str, object]] = []
-    if compactados:
-        # Mesma nota do modo texto, e pelo mesmo motivo: ela fica no que está gravado.
-        nota = _nota_de_compactacao(compactados)
-        pedacos.append(nota)
     passos: list[ToolStepOut] = []
     resultado = Resultado(texto="", passos=[], completou=False, uso={})
     stored = False
@@ -458,8 +448,6 @@ async def _agente(
     loop_task: asyncio.Task[Resultado] | None = None
 
     try:
-        if compactados:
-            yield sse("delta", {"text": _nota_de_compactacao(compactados)})
         loop_task = asyncio.create_task(rodar())
 
         # O loop roda como tarefa e narra cada passo: a fila entrega na ordem, sem
@@ -696,14 +684,6 @@ def _compactar_e_guardar(
     with db.connect() as conn:
         salvar_resumo(conn, conversation_id, junto, cobertas + novas)
     return (junto, turns, novas)
-
-
-def _nota_de_compactacao(compactados: int) -> str:
-    """O aviso, em uma linha, de que parte do histórico virou resumo."""
-    return (
-        f"_(histórico compactado: {compactados} mensagens antigas viraram resumo, para a "
-        "conversa caber no contexto)_\n\n"
-    )
 
 
 def _modo_de_permissao(db: Database) -> str:
