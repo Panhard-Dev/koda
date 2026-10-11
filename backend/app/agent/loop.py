@@ -26,10 +26,11 @@ from typing import Any, Protocol
 
 from ..tools import ferramentas, registry
 from .. import mcp
+from ..config import Settings, get_settings
 from ..policy import guards
-from . import contexto, repeticao
+from . import contexto, repeticao, subagente
 from ..limits import LIMITES
-from ..contracts.turn import StepResult, ToolCall, ToolStep
+from ..contracts.turn import StepResult, ToolCall, ToolStep, texto_do_conteudo
 
 PROMPT_FERRAMENTAS = (
     "Você é o Koda, um agente de engenharia que executa tarefas REAIS na máquina do "
@@ -113,6 +114,7 @@ PROMPT_FERRAMENTAS = (
     "   • baixar arquivo da internet: download_file · enviar: upload_file\n"
     "   • rodar build/testes/comando de verdade: shell\n"
     "   • calcular, analisar, conferir um resultado: code_interpreter\n"
+    "   • delegar um pedaço grande e independente para outro agente: sub_agente\n"
     "   Escolha a ferramenta pelo objetivo e pela descrição do catálogo; o loop não escolhe "
     "nem obriga uma ferramenta por você. Algumas diferenças importantes: `search_files` "
     "acha caminhos pelo nome; `search_codebase`/`regex_search` procuram conteúdo; "
@@ -262,7 +264,16 @@ EXIGIR_PLANO = (
 
 #: Quantas vezes o anúncio insistente é retomado por mensagem **interna** antes de o loop
 #: aceitar que o modelo não vai agir.
-MAX_RETOMADAS_ANUNCIO = 10
+#:
+#: Eram **10**, e o dono viu o que isso faz numa tela: o modelo degenera, anuncia o mesmo
+#: passo com outras palavras e a conversa vira **dez linhas iguais** antes de o loop desistir.
+#: Medido com a `nable-4-mini-preview` num contexto longo: ela devolve `finish_reason: stop`
+#: sem texto e sem chamada (o host responde 200 e vazio em ~1 s) — não é o app que perde a
+#: chamada, é o modelo que não a faz. Quem precisa de cutucão legítimo age no primeiro ou no
+#: segundo; do terceiro em diante já é degeneração, e o certo é **fechar a rodada** com o
+#: cartão de tarefa não concluída (que tem o botão Retomar) em vez de insistir na frente de
+#: quem está olhando.
+MAX_RETOMADAS_ANUNCIO = 3
 
 #: Quantas vezes o loop cobra execução antes de aceitar que o modelo só quis falar.
 MAX_COBRANCAS = 2
@@ -418,6 +429,31 @@ CONTINUAR_TRUNCADA = (
     "Continue exatamente do ponto em que parou; não repita ações que já foram executadas. "
     "Se algum pedido de ferramenta veio incompleto, envie novamente essa chamada com os "
     "argumentos completos. Não encerre a tarefa até concluir o pedido original."
+)
+
+#: O **alô** ao modelo quando o raciocínio dele entra em laço — a mesma coisa repetida por
+#: dezenas de milhares de caracteres. Em vez de encerrar a rodada, devolve-se a vez a ele com
+#: um cutucão: o trabalho estava em andamento, e o que ele já pensou pode bastar para
+#: responder. Matar o pensamento à força tirava dele essa chance.
+#:
+#: Medido: a `nable-4` repetiu **97 mil caracteres** da mesma coisa e não parou sozinha. O
+#: teto de tokens de saída (131 072) está longe demais para servir de freio — por isso o corte
+#: vem do vigia de repetição (`agent/repeticao.py`), e não do teto.
+ALO_DE_RACIOCINIO = (
+    "Você está repetindo o mesmo raciocínio em laço e o pensamento foi interrompido. Pare de "
+    "pensar e aja agora: se já tem o que precisa, escreva a resposta em texto; se precisa de "
+    "uma ferramenta, chame-a com os argumentos completos."
+)
+
+#: Quantos alôs antes de aceitar que o modelo não sai do laço sozinho. Baixo de propósito: um
+#: modelo que precisa do cutucão age no primeiro; do terceiro em diante já é degeneração, e
+#: insistir só gasta cota na frente de quem está olhando.
+MAX_ALOS_DE_RACIOCINIO = 3
+
+#: O que fica na tela quando o laço de raciocínio não cede aos alôs e a rodada é encerrada.
+AVISO_DE_RACIOCINIO_EM_LOOP = (
+    "_(o raciocínio do modelo entrou em repetição e a rodada foi interrompida — retome para "
+    "ele continuar)_"
 )
 
 #: A retomada pedida pelo **botão** da interface, e não por uma mensagem digitada.
@@ -1076,6 +1112,96 @@ def _explicar_restricoes(
     }
 
 
+#: O que a pessoa marca com `@` no pedido: `@sub.revisor`, `@mcp.navegador`, `@skill.revisao`.
+#:
+#: O ponto separa o tipo do nome, e o tipo aceita o apelido que a mão escreve (`agente` e
+#: `sub` são a mesma coisa). O nome aceita letra, número, `-`, `_` e `.`.
+MENCAO = re.compile(r"@(sub|agente|mcp|skill)\.([A-Za-z0-9._-]+)", re.IGNORECASE)
+
+
+def mencoes_do_pedido(mensagens: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """O que a pessoa marcou com `@` no **último** pedido dela.
+
+    Só o último: a marca é uma ordem para esta rodada, não uma configuração que fica valendo.
+    Varrer o histórico inteiro faria um `@sub.revisor` de dez mensagens atrás continuar
+    mandando no trabalho de agora.
+    """
+    texto = ""
+    for mensagem in reversed(mensagens):
+        if mensagem.get("role") == "user":
+            texto = texto_do_conteudo(mensagem.get("content"))
+            break
+
+    vistos: dict[str, dict[str, str]] = {}
+    for achado in MENCAO.finditer(texto):
+        tipo = achado.group(1).lower()
+        if tipo == "agente":
+            tipo = "sub"
+        nome = achado.group(2).strip()
+        if not nome:
+            continue
+        vistos[f"{tipo}.{nome.lower()}"] = {
+            "tipo": tipo,
+            "nome": nome,
+            "bruto": achado.group(0)[1:],
+        }
+    return list(vistos.values())
+
+
+def _instrucoes_da_skill(skills: Any, nome: str) -> str:
+    """As instruções da skill marcada com `@`, quando ela existe e está ligada.
+
+    Devolve vazio quando não dá: a mensagem de sistema já diz que a skill foi pedida, e uma
+    skill que sumiu no meio do caminho não pode derrubar a rodada inteira.
+    """
+    if skills is None:
+        return ""
+    try:
+        return str(skills.instrucoes(nome))
+    except Exception:  # noqa: BLE001 — skill ausente ou desligada não derruba a rodada
+        return ""
+
+
+def _explicar_mencoes(
+    historico: list[dict[str, Any]], mencoes: list[dict[str, str]], skills: Any
+) -> None:
+    """Diz ao modelo o que a pessoa marcou com `@` — e manda nisso.
+
+    Marcar é uma **ordem**, e não um enfeite no texto: `@mcp.navegador` é «use este
+    servidor», e `@sub.revisor` é «quem faz isto é aquele agente». Sem esta mensagem o modelo
+    veria um `@` no meio do pedido e decidiria sozinho o que fazer com ele.
+    """
+    if not mencoes or not historico or historico[0].get("role") != "system":
+        return
+
+    linhas = ["O QUE A PESSOA MARCOU COM `@` NESTE PEDIDO — é ordem, e não sugestão:"]
+    for item in mencoes:
+        if item["tipo"] == "sub":
+            linhas.append(
+                f"- `@{item['bruto']}`: quem faz isto é o sub-agente «{item['nome']}». "
+                "Lance-o com a ferramenta `sub_agente`, passando este pedido como tarefa — "
+                "não faça o trabalho você mesmo."
+            )
+        elif item["tipo"] == "mcp":
+            linhas.append(
+                f"- `@{item['bruto']}`: use o servidor MCP «{item['nome']}». As ferramentas "
+                "dos outros servidores não estão nesta rodada."
+            )
+        else:
+            linhas.append(
+                f"- `@{item['bruto']}`: a skill «{item['nome']}» já está carregada abaixo — "
+                "siga as instruções dela."
+            )
+            instrucoes = _instrucoes_da_skill(skills, item["nome"])
+            if instrucoes:
+                linhas.append(f"\n<skill {item['nome']}>\n{instrucoes}\n</skill>")
+
+    historico[0] = {
+        **historico[0],
+        "content": f"{historico[0].get('content', '')}\n\n" + "\n".join(linhas),
+    }
+
+
 def _explicar_mcp(historico: list[dict[str, Any]], ferramentas_mcp: list[dict[str, Any]]) -> None:
     """Diz ao modelo, no prompt de sistema, que existem ferramentas de servidores MCP.
 
@@ -1287,10 +1413,10 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     Na dúvida, a resposta depende de **onde** a dúvida aparece, e o critério é a assimetria
     do erro: negar ferramenta a quem pediu trabalho trava o trabalho, enquanto oferecer
     ferramenta a quem pediu conversa custa, no máximo, uma resposta que não as usa. Por isso,
-    numa conversa já em andamento, um pedido curto de continuação ("pode", "beleza", "agora
-    aplica") resolve para `MODO_CODIGO`. Na **primeira** mensagem resolve para
-    `MODO_RESPOSTA`: ali não há o que continuar, e é o que impede um "oi" de virar uma
-    varredura da pasta de trabalho da pessoa.
+    numa conversa já em andamento a dúvida resolve para `MODO_CODIGO` — inclusive o pedido
+    que nenhuma régua reconheceu. Só a **primeira** mensagem resolve para `MODO_RESPOSTA`:
+    ali não há o que continuar, e é o que impede um "oi" de virar uma varredura da pasta de
+    trabalho da pessoa.
     """
     pedido = pedido_do_usuario(mensagens)
     if not pedido:
@@ -1310,12 +1436,21 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
         return MODO_CODIGO
     if pedido_de_acao(mensagens) or pedido_grande(mensagens):
         return MODO_CODIGO
-    # Nenhuma régua reconheceu o pedido. Numa conversa já em andamento, esse é o lugar do
-    # "pode", "beleza", "agora aplica": a pessoa está mandando seguir o que foi combinado, e
-    # negar ferramenta aqui é o "nesta sessão não posso usar ferramentas" (ver
-    # `_continuacao_de_trabalho`). Na primeira mensagem, a dúvida continua resolvendo para
-    # conversa — é o que impede o "oi" de virar uma varredura da pasta de trabalho.
+    # Nenhuma régua reconheceu o pedido. Aqui vale a assimetria que este módulo declara:
+    # negar ferramenta a quem pediu trabalho **trava o trabalho**, e oferecer ferramenta a
+    # quem pediu conversa custa, no máximo, uma resposta que não as usa. Então a dúvida só
+    # resolve para "sem ferramenta" na **primeira** mensagem da conversa, onde não há nada
+    # em andamento para continuar — é o que impede um "oi" de virar varredura da pasta.
+    #
+    # Numa conversa já em andamento, a dúvida resolve para trabalho. Era aqui o defeito que
+    # o dono relatou em 10/10/2026: ele pedia algo que nenhuma régua previa e recebia "sem
+    # acesso às ferramentas nesta rodada" — o modelo não estava inventando, a rodada ia sem
+    # catálogo mesmo. Pedido não reconhecido em conversa em andamento é trabalho até prova
+    # em contrário: quem quiser resposta pura diz isso, e aí `SEM_FERRAMENTA_NENHUMA` ou
+    # `SOMENTE_RESPOSTA` pegam acima.
     if _continuacao_de_trabalho(mensagens, pedido):
+        return MODO_CODIGO
+    if len(_falas_da_pessoa(mensagens)) >= 2:
         return MODO_CODIGO
     return MODO_RESPOSTA
 
@@ -1516,6 +1651,10 @@ PARADA_REPETICAO = "repeated_tool"
 #: O modelo degenerou em eco: o mesmo trecho repetido até gastar o orçamento de saída.
 #: Motivo próprio porque a resposta que sai é o aviso, não o eco — e a rodada é retomável.
 PARADA_LOOP_DE_TEXTO = "text_repetition"
+#: O **raciocínio** degenerou em repetição e o vigia cortou a leitura. Motivo próprio (e não
+#: `text_repetition`) porque o corte é nosso, acontece **antes** de o modelo escrever a
+#: resposta, e a rodada é retomável — o trabalho estava em andamento.
+PARADA_LOOP_DE_RACIOCINIO = "reasoning_repetition"
 PARADA_VAZIO = "empty_response"
 PARADA_PROVEDOR = "provider_error"
 PARADA_CONTEXTO = "context_overflow"
@@ -1585,6 +1724,13 @@ class Resultado:
     passos: list[ToolStep]
     completou: bool
     uso: dict[str, int]
+    """
+    Uso somado de **todos** os passos: `prompt_tokens`, `completion_tokens`, `total_tokens`.
+
+    O `total_tokens` daqui é o **custo** da tarefa (cada passo reenvia o contexto inteiro, e
+    é isso que o provedor cobra) — não é o tamanho da resposta. Quem mostra na ficha lê só o
+    `completion_tokens`; ver `_tokens` em `routers/chat.py`.
+    """
     motivo: str = ""
     #: Última lista de tarefas que o modelo registrou, na ordem (vazia sem plano).
     #: É ela que fica gravada na mensagem — quem reabre a conversa vê o que foi feito.
@@ -1706,6 +1852,7 @@ async def executar(
     cancelamento: threading.Event | None = None,
     anexos: Any = None,
     skills: Any = None,
+    settings: Settings | None = None,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -1715,6 +1862,11 @@ async def executar(
 
     `dono` identifica a tarefa: vai junto dos processos que ela começar, para o cancelamento
     derrubar só os dela.
+
+    `settings` é a configuração desta execução. O laço quase não precisa dela — quem precisa
+    é o `sub_agente`, que monta a rodada dele a partir dela (o arquivo dos agentes, os
+    tetos, o diretório de skills). Sem ela, vale a do ambiente; em produção é a mesma coisa,
+    porque o app nasce de `get_settings()`.
     """
     # Todo evento de ferramenta sai com o **endereço de origem**, quando é de servidor MCP:
     # a interface mostra o nome real do servidor e da ferramenta (`[MCP · eco-server]`), e
@@ -1736,6 +1888,8 @@ async def executar(
     # não pode virar uma frase que o modelo decide ignorar.
     proibidas, sem_ferramentas = restricoes_do_pedido(mensagens)
     modo = classificar_pedido(mensagens)
+    # O que a pessoa marcou com `@` — uma ordem para **esta** rodada.
+    mencoes = mencoes_do_pedido(mensagens)
     todas = {item["function"]["name"] for item in registry.DEFINICOES}
     ferramentas_mcp: list[dict[str, Any]] = []
     if sem_ferramentas:
@@ -1758,6 +1912,21 @@ async def executar(
             for item in mcp.catalogo()
             if item["function"]["name"] not in proibidas_canonicas
         ]
+        # `@mcp.navegador` é «use **este** servidor»: os outros saem da rodada. É a marca
+        # mais estreita que existe, e é de propósito — quem escreveu o nome não quer que o
+        # modelo escolha entre cinco servidores.
+        servidores_marcados = {
+            item["nome"].casefold() for item in mencoes if item["tipo"] == "mcp"
+        }
+        if servidores_marcados:
+            ferramentas_mcp = [
+                item
+                for item in ferramentas_mcp
+                if str(
+                    (mcp.detalhar(str(item["function"]["name"])) or {}).get("servidor") or ""
+                ).casefold()
+                in servidores_marcados
+            ]
         tools = tools + ferramentas_mcp
     # A porteira do despacho (porta do Koda — ver `guards.py`): só o que foi **oferecido**
     # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
@@ -1766,6 +1935,7 @@ async def executar(
     historico = [dict(item) for item in mensagens]
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
     _explicar_mcp(historico, ferramentas_mcp)
+    _explicar_mencoes(historico, mencoes, skills)
     passos: list[ToolStep] = []
     uso = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     texto_final = ""
@@ -1774,6 +1944,8 @@ async def executar(
     completou = False
     motivo = ""
     vazias = 0
+    #: Quantos alôs de raciocínio em laço já foram dados nesta rodada (ver `ALO_DE_RACIOCINIO`).
+    alos = 0
     #: Quantas vezes o orçamento já foi reduzido por recusa de tamanho do provedor.
     reducoes = 0
     #: Passos seguidos com ferramenta e sem uma linha de texto. Chegando em
@@ -1789,6 +1961,9 @@ async def executar(
     ferramentas_ok = 0
     #: Chamadas que passaram pelo orçamento e foram entregues às ferramentas.
     chamadas_feitas = 0
+    #: Sub-agentes lançados **nesta rodada**. O teto é do motor, e não do arquivo do agente:
+    #: quem escreve um agente não decide quantos podem rodar de uma vez.
+    sub_agentes_lancados = 0
     #: Repetições da mesma ferramenta, argumentos, pedido e estado do plano.
     repeticoes: dict[str, int] = {}
     repeticao_terminal = False
@@ -2026,6 +2201,23 @@ async def executar(
                 },
             )
 
+        if resultado.repetiu:
+            # O **raciocínio** virou laço e o provedor cortou a leitura (ver
+            # `VigiaDeRepeticao`). Não é o caso do `truncado` acima: ali o modelo gastou o
+            # orçamento escrevendo o eco; aqui ele não chegou a escrever — só repetiu o
+            # pensamento, e o texto do passo sai vazio. Por isso este teste vem **antes** do
+            # contador de respostas vazias: sem ele, um laço de raciocínio seria contado como
+            # "provedor devolvendo vazio" e a rodada morreria por um motivo errado.
+            alos += 1
+            if alos > MAX_ALOS_DE_RACIOCINIO:
+                motivo = PARADA_LOOP_DE_RACIOCINIO
+                texto_final = AVISO_DE_RACIOCINIO_EM_LOOP
+                await emit("delta", {"text": f"\n\n{AVISO_DE_RACIOCINIO_EM_LOOP}\n\n"})
+                break
+            # O alô: devolve a vez ao modelo, dizendo o que aconteceu e o que fazer agora.
+            historico.append({"role": "user", "content": ALO_DE_RACIOCINIO})
+            continue
+
         if not resultado.calls and not resultado.text.strip():
             if resultado.truncado:
                 # Alguns modelos gastam o orçamento pensando e devolvem conteúdo vazio com
@@ -2040,7 +2232,17 @@ async def executar(
             if vazias >= MAX_VAZIAS:
                 motivo = PARADA_VAZIO
                 break
-            if not await _esperar(min(ESPERA_BASE * vazias, 30.0), limite):
+            espera = min(ESPERA_BASE * vazias, 30.0)
+            # **A tela não pode ficar muda.** Sem este aviso, o provedor devolvendo vazio
+            # significava até `MAX_VAZIAS` esperas caladas (≈12 min com o teto de 30 s), com a
+            # linha de trabalho girando e nada dizendo por quê. O aviso é transitório: diz o
+            # que está acontecendo, quanto falta e que o Parar interrompe.
+            await _avisar_espera(
+                emit,
+                f"O provedor respondeu vazio — insistindo ({vazias}/{MAX_VAZIAS}) em "
+                f"{espera:.0f} s. O Parar interrompe.",
+            )
+            if not await _esperar(espera, limite):
                 motivo = PARADA_TEMPO
                 break
             historico.append({"role": "user", "content": CONTINUAR})
@@ -2213,6 +2415,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2246,6 +2449,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=problema_de_json,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2280,6 +2484,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=recusa,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2327,6 +2532,7 @@ async def executar(
                 passo = ToolStep(
                     name=chamada.name,
                     arguments=argumentos,
+                    raw_arguments=chamada.raw_arguments,
                     output=saida,
                     duration_ms=0,
                     call_id=chamada.id,
@@ -2360,6 +2566,7 @@ async def executar(
                     ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2418,6 +2625,7 @@ async def executar(
                     passo = ToolStep(
                         name=chamada.name,
                         arguments=argumentos,
+                        raw_arguments=chamada.raw_arguments,
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
@@ -2470,6 +2678,41 @@ async def executar(
                 )
             if negado_por_codigo and oportunidade is not None:
                 saida = aviso_de_ferramenta(oportunidade)
+            elif chamada.name == subagente.FERRAMENTA:
+                # O sub-agente roda **aqui**, e não pelo despacho: quem sabe rodá-lo é o laço
+                # (`agent`), e `tools` não pode importar `agent` — seria import para cima.
+                # Daqui para baixo o caminho é o de sempre: a duração, o passo, o evento e o
+                # histórico tratam esta saída como tratam a de qualquer ferramenta.
+                if sub_agentes_lancados >= subagente.POR_RODADA:
+                    saida = (
+                        f"ERRO: o teto de {subagente.POR_RODADA} sub-agentes por rodada já foi "
+                        "atingido. Faça o que falta você mesmo, ou finalize esta rodada e "
+                        "lance os outros na próxima."
+                    )
+                else:
+                    sub_agentes_lancados += 1
+                    saida = await subagente.executar(
+                        # `modelo` é o provedor **deste** laço. Chamá-lo de `engine` aqui
+                        # era um nome que não existe nesta função — e o erro só aparece
+                        # quando a linha roda, não ao compilar.
+                        modelo,
+                        settings or get_settings(),
+                        nome=str(argumentos.get("agente", "")),
+                        tarefa=str(argumentos.get("tarefa", "")),
+                        workspace=workspace,
+                        esforco=str(argumentos.get("esforco") or "") or None,
+                        modelo=str(argumentos.get("modelo") or "") or None,
+                        fora_da_pasta=bool(argumentos.get("fora_da_pasta")),
+                        # O modo do app vale para o sub-agente também: ele pergunta o que o
+                        # principal perguntaria — e nunca pede para apagar (ver o veto).
+                        aprovar=aprovar,
+                        # O que ele narra sai como evento `sub`, endereçado ao id desta
+                        # chamada: é assim que a área Subs abre uma aba por sub-agente.
+                        emit=emit_bruto,
+                        chamada=chamada.id,
+                        dono=dono,
+                        cancelamento=cancelamento,
+                    )
             else:
                 try:
                     saida = await asyncio.to_thread(
@@ -2484,6 +2727,10 @@ async def executar(
                         skills=skills,
                         timeout_s=prazo_tool,
                         cancelamento=cancelamento,
+                        # O id da chamada vai junto para o registro de mudanças: é ele que
+                        # deixa o cartão desta ferramenta mostrar, na conversa, o diff que
+                        # **esta** chamada fez — e não o acumulado do arquivo.
+                        chamada=chamada.id,
                     )
                 except TimeoutError:
                     saida = (
@@ -2542,6 +2789,7 @@ async def executar(
             passo = ToolStep(
                 name=chamada.name,
                 arguments=argumentos,
+                raw_arguments=chamada.raw_arguments,
                 output=saida,
                 duration_ms=duracao,
                 call_id=chamada.id,
@@ -2739,6 +2987,17 @@ async def _esperar(segundos: float, limite: float | None) -> bool:
     return True
 
 
+async def _avisar_espera(emit: Emit, texto: str) -> None:
+    """Diz na tela que a rodada está **esperando** — a tela nunca fica muda.
+
+    Vai como evento próprio (`aviso`), e **não** como `delta`: é estado da rodada, não fala
+    do modelo. Um `delta` entraria no texto gravado da mensagem, e uma espera de doze minutos
+    encheria a resposta de linhas de progresso. O `aviso` aparece enquanto dura e sai de cena
+    quando a rodada segue.
+    """
+    await emit("aviso", {"text": texto})
+
+
 async def _trocar_conta(modelo: ToolModel, emit: Emit, numero: int) -> bool:
     """Pede outra conta ao provedor, quando ele sabe fazer isso (proxy com painel de contas)."""
     rotacionar = getattr(modelo, "rotate", None)
@@ -2841,12 +3100,23 @@ async def _com_tentativas(
             if restantes > 0:
                 usadas = max(1, tentativas - restantes)
                 await _trocar_conta(modelo, emit, numero)
-                if not await _esperar(min(ESPERA_BASE * usadas, 10), limite):
+                espera = min(ESPERA_BASE * usadas, 10)
+                # A espera do retry também é avisada: sem isto ela era um silêncio de até 10 s
+                # por tentativa, com a tela girando sem dizer que o provedor tinha falhado.
+                await _avisar_espera(
+                    emit,
+                    f"O provedor falhou — tentando de novo em {espera:.0f} s "
+                    f"(restam {restantes}).",
+                )
+                if not await _esperar(espera, limite):
                     return None
                 continue
             if ultima_cartada:
                 ultima_cartada = False
                 restantes = 1
+                await _avisar_espera(
+                    emit, f"O provedor caiu — última tentativa em {espera_final:.0f} s."
+                )
                 if not await _esperar(espera_final, limite):
                     return None
                 continue

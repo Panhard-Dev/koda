@@ -233,17 +233,23 @@ class Settings(BaseSettings):
     """Modelo padrão do serviço, para id que ele não reconheça (ou vazio)."""
 
     host_modelos_com_visao: str = Field(
-        default="liz-4,liz-3-flash,koda-1,layze-2",
+        default="liz-4,liz-3-flash,koda-1,layze-2,liz-nano,nable-4-mini-preview",
         validation_alias=AliasChoices("KODA_HOST_VISAO", "HOST_VISAO"),
     )
     """Ids do host que **enxergam imagem**, separados por vírgula — lista **curada**.
 
-    O host publica `images` por modelo em `/v1/models`, mas **não dá para confiar nele**: o
-    `liz-nano` é anunciado com `images: true` e o upstream por trás responde 400 («model
-    "mai-experimental" not supported for vision»), porque o modelo real por trás do id varia
-    conforme o pool do host. Mandar imagem para quem o host diz que enxerga, mas o upstream
-    não, derruba o pedido inteiro. Por isso a lista é medida e editada à mão: modelo fora
-    dela recebe o anexo pelos metadados, em vez de o pedido falhar.
+    O host publica `images` por modelo em `/v1/models`, e esta lista é a segunda opinião:
+    mandar imagem para quem não enxerga derruba o pedido inteiro, então quem decide é ela.
+
+    Ela é **medida**, e por isso envelhece. Medição de 10/10/2026 (sonda crua contra o
+    upstream, com imagem): enxergam `big-pickle`, `space-bunny-free`, `mimo-v2.6`, os dois
+    `muse-spark` e `longcat`; **não** enxergam os dois `nemotron` (400 «Endpoint is
+    unavailable»). Ou seja: todos menos os dois Liz Mini.
+
+    A lista anterior tinha quatro ids e deixava de fora o `liz-nano` e o `nable-4`, que
+    **enxergam**. A justificativa era velha: citava o id `mai-experimental`, que o registro
+    do host não usa mais. Modelo fora desta lista recebe o anexo pelos metadados, em vez de
+    a imagem ir no corpo do pedido.
 
     Ajustável por `KODA_HOST_VISAO`.
     """

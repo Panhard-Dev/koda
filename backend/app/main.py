@@ -23,6 +23,7 @@ from .nuvem import ServicoNuvem
 from .providers import build_provider
 from .routers import (
     account,
+    agentes,
     attachments,
     chat,
     conversations,
@@ -194,6 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(mcps.router, prefix="/api")
     app.include_router(nuvem.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
+    app.include_router(agentes.router, prefix="/api")
     app.include_router(host.router, prefix="/api")
     app.include_router(dev_browser.router, prefix="/api")
     app.include_router(dev_logs.router, prefix="/api")

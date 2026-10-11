@@ -14,8 +14,19 @@ import type { ApiTodo } from '../api/client'
  * O número no balão responde a pergunta que a conversa não respondia: **quanto falta**.
  * Sem nada em andamento, o balão some e o painel diz que está vazio — em vez de a tela
  * carregar para sempre o plano de uma tarefa que já acabou.
+ *
+ * `rodando` é o que separa «o agente está neste item agora» de «o agente parou neste item».
+ * Sem ele, o arco girando continuava girando depois de a rodada morrer — uma conversa
+ * interrompida ficava com um item «em andamento» para sempre, parecendo trabalho em curso
+ * que ninguém estava fazendo.
  */
-export default function ToDosMenu({ todos }: { todos: ApiTodo[] }) {
+export default function ToDosMenu({
+  todos,
+  rodando = false,
+}: {
+  todos: ApiTodo[]
+  rodando?: boolean
+}) {
   const [aberto, setAberto] = useState(false)
   const raizRef = useRef<HTMLDivElement>(null)
 
@@ -85,7 +96,12 @@ export default function ToDosMenu({ todos }: { todos: ApiTodo[] }) {
             <ListTodo className="h-3.5 w-3.5" strokeWidth={2} />
             <span>To-dos</span>
             {todos.length > 0 ? (
-              <span className="ml-auto tabular-nums normal-case">
+              <span className="ml-auto flex items-center gap-1.5 tabular-nums normal-case">
+                {/* O plano de pé sem ninguém trabalhando nele: a tela diz isso, em vez de
+                    deixar o arco girando como se houvesse trabalho em curso. */}
+                {!rodando && pendentes > 0 ? (
+                  <span className="text-koda-fg/30">parado</span>
+                ) : null}
                 <span className={acabou ? 'text-koda-accent/80' : 'text-koda-fg/45'}>
                   {feitos}
                 </span>
@@ -112,7 +128,11 @@ export default function ToDosMenu({ todos }: { todos: ApiTodo[] }) {
                     {item.feito ? (
                       <Check className="h-3.5 w-3.5 text-koda-accent" strokeWidth={2.6} />
                     ) : item.atual ? (
-                      <AroGirando />
+                      rodando ? (
+                        <AroGirando />
+                      ) : (
+                        <Parado />
+                      )
                     ) : (
                       <span className="h-3 w-3 rounded-full border border-koda-fg/20" />
                     )}
@@ -142,6 +162,21 @@ export default function ToDosMenu({ todos }: { todos: ApiTodo[] }) {
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * O item onde o trabalho **parou**.
+ *
+ * Duas barras, e não o arco girando: parado é parado. Um giro na tela promete movimento, e
+ * a conversa interrompida ficava com essa promessa de pé para sempre.
+ */
+function Parado() {
+  return (
+    <span aria-hidden className="flex h-3.5 w-3.5 items-center justify-center gap-[2px]">
+      <span className="h-2.5 w-[2px] rounded-full bg-koda-fg/35" />
+      <span className="h-2.5 w-[2px] rounded-full bg-koda-fg/35" />
+    </span>
   )
 }
 

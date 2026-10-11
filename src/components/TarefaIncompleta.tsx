@@ -33,6 +33,7 @@ const MOTIVOS: Record<string, string> = {
   tool_limit: 'O teto de chamadas de ferramenta foi atingido.',
   step_limit: 'O limite de passos desta rodada foi atingido.',
   repeated_tool: 'A mesma chamada se repetiu e o trabalho foi interrompido.',
+  reasoning_repetition: 'O raciocínio do modelo entrou em repetição e a rodada foi interrompida.',
   empty_response: 'O provedor respondeu vazio várias vezes seguidas.',
   provider_error: 'O provedor caiu e não deu para continuar.',
   context_overflow: 'O pedido não caberia no contexto do modelo, nem reduzido.',

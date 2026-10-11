@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AlertTriangle, ArrowRight, Check, RotateCw, X } from 'lucide-react'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { Webview } from '@tauri-apps/api/webview'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { LogicalPosition, LogicalSize } from '@tauri-apps/api/dpi'
 import { DENTRO_DO_TAURI } from './WindowControls'
 import { estadoDoNavegador, estadoDosLogs } from '../api/client'
 import type { ApiProject, ErroDeLog, EstadoDosLogs } from '../api/client'
 import { AbaCodigo } from './PainelCodigo'
+import Subs from './Subs'
+import type { SessaoDeSub } from './Subs'
 
 /** As seções do painel. */
 const ABAS = ['Painel Dev', 'Código', 'Subs', 'Logs'] as const
@@ -88,9 +93,9 @@ function enderecoDoArquivo(caminho: string): string {
 }
 
 /**
- * Barra lateral — casca, abas e o X. Três das quatro abas têm conteúdo: **Painel Dev** (um
- * navegador), **Código** (a árvore do projeto de um lado, o arquivo do outro) e **Logs** (o
- * retrato que o MCP publica). **Subs** continua vazia.
+ * Barra lateral — casca, abas e o X. As quatro abas têm conteúdo: **Painel Dev** (um
+ * navegador), **Código** (a árvore do projeto de um lado, o arquivo do outro), **Subs** (uma
+ * conversa separada, com prompt box simples) e **Logs** (o retrato que o MCP publica).
  *
  * O que ela é hoje, e só isso:
  * - uma **sobreposição**: `fixed`, da borda de cima à de baixo da janela, sem empurrar o
@@ -282,15 +287,118 @@ function AbaLogs() {
   )
 }
 
+/**
+ * O navegador do Painel Dev **de verdade** — um webview filho do Tauri.
+ *
+ * **Por que não `<iframe>`.** O painel começou com iframe, e a razão de então («não adiciona
+ * motor nenhum») continua boa. O problema é outro: site que manda `X-Frame-Options` ou CSP
+ * `frame-ancestors` **recusa ser embutido**, e o Chromium obedece. Era isso que fazia
+ * `chatgpt.com`, Google, GitHub e YouTube aparecerem como "refused to connect" — e também os
+ * sites do próprio dono, que mandam `DENY`. Não há contorno de dentro do iframe: é o site
+ * dizendo "não me embuta".
+ *
+ * **O webview filho é contexto de topo**, então a política de enquadramento não se aplica e o
+ * site carrega normal. O motor é o mesmo WebView2 que o app já usa — não entra dependência
+ * nova, entra uma instância a mais.
+ *
+ * **Ele é janela nativa por cima do HTML, não um elemento do DOM.** Daí o posicionamento ser
+ * manual: medimos a caixa onde ele deve caber e avisamos o Tauri a cada mudança de tamanho.
+ * Consequência a saber: com o painel aberto, o que a página desenhar fica **acima** do HTML do
+ * app — um menu que abrisse por cima do painel apareceria atrás do site. É o preço de ter um
+ * navegador de verdade ali dentro.
+ *
+ * Navegar é **recriar**: a `key` da URL remonta o componente, o antigo fecha e um novo abre —
+ * mesmo desenho do iframe, que também recarregava trocando a `key`.
+ */
+function NavegadorDoPainel({ url }: { url: string }) {
+  const caixa = useRef<HTMLDivElement>(null)
+  const [falhou, setFalhou] = useState(false)
+
+  useEffect(() => {
+    let vivo = true
+    let navegador: Webview | null = null
+    const rotulo = `painel-dev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    const medir = () => {
+      const alvo = caixa.current
+      if (!alvo) return null
+      const r = alvo.getBoundingClientRect()
+      return {
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      }
+    }
+
+    const ajustar = async () => {
+      const area = medir()
+      if (!navegador || !area || area.width < 2 || area.height < 2) return
+      try {
+        await navegador.setPosition(new LogicalPosition(area.x, area.y))
+        await navegador.setSize(new LogicalSize(area.width, area.height))
+      } catch {
+        // O webview pode ter sido fechado entre a medição e o ajuste: a próxima resolve.
+      }
+    }
+
+    const montar = () => {
+      const area = medir()
+      if (!area || area.width < 2 || area.height < 2) return
+      const criado = new Webview(getCurrentWindow(), rotulo, { url, ...area, focus: false })
+      // Falha de criação (permissão, endereço recusado) chega por evento, não por exceção —
+      // sem isto o painel ficaria um retângulo branco sem explicação.
+      void criado.once('tauri://error', (evento) => {
+        if (!vivo) return
+        console.error('[painel] o navegador embutido não subiu:', evento.payload)
+        setFalhou(true)
+      })
+      if (!vivo) {
+        void criado.close().catch(() => undefined)
+        return
+      }
+      navegador = criado
+    }
+
+    montar()
+
+    const observador = new ResizeObserver(() => void ajustar())
+    if (caixa.current) observador.observe(caixa.current)
+    window.addEventListener('resize', ajustar)
+
+    return () => {
+      vivo = false
+      observador.disconnect()
+      window.removeEventListener('resize', ajustar)
+      if (navegador) void navegador.close().catch(() => undefined)
+      navegador = null
+    }
+  }, [url])
+
+  return (
+    <div ref={caixa} className="relative min-h-0 w-full flex-1 bg-white">
+      {falhou ? (
+        <p className="px-3 py-3 text-[12.5px] leading-relaxed text-koda-fg/45">
+          Não consegui abrir o navegador embutido aqui. O site em si pode estar no ar — vale
+          conferir numa aba do navegador.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 export function PainelLateral({
   aberto,
   onFechar,
-  projeto = null,
+  projeto,
+  subs = [],
 }: {
   aberto: boolean
   onFechar: () => void
   /** O projeto aberto no app — é a pasta que a aba **Código** mostra. `null` = nenhum. */
-  projeto?: ApiProject | null
+  projeto: ApiProject | null
+  /** As sessões de sub-agente lançadas — a aba **Subs** abre uma aba por uma delas. */
+  subs?: SessaoDeSub[]
 }) {
   const caixa = useRef<HTMLElement>(null)
   /** Qual seção está aberta. Estado local: é escolha de tela, não do app. */
@@ -529,6 +637,7 @@ export function PainelLateral({
 
       <div className="flex min-h-0 flex-1 flex-col">
         {aba === 'Código' ? <AbaCodigo projeto={projeto} /> : null}
+        {aba === 'Subs' ? <Subs projeto={projeto} subs={subs} /> : null}
         {aba === 'Logs' ? <AbaLogs /> : null}
         {aba !== 'Painel Dev' ? null : (
           <>
@@ -565,19 +674,26 @@ export function PainelLateral({
             </form>
 
             {url ? (
-              <iframe
-                key={recarga}
-                ref={moldura}
-                onLoad={() => aplicarRolagem(rolagemDaIA.current)}
-                title="Navegador do Painel Dev"
-                src={url}
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                className="min-h-0 w-full flex-1 border-0 bg-white"
-              />
+              // No app, um webview de verdade: site que recusa ser embutido abre normal (ver
+              // `NavegadorDoPainel`). Fora do Tauri — `npm run dev` no navegador — não existe
+              // webview, e aí fica o iframe, com a limitação que ele tem.
+              DENTRO_DO_TAURI ? (
+                <NavegadorDoPainel key={recarga} url={url} />
+              ) : (
+                <iframe
+                  key={recarga}
+                  ref={moldura}
+                  onLoad={() => aplicarRolagem(rolagemDaIA.current)}
+                  title="Navegador do Painel Dev"
+                  src={url}
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  className="min-h-0 w-full flex-1 border-0 bg-white"
+                />
+              )
             ) : (
               <p className="px-3 py-3 text-[12.5px] leading-relaxed text-koda-fg/40">
                 {aviso ||
-                  'Digite um endereço acima. Site que recusa ser embutido (Google, GitHub, YouTube) vai aparecer em branco — é o próprio site bloqueando, não o Koda.'}
+                  'Digite um endereço acima. No app o painel abre o site num navegador de verdade; fora dele (dev no navegador) usa um iframe — e aí site que recusa ser embutido (Google, GitHub, YouTube) aparece em branco, porque é o próprio site bloqueando, não o Koda.'}
               </p>
             )}
           </>

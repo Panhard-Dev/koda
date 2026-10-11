@@ -72,6 +72,17 @@ def rotulo_da_conta() -> str | None:
     return nome or email
 
 
+def email_da_conta() -> str | None:
+    """O e-mail de quem está logado — a **chave** com que o uso é separado por conta.
+
+    É o que faz o tempo do dia e as moedas pertencerem à **conta**, e não à máquina: sem
+    isto, trocar de conta no mesmo PC continuava mostrando o que a anterior tinha gasto.
+    `None` quando não há conta (ou o front não informou o e-mail) — quem grava o uso marca
+    a linha como «conta desconhecida», e a leitura por conta simplesmente não a alcança.
+    """
+    return _conta[1] if _conta else None
+
+
 def credencial(settings: Settings) -> str:
     """O que apresentar ao host, em uma linha.
 

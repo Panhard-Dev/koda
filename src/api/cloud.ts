@@ -18,6 +18,8 @@
  * voz do app, sem repassar texto de servidor.
  */
 
+import { dayKey, monthStart, weekStart } from '../plan'
+
 const bruto = import.meta.env.VITE_CLOUD_URL as string | undefined
 
 /** Endereço do painel. Em produção é o Worker do Koda Cloud; `VITE_CLOUD_URL` troca. */
@@ -91,6 +93,16 @@ const MENSAGENS: Record<string, string> = {
   token_expired: 'Sua sessão expirou. Entre de novo.',
   refresh_reuse: 'Sua sessão expirou. Entre de novo.',
   sem_conexao: 'Não consegui falar com o painel do Koda. Confira a internet.',
+  // Cobrança. O painel devolve o código; a frase é daqui, como todas as outras — a tela
+  // nunca repassa texto de servidor.
+  plano_nao_encontrado: 'Esse plano não está mais à venda.',
+  pagamento_nao_aceito: 'O Mercado Pago recusou os dados. Confira o CPF e tente de novo.',
+  pagamento_indisponivel: 'O Mercado Pago não respondeu. Tente de novo em instantes.',
+  pagamento_desconhecido: 'Não encontrei essa cobrança.',
+  backend_unavailable: 'O pagamento está indisponível. Se continuar, fale com o suporte.',
+  // Credencial nossa, errada — não é queda e não adianta tentar de novo. A frase diz isso
+  // sem prometer um retry que nunca vai funcionar.
+  pagamento_sem_credencial: 'O pagamento ainda não está ligado do nosso lado. Fale com o suporte.',
 }
 
 /** Códigos que significam "essa sessão não vale mais". */
@@ -139,7 +151,15 @@ export function conferirSenha(senha: string, email: string): string | null {
   return null
 }
 
-async function pedir<T>(
+/**
+ * Um pedido ao painel, com o corpo já em JSON e o erro já traduzido.
+ *
+ * Exportado para a cobrança (`./cobranca`) usar o **mesmo** caminho: um segundo cliente HTTP
+ * para o mesmo painel teria o seu próprio mapa de erro, e aí o mesmo código de servidor
+ * ganharia duas frases diferentes conforme a tela. Quem chama passa o token porque quem sabe
+ * se a sessão está de pé — e como renová-la — é o `sessaoParaOHost`.
+ */
+export async function pedir<T>(
   caminho: string,
   init: { metodo?: string; corpo?: unknown; token?: string } = {},
 ): Promise<T> {
@@ -424,6 +444,37 @@ export async function sair(): Promise<void> {
  * tropeçou na rede viraria "sessão morta" e a tela de login apareceria para quem não fez
  * nada de errado — que é exatamente o que a renovação já evita, e a sonda não pode piorar.
  */
+/**
+ * O plano da conta, como o painel o conta.
+ *
+ * O **nome** vem daqui, e não de uma lista do app: quem publica o catálogo é o painel, e um
+ * plano renomeado lá apareceria com o nome velho aqui se a tela traduzisse sozinha o id.
+ */
+export type PlanoDaConta = {
+  id: string
+  nome: string
+  /**
+   * Os números do plano, para a tela da conta mostrar os benefícios sem uma segunda chamada.
+   *
+   * `null` quando o plano saiu do catálogo depois de a pessoa assinar — a assinatura continua
+   * valendo (é assim que o servidor a trata), e a tela mostra o que sabe em vez de inventar.
+   */
+  preco_centavos: number | null
+  horas_por_dia: number | null
+  moedas_por_mes: number | null
+  moedas_por_dia: number | null
+  status: 'pendente' | 'ativa' | 'atrasada' | 'cancelada'
+  renova_em: string | null
+  /**
+   * Até quando o dinheiro pode voltar — o prazo de reembolso, contado do pagamento.
+   *
+   * `null` quando não há cobrança paga. A tela usa isto para **mostrar** o prazo; quem decide se
+   * estorna é o servidor, no cancelamento, porque uma regra de dinheiro que só existe no cliente
+   * é uma regra que qualquer um contorna falando direto com a API.
+   */
+  estorno_ate: string | null
+}
+
 export type SessaoViva =
   | {
       estado: 'viva'
@@ -432,6 +483,16 @@ export type SessaoViva =
        * exceção individual desligada. É o que faz um modelo desativado sumir do seletor.
        */
       bloqueados: string[]
+      /** O plano da conta. `null` é o Free — quem não assinou nada. */
+      plano: PlanoDaConta | null
+      /**
+       * Os créditos comprados avulsos (ou dados pelo painel), já sem os vencidos.
+       *
+       * Vêm na mesma resposta porque é o **saldo** que a aba da caixa mostra: só o do plano
+       * deixaria de fora o crédito que a pessoa pagou por fora — e quem ganha moedas do
+       * suporte não veria nada mudar na tela.
+       */
+      creditosAvulsos: number
     }
   | { estado: 'morta'; motivo: string }
   | { estado: 'sem-rede' }
@@ -440,6 +501,57 @@ export type SessaoViva =
 type PerfilDoPainel = {
   conta?: { status?: string } | null
   modelos_bloqueados?: unknown
+  plano?: unknown
+  creditos_avulsos?: unknown
+}
+
+/**
+ * A assinatura **vale** para quem está olhando?
+ *
+ * `pendente` é uma **tentativa**, não uma assinatura: existe entre o clique e a resposta do
+ * Mercado Pago, e sobrevive a uma cobrança que falhou ou a um checkout abandonado. Tratar
+ * `pendente` como assinatura fazia a tela dizer «Sua assinatura» para quem não assinou nada —
+ * que foi exatamente o que aconteceu, e é o tipo de mentira que destrói a confiança na tela.
+ *
+ * `cancelada` acabou. Só `ativa` e `atrasada` são plano de verdade.
+ */
+export function assinaturaVale(plano: PlanoDaConta | null): boolean {
+  return plano?.status === 'ativa' || plano?.status === 'atrasada'
+}
+
+/**
+ * Lê o plano da resposta, sem confiar no formato.
+ *
+ * O painel é nosso, mas um campo que muda de forma (ou um deploy fora de ordem) não pode
+ * derrubar a sonda da sessão — que é o que mantém o app aberto. Forma estranha vira `null`,
+ * que a tela já sabe mostrar: Free.
+ */
+function numeroOuNulo(valor: unknown): number | null {
+  return typeof valor === 'number' && Number.isFinite(valor) ? valor : null
+}
+
+function lerPlano(bruto: unknown): PlanoDaConta | null {
+  if (typeof bruto !== 'object' || bruto === null) return null
+  const item = bruto as Record<string, unknown>
+  const status = item.status
+  if (
+    typeof item.id !== 'string' ||
+    typeof item.nome !== 'string' ||
+    (status !== 'pendente' && status !== 'ativa' && status !== 'atrasada' && status !== 'cancelada')
+  ) {
+    return null
+  }
+  return {
+    id: item.id,
+    nome: item.nome,
+    preco_centavos: numeroOuNulo(item.preco_centavos),
+    horas_por_dia: numeroOuNulo(item.horas_por_dia),
+    moedas_por_mes: numeroOuNulo(item.moedas_por_mes),
+    moedas_por_dia: numeroOuNulo(item.moedas_por_dia),
+    status,
+    renova_em: typeof item.renova_em === 'string' ? item.renova_em : null,
+    estorno_ate: typeof item.estorno_ate === 'string' ? item.estorno_ate : null,
+  }
 }
 
 async function lerPerfil(): Promise<SessaoViva> {
@@ -451,6 +563,11 @@ async function lerPerfil(): Promise<SessaoViva> {
     bloqueados: Array.isArray(perfil.modelos_bloqueados)
       ? perfil.modelos_bloqueados.filter((item): item is string => typeof item === 'string')
       : [],
+    plano: lerPlano(perfil.plano),
+    // Crédito avulso que não veio (painel antigo, campo com forma estranha) conta como zero:
+    // o saldo fica menor do que é, e nunca maior — prometer moeda que não existe é o erro
+    // que não se corrige depois.
+    creditosAvulsos: typeof perfil.creditos_avulsos === 'number' ? perfil.creditos_avulsos : 0,
   }
 }
 
@@ -518,4 +635,81 @@ export async function verificarSessao(): Promise<SessaoViva> {
     // 429 e o resto: o painel pediu calma ou tropeçou — a sessão não foi recusada.
     return { estado: 'sem-rede' }
   }
+}
+
+/* --------------------------------------------------------------------------
+ * Uso da conta — o tempo e os tokens que o **limite** conta
+ * ------------------------------------------------------------------------ */
+
+/**
+ * O uso mora aqui, e não no PC.
+ *
+ * O backend local **mede** (é ele que vê a resposta acontecendo, e sabe o tempo e o custo em
+ * tokens de cada uma), mas ele é da máquina: trocar de conta no mesmo PC separava, trocar de
+ * máquina não — e reinstalar apagava o gasto. Limite que mora no cliente é limite que o
+ * cliente contorna, então o local virou **coletor** e quem guarda é o painel.
+ *
+ * As datas de corte saem do relógio de quem usa (`../plan`), e não do relógio do servidor: o
+ * dia tem de virar à meia-noite da pessoa, e é o app que sabe quando é isso.
+ */
+
+export type JanelaDeUso = {
+  tempo_ms: number
+  tokens_por_modelo: Record<string, number>
+}
+
+/** O mesmo formato que a tela de Uso já desenha, agora contado pelo painel. */
+export type UsoDaConta = {
+  daily: JanelaDeUso
+  weekly: JanelaDeUso
+  monthly: JanelaDeUso
+  conversations: number
+  messages: number
+  dias: Record<string, number>
+}
+
+export type RelatoDeUso = {
+  /** A resposta que gastou — é a **chave da idempotência** no painel. */
+  message_id: string
+  conversation_id?: string | null
+  model?: string | null
+  tempo_ms: number
+  tokens: number
+}
+
+/**
+ * Relata o que **uma** resposta gastou.
+ *
+ * Repetir é seguro: o painel ignora o que já contou (`user_id` + `message_id`). É por isso
+ * que o app pode reenviar sem medo — e por isso também que ele **não** precisa de fila nem
+ * de contador de tentativas.
+ *
+ * Sem sessão não há o que relatar: devolve `false` em vez de estourar, porque perder o
+ * relato de uma resposta não pode derrubar a conversa que acabou de terminar.
+ */
+export async function reportarUso(relato: RelatoDeUso, agora = new Date()): Promise<boolean> {
+  const atual = acessoEmVigor()
+  if (!atual) return false
+  const resposta = await pedir<{ contou: boolean }>('/api/usage', {
+    metodo: 'POST',
+    token: atual.token,
+    corpo: {
+      ...relato,
+      dia: dayKey(agora),
+      mes: dayKey(monthStart(agora)).slice(0, 7),
+    },
+  })
+  return resposta.contou === true
+}
+
+/** As janelas de uso da conta, como o painel as conta. */
+export async function usoDaConta(agora = new Date()): Promise<UsoDaConta> {
+  const atual = acessoEmVigor()
+  if (!atual) throw new ErroDaConta('missing_token', mensagemDe('missing_token'), 401)
+  const busca = new URLSearchParams({
+    dia: dayKey(agora),
+    semana: dayKey(weekStart(agora)),
+    mes: dayKey(monthStart(agora)).slice(0, 7),
+  })
+  return pedir<UsoDaConta>(`/api/usage?${busca.toString()}`, { token: atual.token })
 }

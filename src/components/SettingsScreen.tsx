@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import {
   ArrowLeft,
   Activity,
+  Bot,
   Cable,
   Check,
   ChevronDown,
@@ -25,23 +26,17 @@ import {
 } from 'lucide-react'
 import AccountSection from './AccountSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
-import type { Conta as ContaKoda } from '../api/cloud'
-import type { ApiProject } from '../api/client'
+import type { Conta as ContaKoda, PlanoDaConta } from '../api/cloud'
+import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
 import { WindowControls } from './WindowControls'
 import { apelidoDaConta, iniciaisDaConta } from '../account'
 import { findModel, modelMenu } from '../models'
 import type { RemoteModel } from '../models'
-import {
-  PLAN,
-  dailyReset,
-  dayKey,
-  monthlyReset,
-  percentUsed,
-  remaining,
-  weeklyReset,
-} from '../plan'
+import { dailyReset, dayKey, monthlyReset, weeklyReset } from '../plan'
+import { tempoCurto } from '../tempo'
+import { moedasLegiveis } from '../custo'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
 import { baixarAtualizacao, cloudChangelog, cloudUpdate, fraseDeFalha, statusDoDownload } from '../api/client'
@@ -60,17 +55,23 @@ import type {
 export type UsageSummary = {
   conversations: number
   messages: number
-  /** Mensagens dentro da janela de cada cota. */
-  todayMessages: number
-  weekMessages: number
-  monthMessages: number
+  /**
+   * O que cada janela gastou — **tempo** e **créditos**, sem teto.
+   *
+   * Antes eram contagens de mensagens contra um limite do plano. O limite saiu: um teto que não
+   * é o que se cobra é um número que confunde mais do que informa.
+   */
+  daily: ResumoDaJanela
+  weekly: ResumoDaJanela
+  monthly: ResumoDaJanela
   /** Mensagens por dia (`AAAA-MM-DD` local): o mapa do ano é isto, não estimativa. */
   dias: Record<string, number>
-  /** Tetos das cotas: vêm do backend quando ele está no ar. */
-  limits: { daily: number; weekly: number; monthly: number }
   model: string
   project: string
 }
+
+/** Uma janela de uso já com as moedas contadas. */
+export type ResumoDaJanela = { tempoMs: number; creditos: number }
 
 /** Estado do backend Python, mostrado em Sobre. */
 export type BackendSummary = {
@@ -93,6 +94,7 @@ export type SettingsSection =
   | 'conta'
   | 'uso'
   | 'skills'
+  | 'agents'
   | 'mcps'
   | 'nuvem'
   | 'sobre'
@@ -138,6 +140,13 @@ const SECTIONS: {
     icon: <Puzzle className="h-4 w-4" strokeWidth={1.7} />,
     title: 'Skills',
     subtitle: 'Capacidades extras que o agente carrega quando a tarefa pede.',
+  },
+  {
+    id: 'agents',
+    label: 'Agentes',
+    icon: <Bot className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Agentes',
+    subtitle: 'Sub-agentes que o agente principal lança — cada um com o prompt e as ferramentas dele.',
   },
   {
     id: 'mcps',
@@ -261,6 +270,65 @@ function Campo({
         />
       )}
     </label>
+  )
+}
+
+/**
+ * Uma lista de nomes que se marca com o clique — as skills e os MCPs de um sub-agente.
+ *
+ * É escolha, e não digitação: o nome tem de bater com o que existe no backend, e escrever à
+ * mão só criaria um agente que não alcança nada. O que **não** está marcado fica fora — o
+ * poder do agente é o que está aceso aqui.
+ */
+function Escolha({
+  titulo,
+  ajuda,
+  opcoes,
+  escolhidos,
+  onAlternar,
+  vazio,
+}: {
+  titulo: string
+  ajuda: string
+  opcoes: string[]
+  escolhidos: string[]
+  onAlternar: (nome: string) => void
+  vazio: string
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[11px] font-semibold tracking-wider text-koda-fg/45 uppercase">
+        {titulo}
+      </span>
+      {opcoes.length === 0 ? (
+        <p className="text-[12.5px] text-koda-fg/40">{vazio}</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {opcoes.map((nome) => {
+            const ativo = escolhidos.includes(nome)
+            return (
+              <button
+                key={nome}
+                type="button"
+                aria-pressed={ativo}
+                onClick={() => onAlternar(nome)}
+                className={[
+                  'flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] ring-1 transition-colors duration-150',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent',
+                  ativo
+                    ? 'bg-koda-accent/15 text-koda-accent ring-koda-accent/30'
+                    : 'text-koda-fg/60 ring-koda-fg/12 hover:bg-koda-fg/6 hover:text-koda-fg',
+                ].join(' ')}
+              >
+                {ativo ? <Check className="h-3 w-3" strokeWidth={2.6} /> : null}
+                {nome}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <p className="text-[11.5px] leading-4 text-koda-fg/35">{ajuda}</p>
+    </div>
   )
 }
 
@@ -912,98 +980,45 @@ const describeDay = (date: Date, mensagens: number) => {
 }
 
 /**
- * Cartão de cota no estilo do print: rótulo + porcentagem, "Ver detalhes",
- * barra de progresso e o rodapé com a série e a data de reinício.
+ * Um cartão de uso: o **tempo** e os **créditos** gastos naquela janela.
+ *
+ * Sem barra e sem porcentagem. As duas existiam para comparar com um teto de mensagens, e o teto
+ * saiu quando o plano passou a ser medido em horas e moedas — uma barra enchendo contra um limite
+ * que não é o que se cobra é um número que confunde mais do que informa.
+ *
+ * O que fica é o que a pessoa abre esta tela para ver: quanto gastou, e quando a janela vira.
  */
-function UsageLimit({
+function UsageWindowCard({
   title,
-  used,
-  limit,
-  series,
-  seriesClass,
+  janela,
   resetsOn,
-  detail,
-  unidade = 'mensagens',
 }: {
   title: string
-  used: number
-  limit: number
-  series: string
-  seriesClass: string
+  janela: ResumoDaJanela
   resetsOn: string
-  detail: string
-  /** O que a cota conta, para a frase de teto estourado. */
-  unidade?: string
 }) {
-  const [open, setOpen] = useState(false)
-  const percent = percentUsed(used, limit)
-  // Passar do teto acontece: a cota é do plano, e o que já entrou não sai do histórico.
-  // Marcar em âmbar e dizer o número de verdade é melhor do que mostrar "100,00%" com
-  // "39 de 20" embaixo, que parece erro de conta.
-  const excedeu = limit > 0 && used > limit
-  const exato = limit === 0 ? 0 : Math.round((used / limit) * 100)
-
   return (
     <section className="flex flex-col rounded-2xl bg-koda-panel p-4 ring-1 ring-koda-fg/8">
-      <div className="flex items-start justify-between gap-3">
-        <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-koda-fg/70">
-          {title}
-          <span
-            className={`text-[13.5px] font-semibold ${excedeu ? 'text-amber-400' : 'text-koda-fg'}`}
-          >
-            {excedeu ? `${exato}%` : `${percent.toFixed(2)}%`}
+      <p className="text-[13px] text-koda-fg/70">{title}</p>
+
+      <div className="mt-3 flex items-baseline gap-5">
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-[20px] font-semibold tabular-nums text-koda-fg">
+            {tempoCurto(Math.round(janela.tempoMs / 1000))}
           </span>
-          {excedeu ? (
-            <span className="rounded-full bg-amber-400/12 px-2 py-0.5 text-[10.5px] font-semibold tracking-wide text-amber-400 uppercase">
-              acima do teto
-            </span>
-          ) : null}
-        </p>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-          className="shrink-0 rounded-lg bg-koda-fg/8 px-2.5 py-1 text-[12px] font-medium text-koda-fg/80 transition-colors duration-150 hover:bg-koda-fg/12 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
-        >
-          Ver detalhes
-        </button>
-      </div>
-
-      <div
-        role="progressbar"
-        aria-label={title}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(percent)}
-        className="mt-3 h-2 w-full overflow-hidden rounded-full bg-koda-fg/10"
-      >
-        <div
-          className={[
-            'bar-grow h-full rounded-full',
-            excedeu ? 'bg-amber-400/80' : seriesClass,
-          ].join(' ')}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-
-      {excedeu ? (
-        <p className="mt-2 text-[12px] leading-4 text-amber-400/90">
-          Você está {used - limit} {unidade} acima do teto do plano, que é de {limit} nesta
-          janela. O que já foi feito continua no histórico.
-        </p>
-      ) : null}
-
-      {open ? (
-        <p className="mt-2 text-[12px] leading-4 text-koda-fg/50">{detail}</p>
-      ) : null}
-
-      <div className="mt-3 flex items-center justify-between gap-3 text-[12px]">
-        <span className="flex min-w-0 items-center gap-1.5 text-koda-fg/70">
-          <span className={['h-2.5 w-2.5 shrink-0 rounded-[3px]', seriesClass].join(' ')} />
-          <span className="truncate">{series}</span>
+          <span className="text-[11.5px] text-koda-fg/45">de uso</span>
         </span>
-        <span className="shrink-0 text-koda-fg/45">Reinicia em {resetsOn}</span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-[20px] font-semibold tabular-nums text-koda-fg">
+            {moedasLegiveis(janela.creditos)}
+          </span>
+          <span className="text-[11.5px] text-koda-fg/45">
+            {janela.creditos === 1 ? 'crédito' : 'créditos'}
+          </span>
+        </span>
       </div>
+
+      <p className="mt-3 text-[12px] text-koda-fg/45">Reinicia em {resetsOn}</p>
     </section>
   )
 }
@@ -1125,6 +1140,8 @@ export function SettingsScreen({
   onAppearanceChange,
   onSignOut,
   contaKoda = null,
+  planoDaConta = null,
+  onAssinaturaMudou,
   initialSection,
   backend,
   cloud = null,
@@ -1134,6 +1151,9 @@ export function SettingsScreen({
   mcps = [],
   onAddSkill,
   onAddMcp,
+  agents = [],
+  onSaveAgent,
+  onDeleteAgent,
 }: {
   onClose: () => void
   usage: UsageSummary
@@ -1158,6 +1178,10 @@ export function SettingsScreen({
   onAppearanceChange: (patch: Partial<Appearance>) => void
   /** Conta do painel (quem entrou na tela de login). `null` só em tese: o app não abre sem ela. */
   contaKoda?: ContaKoda | null
+  /** O plano em vigor, como o painel o conta. `null` é o Free. */
+  planoDaConta?: PlanoDaConta | null
+  /** Avisa que a assinatura mudou (assinou ou cancelou), para o plano ser recolhido de novo. */
+  onAssinaturaMudou?: () => void
   onSignOut: () => void
   /** Seção aberta ao entrar na tela (ex.: Conta, vindo do menu do header). */
   initialSection?: SettingsSection
@@ -1176,6 +1200,12 @@ export function SettingsScreen({
   onAddSkill?: (skill: NovoSkill) => Promise<void>
   /** Cadastra um servidor MCP novo no backend e devolve quando a lista já foi atualizada. */
   onAddMcp?: (mcp: NovoMcp) => Promise<void>
+  /** Os sub-agentes do `subs.agentes.md`. */
+  agents?: ApiAgente[]
+  /** Cria ou substitui um sub-agente pelo nome (o backend devolve a lista como ficou). */
+  onSaveAgent?: (agente: NovoAgente) => Promise<void>
+  /** Tira um sub-agente do arquivo. */
+  onDeleteAgent?: (nome: string) => Promise<void>
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? 'geral')
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]
@@ -1223,6 +1253,24 @@ export function SettingsScreen({
   const [erroMcp, setErroMcp] = useState<string | null>(null)
   const [salvandoMcp, setSalvandoMcp] = useState(false)
   const [tentouMcp, setTentouMcp] = useState(false)
+
+  // ---- sub-agentes ----
+  const [formAgente, setFormAgente] = useState(false)
+  const [agenteNome, setAgenteNome] = useState('')
+  const [agentePrompt, setAgentePrompt] = useState('')
+  const [agenteSkills, setAgenteSkills] = useState<string[]>([])
+  const [agenteMcps, setAgenteMcps] = useState<string[]>([])
+  const [agenteModelo, setAgenteModelo] = useState('')
+  /**
+   * Qual agente está sendo editado. Vazio = o formulário está criando um novo.
+   *
+   * Editar e criar usam o mesmo formulário de propósito: é o mesmo conjunto de campos, e o
+   * nome é o identificador — salvar com um nome que já existe substitui aquele agente.
+   */
+  const [editandoAgente, setEditandoAgente] = useState('')
+  const [erroAgente, setErroAgente] = useState<string | null>(null)
+  const [salvandoAgente, setSalvandoAgente] = useState(false)
+  const [tentouAgente, setTentouAgente] = useState(false)
 
   const fecharFormSkill = () => {
     setFormSkill(false)
@@ -1282,6 +1330,73 @@ export function SettingsScreen({
       setErroMcp(fraseDeFalha(erro))
     } finally {
       setSalvandoMcp(false)
+    }
+  }
+
+  // ---- sub-agentes ----
+
+  const fecharFormAgente = () => {
+    setFormAgente(false)
+    setEditandoAgente('')
+    setAgenteNome('')
+    setAgentePrompt('')
+    setAgenteSkills([])
+    setAgenteMcps([])
+    setAgenteModelo('')
+    setErroAgente(null)
+    setTentouAgente(false)
+  }
+
+  /** Abre o formulário com o agente dentro — editar é o mesmo formulário, preenchido. */
+  const editarAgente = (agente: ApiAgente) => {
+    setFormAgente(true)
+    setEditandoAgente(agente.nome)
+    setAgenteNome(agente.nome)
+    setAgentePrompt(agente.prompt)
+    setAgenteSkills([...agente.skills])
+    setAgenteMcps([...agente.mcps])
+    setAgenteModelo(agente.modelo)
+    setErroAgente(null)
+    setTentouAgente(false)
+  }
+
+  /** Liga/desliga um nome numa lista de escolhidos — é assim que skills e MCPs se marcam. */
+  const alternar = (lista: string[], setLista: (valor: string[]) => void, nome: string) =>
+    setLista(lista.includes(nome) ? lista.filter((item) => item !== nome) : [...lista, nome])
+
+  const handleSalvarAgente = async () => {
+    setTentouAgente(true)
+    const nome = agenteNome.trim()
+    if (!nome) {
+      setErroAgente('Dê um nome ao agente — é por ele que o principal o chama.')
+      return
+    }
+    setSalvandoAgente(true)
+    setErroAgente(null)
+    try {
+      await onSaveAgent?.({
+        nome,
+        prompt: agentePrompt.trim(),
+        skills: agenteSkills,
+        mcps: agenteMcps,
+        modelo: agenteModelo.trim(),
+      })
+      fecharFormAgente()
+    } catch (erro) {
+      setErroAgente(fraseDeFalha(erro))
+    } finally {
+      setSalvandoAgente(false)
+    }
+  }
+
+  const handleApagarAgente = async (nome: string) => {
+    setErroAgente(null)
+    try {
+      await onDeleteAgent?.(nome)
+      // Apagou o que estava aberto no formulário: fecha, senão ele salvaria de volta.
+      if (editandoAgente === nome) fecharFormAgente()
+    } catch (erro) {
+      setErroAgente(fraseDeFalha(erro))
     }
   }
 
@@ -1524,7 +1639,12 @@ export function SettingsScreen({
           ) : null}
 
           {section === 'conta' ? (
-            <AccountSection contaKoda={contaKoda} onSignOut={onSignOut} />
+            <AccountSection
+              contaKoda={contaKoda}
+              planoDaConta={planoDaConta}
+              onAssinaturaMudou={onAssinaturaMudou}
+              onSignOut={onSignOut}
+            />
           ) : null}
 
           {section === 'uso' ? (
@@ -1566,33 +1686,28 @@ export function SettingsScreen({
 
               <div className="flex flex-col gap-3">
                 <p className="px-1 text-[12.5px] text-koda-fg/45">Progresso de uso</p>
+                {/* A explicação é **uma** para os três cartões, e não uma por cartão: o que se
+                    conta é o mesmo nas três janelas, e repetir a frase três vezes faria parecer
+                    que cada uma conta de um jeito. */}
+                <p className="px-1 text-[11.5px] leading-4 text-koda-fg/35">
+                  O tempo conta só enquanto o Koda trabalha — conversa parada na tela não gasta. Os
+                  créditos são os tokens cobrados, pelo preço de cada modelo.
+                </p>
                 <div className="grid gap-3 md:grid-cols-3">
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso diário"
-                    used={usage.todayMessages}
-                    limit={usage.limits.daily}
-                    series={`Koda ${PLAN.name} · hoje`}
-                    seriesClass="bg-koda-accent"
+                    janela={usage.daily}
                     resetsOn={dailyReset()}
-                    detail={`${usage.todayMessages} de ${usage.limits.daily} mensagens hoje · restam ${remaining(usage.todayMessages, usage.limits.daily)}.`}
                   />
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso semanal"
-                    used={usage.weekMessages}
-                    limit={usage.limits.weekly}
-                    series={`Koda ${PLAN.name} · semana`}
-                    seriesClass="bg-koda-accent/70"
+                    janela={usage.weekly}
                     resetsOn={weeklyReset()}
-                    detail={`${usage.weekMessages} de ${usage.limits.weekly} mensagens nesta semana · restam ${remaining(usage.weekMessages, usage.limits.weekly)}.`}
                   />
-                  <UsageLimit
+                  <UsageWindowCard
                     title="Uso mensal"
-                    used={usage.monthMessages}
-                    limit={usage.limits.monthly}
-                    series={`Koda ${PLAN.name} · mês`}
-                    seriesClass="bg-koda-accent/45"
+                    janela={usage.monthly}
                     resetsOn={monthlyReset()}
-                    detail={`${usage.monthMessages} de ${usage.limits.monthly} mensagens neste mês · restam ${remaining(usage.monthMessages, usage.limits.monthly)}.`}
                   />
                 </div>
               </div>
@@ -1768,6 +1883,140 @@ export function SettingsScreen({
                   <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
                     Cadastre uma skill em “Adicionar Skill” — ela entra nesta lista e o
                     agente passa a usá-la quando a conversa pedir.
+                  </p>
+                </div>
+              )}
+            </Card>
+          ) : null}
+
+          {section === 'agents' ? (
+            <Card
+              title="Sub-agentes"
+              description="Cada um roda com o prompt e as ferramentas dele. O agente principal os lança pelo nome, com a ferramenta sub_agente."
+              action={
+                <BotaoAdicionar
+                  aberto={formAgente}
+                  rotulo="Adicionar Agente"
+                  onClick={() => (formAgente ? fecharFormAgente() : setFormAgente(true))}
+                />
+              }
+            >
+              {formAgente ? (
+                <div className="flex flex-col gap-3.5 border-t border-koda-fg/8 px-5 py-4">
+                  <Campo
+                    label="Nome"
+                    valor={agenteNome}
+                    onChange={setAgenteNome}
+                    placeholder="ex.: revisor"
+                    obrigatorio
+                    invalido={tentouAgente && !agenteNome.trim()}
+                  />
+                  <Campo
+                    label="Prompt"
+                    valor={agentePrompt}
+                    onChange={setAgentePrompt}
+                    placeholder="O que este agente é e o que ele faz — é o que ele recebe ao acordar"
+                    multiline
+                  />
+                  <Escolha
+                    titulo="Skills que ele pode usar"
+                    ajuda="Sem nenhuma marcada, ele não carrega skill nenhuma — um agente novo não herda poder."
+                    opcoes={(skills ?? []).map((item) => item.name)}
+                    escolhidos={agenteSkills}
+                    onAlternar={(nome) => alternar(agenteSkills, setAgenteSkills, nome)}
+                    vazio="Nenhuma skill instalada."
+                  />
+                  <Escolha
+                    titulo="MCPs que ele pode usar"
+                    ajuda="Sem nenhum marcado, ele não alcança servidor nenhum."
+                    opcoes={(mcps ?? []).map((item) => item.name)}
+                    escolhidos={agenteMcps}
+                    onAlternar={(nome) => alternar(agenteMcps, setAgenteMcps, nome)}
+                    vazio="Nenhum servidor MCP configurado."
+                  />
+                  <Campo
+                    label="Modelo"
+                    valor={agenteModelo}
+                    onChange={setAgenteModelo}
+                    placeholder="Vazio = o modelo que o principal mandar"
+                  />
+                  {erroAgente ? (
+                    <p className="text-[12.5px] leading-5 text-red-400">{erroAgente}</p>
+                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleSalvarAgente()}
+                      disabled={salvandoAgente}
+                      className="flex items-center gap-1.5 rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90 disabled:opacity-50"
+                    >
+                      {salvandoAgente ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.2} />
+                      )}
+                      {editandoAgente ? 'Salvar alterações' : 'Criar agente'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={fecharFormAgente}
+                      className="rounded-xl px-3 py-1.5 text-[12.5px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/6 hover:text-koda-fg"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {(agents ?? []).length > 0 ? (
+                <ul className="divide-y divide-koda-fg/8 border-t border-koda-fg/8">
+                  {(agents ?? []).map((agente) => (
+                    <li key={agente.nome} className="px-5 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <Bot className="h-4 w-4 shrink-0 text-koda-fg/45" strokeWidth={1.7} />
+                        <span className="min-w-0 truncate font-mono text-[13.5px] font-medium text-koda-fg/90">
+                          {agente.nome}
+                        </span>
+                        <span className="ml-auto shrink-0 text-[11.5px] text-koda-fg/40">
+                          {agente.skills.length} skill(s) · {agente.mcps.length} MCP(s)
+                          {agente.modelo ? ` · ${agente.modelo}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => editarAgente(agente)}
+                          className="shrink-0 rounded-lg px-2 py-1 text-[12px] text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/8 hover:text-koda-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Apagar ${agente.nome}`}
+                          title="Apagar"
+                          onClick={() => void handleApagarAgente(agente.nome)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-koda-fg/40 transition-colors duration-150 hover:bg-red-500/12 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-koda-accent"
+                        >
+                          <X className="h-3.5 w-3.5" strokeWidth={1.9} />
+                        </button>
+                      </div>
+                      {agente.prompt ? (
+                        <p className="mt-1.5 line-clamp-2 text-[12.5px] leading-5 text-koda-fg/45">
+                          {agente.prompt}
+                        </p>
+                      ) : (
+                        <p className="mt-1.5 text-[12.5px] text-amber-500/80">
+                          Sem prompt: ele acorda sabendo só que é um sub-agente.
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : formAgente ? null : (
+                <div className="flex flex-col items-center gap-2 border-t border-koda-fg/8 px-5 py-10 text-center">
+                  <Bot className="h-5 w-5 text-koda-fg/35" strokeWidth={1.7} />
+                  <p className="text-[13.5px] font-medium text-koda-fg/80">Nenhum sub-agente</p>
+                  <p className="max-w-sm text-[12.5px] leading-5 text-koda-fg/45">
+                    Crie um em “Adicionar Agente”. O principal passa a poder lançá-lo pelo
+                    nome — e ele não apaga nada nem sai da pasta do projeto.
                   </p>
                 </div>
               )}
