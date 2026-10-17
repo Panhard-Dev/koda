@@ -29,8 +29,10 @@ class ChatTurn:
     #: Imagens que vão **junto** deste turno, como `data:` URLs (`data:image/png;base64,…`).
     #:
     #: Ficam no turno e não no texto porque imagem não é texto: quem as leva ao modelo é o
-    #: campo `image_url` do pedido, e só o turno do usuário carrega alguma. Vazio (o caso
-    #: normal) manda o pedido exatamente como antes — `content` continua sendo uma string.
+    #: campo `image_url` do pedido. O turno do usuário carrega o que ele anexou; o turno
+    #: `tool` carrega o que a **ferramenta** devolveu como imagem — os quadros de um vídeo
+    #: analisado, por exemplo. Vazio (o caso normal) manda o pedido exatamente como antes:
+    #: `content` continua sendo uma string.
     imagens: list[str] = field(default_factory=list)
     #: As **chamadas de ferramenta** deste turno (`assistant`), no formato do provedor.
     #:

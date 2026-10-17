@@ -806,6 +806,9 @@ export type Pastas = {
   unidades: Pasta[]
 }
 
+/** A pasta aberta no seletor de vídeos: as subpastas, os vídeos dela e os atalhos de sempre. */
+export type Videos = Pastas & { videos: Pasta[] }
+
 export type RegraPermissao = {
   id: string
   kind: string
@@ -867,6 +870,31 @@ export const listFolders = (caminho?: string | null) =>
   request<Pastas>(
     `/api/fs/pastas${caminho ? `?caminho=${encodeURIComponent(caminho)}` : ''}`,
   )
+
+/** Pastas e vídeos de um caminho — é o seletor do editor de vídeo. */
+export const listVideos = (caminho?: string | null) =>
+  request<Videos>(
+    `/api/fs/videos${caminho ? `?caminho=${encodeURIComponent(caminho)}` : ''}`,
+  )
+
+/**
+ * Os bytes de um vídeo do disco, como `blob:` — o editor toca, fotografa os frames e
+ * desenha a onda a partir dele.
+ *
+ * Passa pelo backend, e não por `asset://`/`file://`, por uma razão medida: o `<video>`
+ * toca de qualquer origem, mas **não** o `<canvas>` que fotografa os frames — origem
+ * cruzada mancha a tela e o `toDataURL` falha. Entregando `blob:` (origem própria),
+ * frames e waveform funcionam iguais no navegador e no app.
+ */
+export async function blobDoVideo(caminho: string): Promise<Blob> {
+  await prepararAcesso()
+  const resposta = await fetch(
+    `${apiUrl}/api/fs/video?caminho=${encodeURIComponent(caminho)}`,
+    { headers: { ...cabecalhoDeAcesso() } },
+  )
+  if (!resposta.ok) throw new Error(`não consegui ler o vídeo (${resposta.status})`)
+  return resposta.blob()
+}
 
 // ------------------------------------------------------- o painel de código
 

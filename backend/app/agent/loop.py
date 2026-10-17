@@ -3045,9 +3045,7 @@ async def executar(
                     "step": numero,
                 },
             )
-            historico.append(
-                {"role": "tool", "tool_call_id": chamada.id, "content": saida}
-            )
+            historico.append(_resultado_de_ferramenta(chamada.id, saida))
 
         # PORTÃO DO PLANO (passo com ferramenta): o plano foi registrado e a pessoa ainda
         # não aceitou — nada mais roda nesta rodada. Se o texto do passo já trouxe o
@@ -3231,6 +3229,25 @@ def _muda_algo(nome: str, argumentos: dict[str, Any], workspace: Path) -> bool:
         return ferramentas.classificar(nome, argumentos, workspace) is not None
     except Exception:  # noqa: BLE001 — classificar não deveria levantar; se levantar, não executa
         return True
+
+
+def _resultado_de_ferramenta(call_id: str, saida: str) -> dict[str, Any]:
+    """A mensagem `tool` do histórico — com as imagens que a ferramenta devolveu.
+
+    Um MCP pode entregar imagem (o de vídeo entrega cada quadro do vídeo analisado). Ela
+    chega marcada no texto, e aqui vira parte `image_url` de verdade: é o que faz o modelo
+    **ver** o quadro, em vez de ler o caminho de um JPG que ele não consegue abrir.
+
+    Sem imagem o resultado é exatamente o de antes — uma string. Com imagem, o `content`
+    passa a ser a lista `[texto, image_url, …]`, que é o formato que o provedor já aceita
+    para visão (o mesmo do turno do usuário com foto anexada).
+    """
+    texto, imagens = mcp.separar_imagens(saida)
+    if not imagens:
+        return {"role": "tool", "tool_call_id": call_id, "content": saida}
+    conteudo: list[dict[str, Any]] = [{"type": "text", "text": texto}]
+    conteudo.extend({"type": "image_url", "image_url": {"url": url}} for url in imagens)
+    return {"role": "tool", "tool_call_id": call_id, "content": conteudo}
 
 
 def _chave_de_anuncio(texto: str) -> str:

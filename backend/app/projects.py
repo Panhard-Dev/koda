@@ -130,6 +130,38 @@ def navegar(caminho: str | None) -> dict[str, object]:
     }
 
 
+#: Extensões que o seletor do editor de vídeo lista. Não é sobre o que um `ffprobe`
+#: qualquer abre: é sobre o que o `<video>` do navegador toca — os codecs que ele não
+#: reconhece não passam daqui.
+EXTENSOES_DE_VIDEO = frozenset({".mp4", ".webm", ".mov", ".m4v", ".ogv"})
+
+
+def navegar_videos(caminho: str | None) -> dict[str, object]:
+    """Pastas e **vídeos** de um caminho — o seletor do editor de vídeo.
+
+    Reusa o `navegar()` de propósito: atalhos, subir pasta e subpastas são a mesma
+    navegação do seletor de pastas, e duplicá-la seria dois códigos para divergir. O que
+    acrescenta são os arquivos de vídeo da pasta atual — quem foi escolher um vídeo não
+    está procurando o resto do disco.
+    """
+    base = navegar(caminho)
+    alvo = Path(str(base["caminho"]))
+    videos: list[dict[str, str]] = []
+    try:
+        filhos = sorted(alvo.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        filhos = []
+    for item in filhos:
+        if item.name.startswith(".") or item.name.startswith("$"):
+            continue
+        try:
+            if item.is_file() and item.suffix.lower() in EXTENSOES_DE_VIDEO:
+                videos.append({"nome": item.name, "caminho": str(item)})
+        except OSError:
+            continue
+    return {**base, "videos": videos}
+
+
 #: Pastas que a árvore do painel de código não abre.
 #:
 #: É a mesma ideia da lista que a busca do agente usa (`tools.ferramentas.PASTAS_IGNORADAS`):

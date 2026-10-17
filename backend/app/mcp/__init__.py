@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .cliente import ErroMCP, ServidorMCP, nome_seguro
+from .cliente import ErroMCP, ServidorMCP, nome_seguro, separar_imagens
 
 #: Prefixo dos nomes de ferramenta que vêm de um servidor MCP. É o que separa, na conversa,
 #: o que é do Koda do que é de fora — e o que a interface usa para escolher o ícone.

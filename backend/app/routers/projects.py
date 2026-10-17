@@ -7,9 +7,15 @@ não existe.
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
 from .. import projects
+from ..transcricao import transcrever
+from ..video import QUADROS_PADRAO, analisar, elementos
 from ..contracts import mudancas
 from ..policy import approvals
 from ..config import Settings
@@ -128,6 +134,161 @@ async def pastas(
 ) -> dict[str, object]:
     """Subpastas de um caminho, para escolher a pasta sem diálogo do sistema."""
     return await call(projects.navegar, caminho)
+
+
+#: O `media_type` de cada extensão de vídeo que o editor lista. `.mov` é quicktime e
+#: `.ogv` é ogg: o `<video>` aceita os dois, e errar o tipo aqui faria o navegador
+#: baixar o arquivo em vez de tocar.
+_MIDIA_DE_VIDEO = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/mp4",
+    ".ogv": "video/ogg",
+}
+
+
+@router.get("/fs/videos")
+async def videos(
+    request: Request, caminho: str | None = Query(default=None, max_length=4096)
+) -> dict[str, object]:
+    """Pastas e vídeos de um caminho, para o seletor do editor de vídeo."""
+    return await call(projects.navegar_videos, caminho)
+
+
+@router.get("/fs/video")
+async def video(request: Request, caminho: str = Query(max_length=4096)) -> FileResponse:
+    """Os bytes de um vídeo do disco — o seletor do editor entrega o caminho, e o
+    `<video>` toca daqui.
+
+    Passa pelo backend, e não por `asset://`/`file://`, por uma razão medida: o
+    `<video>` toca de qualquer origem, mas **não** o `<canvas>` que fotografa os frames —
+    origem cruzada mancha a tela e o `toDataURL` falha. Servindo os bytes daqui, o front
+    transforma em `blob:` (origem própria) e frames e waveform funcionam iguais no
+    navegador e no app.
+    """
+    alvo = Path(caminho).expanduser()
+    try:
+        alvo = alvo.resolve()
+        if not alvo.is_file() or alvo.suffix.lower() not in _MIDIA_DE_VIDEO:
+            raise ValueError
+    except (OSError, ValueError):
+        raise HTTPException(
+            status_code=404, detail="esse arquivo de vídeo não existe nesta máquina"
+        ) from None
+    return FileResponse(alvo, media_type=_MIDIA_DE_VIDEO[alvo.suffix.lower()])
+
+
+#: Teto do áudio aceito na transcrição: 64 MB de WAV 16k mono dá ~35 minutos de fala.
+_TETO_DO_AUDIO = 64 * 1024 * 1024
+
+
+#: O que separa um quadro do outro na resposta JSON destas rotas.
+_MARCA_DE_QUADRO = "KODA_QUADRO:"
+
+
+def _quadros_para_json(resultado: dict[str, object]) -> dict[str, object]:
+    """Troca os quadros em bytes pelo mesmo JPEG em base64, dentro do resultado.
+
+    A rota é HTTP/JSON: bytes crus não serializam (o `dump_json` estoura com "invalid
+    utf-8"). O motor devolve bytes de propósito — é o formato que o modelo consome como
+    `data:` URL —, então quem converte para trafegar é aqui, na borda.
+
+    Os marcadores `KODA_QUADRO:` são **mantidos como prefixo** da linha em `momentos`, para
+    quem consome (a interface, um MCP, um teste) reconhecer a imagem pelo mesmo marcador que
+    o resto do Koda usa.
+    """
+    for momento in resultado.get("momentos") or []:
+        if not isinstance(momento, dict):
+            continue
+        quadro = momento.get("quadro")
+        if isinstance(quadro, (bytes, bytearray)):
+            momento["jpeg"] = base64.b64encode(bytes(quadro)).decode("ascii")
+            momento["quadro"] = f"{_MARCA_DE_QUADRO}image/jpeg;base64,{momento['jpeg']}"
+    quadros = resultado.get("quadros")
+    if isinstance(quadros, list):
+        resultado["quadros"] = [
+            f"{_MARCA_DE_QUADRO}image/jpeg;base64,"
+            f"{base64.b64encode(bytes(q)).decode('ascii')}"
+            if isinstance(q, (bytes, bytearray))
+            else q
+            for q in quadros
+        ]
+    return resultado
+
+
+@router.get("/fs/video/elementos")
+async def elementos_do_video(
+    request: Request,
+    caminho: str = Query(max_length=4096),
+    quadros: int = Query(default=QUADROS_PADRAO, ge=1, le=24),
+    transcricao: bool = True,
+) -> dict[str, object]:
+    """Metadados, quadros e transcrição de um vídeo do disco.
+
+    É o mesmo motor que entrega os elementos à IA quando alguém **manda** um vídeo na
+    conversa (ver `_turns` em `routers/chat.py`). Fica exposto para o front usar e para
+    conferir na mão. Roda em thread: a primeira transcrição de um vídeo leva minutos
+    de CPU, e a rota de eventos não pode travar nesse tempo.
+
+    Os quadros saem como `data:image/jpeg;base64` — **nada é gravado no disco**.
+    """
+    settings = request.app.state.settings
+    pasta = Path(settings.workspace_path) / ".koda-video"
+    try:
+        return _quadros_para_json(await call(elementos, caminho, pasta, quadros, transcricao))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="esse vídeo não existe nesta máquina") from None
+    except Exception as erro:
+        raise HTTPException(
+            status_code=400, detail=f"não consegui ler os elementos do vídeo: {erro}"
+        ) from None
+
+
+@router.get("/video-analizar")
+async def video_analizar(
+    request: Request,
+    caminho: str = Query(max_length=4096),
+    quadros: int = Query(default=QUADROS_PADRAO, ge=1, le=24),
+    pergunta: str = Query(default="", max_length=2000),
+) -> dict[str, object]:
+    """Analisa um vídeo do disco: metadados, transcrição e os **momentos**.
+
+    Cada momento é `{tempo_s, quadro, fala}` — o quadro gerado, o segundo em que ele
+    está e o que era falado naquele instante. É o formato que a IA consome de uma vez,
+    sem cruzar lista de quadros com lista de falas. `pergunta` é o que a pessoa quer
+    com o vídeo, e volta no resultado: a resposta é para **ele**, não para o vídeo em
+    geral. Roda em thread — a primeira transcrição leva minutos de CPU.
+
+    Os quadros saem como `data:image/jpeg;base64`, em memória.
+    """
+    settings = request.app.state.settings
+    pasta = Path(settings.workspace_path) / ".koda-video"
+    try:
+        return _quadros_para_json(await call(analisar, caminho, pasta, quadros, pergunta))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="esse vídeo não existe nesta máquina") from None
+    except Exception as erro:
+        raise HTTPException(
+            status_code=400, detail=f"não consegui analisar o vídeo: {erro}"
+        ) from None
+
+
+@router.post("/fs/transcricao")
+async def transcrever_video(request: Request) -> dict[str, object]:
+    """Transcreve a fala de um WAV 16 kHz mono — a coluna do editor de vídeo.
+
+    O áudio vem do **próprio front**: ele já decodifica o arquivo inteiro para desenhar a
+    onda, e reexportar um WAV 16k mono daí evita ffmpeg no servidor — e evita que o
+    backend precise do arquivo de vídeo em si. Roda em thread porque o Whisper em CPU
+    leva minutos, e a rota de eventos não pode travar nesse tempo.
+    """
+    corpo = await request.body()
+    if len(corpo) < 44:
+        raise HTTPException(status_code=400, detail="áudio vazio")
+    if len(corpo) > _TETO_DO_AUDIO:
+        raise HTTPException(status_code=413, detail="árudio grande demais (teto de 64 MB)")
+    return {"segmentos": await call(transcrever, corpo)}
 
 
 # --------------------------------------------------- o painel de código (aba Código)

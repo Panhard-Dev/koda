@@ -12,5 +12,12 @@
     "command": "node",
     "params": "../mcp/dev-logs/server.mjs",
     "enabled": true
+  },
+  {
+    "name": "video-analizar",
+    "description": "Analise de video do disco: metadados, transcricao do que e falado (com timestamps) e os momentos (segundo -> quadro -> fala). Use quando a pessoa apontar um video e quiser saber o que e dito ou pedir analise do conteudo. Para VER os quadros, peca o anexo do video na conversa.",
+    "command": "node",
+    "params": "../mcp/video-analizar/server.mjs",
+    "enabled": true
   }
 ]
