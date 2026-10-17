@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissões padrão da janela principal do Koda. Os controles de janela (minimizar, maximizar, fechar) e a área de arraste da titlebar customizada precisam destes grants. As quatro de `core:webview` são do navegador embutido do Painel Dev: é um webview **filho** (contexto de topo), e é o que faz um site que recusa ser embutido em `<iframe>` — `X-Frame-Options`/`frame-ancestors` — aparecer mesmo assim. Sem elas, criar e posicionar o navegador do painel falha com permissão negada.",
+  "description": "Permissões padrão da janela principal do Koda. Os controles de janela (minimizar, maximizar, fechar) e a área de arraste da titlebar customizada precisam destes grants. As cinco de `core:webview` são do navegador embutido do Painel Dev: é um webview **filho** (contexto de topo), e é o que faz um site que recusa ser embutido em `<iframe>` — `X-Frame-Options`/`frame-ancestors` — aparecer mesmo assim. Sem elas, criar e posicionar o navegador do painel falha com permissão negada. A de listar (`get-all-webviews`) é a varredura de órfãos: webviews `painel-dev-*` que vazaram de sessões anteriores são fechados na próxima abertura do painel.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -12,6 +12,7 @@
     "core:webview:allow-create-webview",
     "core:webview:allow-set-webview-position",
     "core:webview:allow-set-webview-size",
-    "core:webview:allow-webview-close"
+    "core:webview:allow-webview-close",
+    "core:webview:allow-get-all-webviews"
   ]
 }
