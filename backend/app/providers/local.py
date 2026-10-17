@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 from .. import host_auth
 from ..config import Settings
-from .base import ChatOptions, ChatTurn, Piece
+from .base import ChatOptions, ChatTurn, Piece, TransientProviderError
 
 #: Nomes de exibição dos modelos, para a resposta offline ficar legível.
 #: É só rótulo: quem serve os modelos de verdade é o serviço.
@@ -35,7 +36,19 @@ class LocalProvider:
     ready = True
 
     def __init__(self, settings: Settings) -> None:
+        self.settings = settings
         self.delay = max(0, settings.local_stream_delay_ms) / 1000
+
+    def resolve_model(self, model: str) -> str:
+        """Id vazio cai no modelo padrão, como no provider do host.
+
+        O local não serve modelo nenhum, mas a rota do agente pergunta o id resolvido
+        **antes** de rodar (é ele que vai na ficha da resposta). Sem este método, o
+        `AttributeError` matava o stream logo antes do evento `done` — e a tela via «a
+        conexão fechou no meio da resposta» depois de dez tentativas, que é mentira: o
+        backend estava de pé, só não tinha modelo para servir.
+        """
+        return model or self.settings.host_model
 
     def _explicacao(self) -> str:
         """Por que esta resposta não é de um modelo, e o que fazer a respeito.
@@ -79,3 +92,24 @@ class LocalProvider:
             yield Piece(word if index == 0 else f" {word}")
             if self.delay:
                 await asyncio.sleep(self.delay)
+
+    async def step(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str = ""
+    ) -> Any:
+        """O agente **não** roda no provider local — e falha com erro, não com crash.
+
+        O local existe para o chat avulso não ficar mudo (sessão caindo, host sumido). O
+        agente precisa de ferramentas, e o local não tem nenhuma. Sem este `step`, o laço
+        do agente chamava um método que não existia e morria com `AttributeError` — o
+        stream fechava **sem evento final**, e a tela via «a conexão fechou no meio da
+        resposta» depois de dez tentativas, que é mentira: o backend estava de pé.
+
+        `TransientProviderError` de propósito: quem insiste é o laço do agente, e ele
+        reescolhe o provider a cada tentativa quando o host dos modelos voltar — a linha
+        «Reconectando…» aparece e a rodada segue sozinha.
+        """
+        raise TransientProviderError(
+            "O serviço de modelos (o host) não está respondendo neste computador. "
+            "O Koda reabre ele sozinho — se mesmo assim não voltar, suba o host à mão "
+            "(host/c-host.exe) e mande de novo."
+        )

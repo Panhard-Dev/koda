@@ -33,7 +33,11 @@ async def _estado(request: Request) -> HostSessaoEstado:
         conta=host_auth.rotulo_da_conta(),
         provider=engine.name,
         provider_ready=engine.ready,
-        tools_ready=hasattr(engine, "step"),
+        # O agente só roda com modelo de verdade: o provider local **tem** `step` (que
+        # falha com erro claro, em vez de derrubar o stream), mas não executa ferramenta
+        # nenhuma. Quem responde a verdade, portanto, é o nome do provider — o `hasattr`
+        # mentiria agora que o local também tem `step`.
+        tools_ready=engine.name != "local",
     )
 
 

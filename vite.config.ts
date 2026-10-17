@@ -145,11 +145,17 @@ export default defineConfig({
       // Como nada aqui é código do frontend, o jeito é não vigiar a pasta. O mesmo vale
       // para o estado de ferramenta (`.mimosa/`), os artefatos do Tauri
       // (`src-tauri/target`) e o ambiente virtual do backend (`backend/.venv`).
+      //
+      // O `backend/` inteiro entra na lista pelo mesmo motivo do `host/`: editar um `.py`
+      // do backend passa por um arquivo temporário (`video.py.<pid>.<uuid>.tmp`) que o
+      // watcher tenta abrir no meio da escrita e leva EBUSY — derrubando o `npm run dev`
+      // justo quando se está mexendo nos dois lados. Nada em `backend/` é código do
+      // frontend, então vigiar essa árvore só rende esse risco.
       ignored: [
         '**/host/**',
         '**/.mimosa/**',
         '**/src-tauri/target/**',
-        '**/backend/.venv/**',
+        '**/backend/**',
       ],
     },
   },
