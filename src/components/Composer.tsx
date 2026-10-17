@@ -7,6 +7,7 @@ import {
   BrainCircuit,
   ChevronDown,
   CircleDot,
+  ClipboardList,
   FolderKanban,
   FolderOpen,
   FolderPlus,
@@ -43,6 +44,8 @@ import { MODOS_PERMISSAO, modoDe } from '../permissao'
  * Auto dispensa aprovações; Livre também libera ferramentas de arquivo fora do projeto.
  */
 export const ICONE_DO_MODO: Record<ModoPermissao, ReactNode> = {
+  // Plan: um rascunho, não um escudo — não é sobre confiar, é sobre ver antes.
+  plan: <ClipboardList className="h-3.5 w-3.5 text-sky-400" strokeWidth={1.7} />,
   manual: <Hand className="h-3.5 w-3.5 text-emerald-400" strokeWidth={1.7} />,
   default: <ShieldCheck className="h-3.5 w-3.5 text-amber-300" strokeWidth={1.7} />,
   auto: <ShieldAlert className="h-3.5 w-3.5 text-red-400" strokeWidth={1.7} />,
@@ -56,6 +59,8 @@ export const ICONE_DO_MODO: Record<ModoPermissao, ReactNode> = {
  * cor, não decifrar um anel em volta do botão.
  */
 const COR_DO_MODO: Record<ModoPermissao, string> = {
+  // Plan não é sobre confiança, é sobre *ver antes*: azul diz "isto é um rascunho".
+  plan: 'text-sky-400',
   manual: 'text-emerald-400',
   default: 'text-amber-300',
   auto: 'text-red-400',

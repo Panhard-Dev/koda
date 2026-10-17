@@ -156,7 +156,9 @@ PROMPT_FERRAMENTAS = (
     "adequado em vez de repetir a promessa — terminar uma resposta com um plano e sem "
     "nenhuma chamada de ferramenta significa que **nada** mudou no disco. Decida se precisa "
     "ler ou pesquisar antes de editar; se o pedido já especifica a mudança e o arquivo, "
-    "escolha diretamente a ferramenta de edição apropriada.\n"
+    "escolha diretamente a ferramenta de edição apropriada. A exceção é o plano de tarefa "
+    "grande: terminar a resposta com o bloco `plano` e a pergunta de aceitação é o fluxo "
+    "certo, não procrastinação.\n"
     "14. Se uma ferramenta falhar, o trabalho **não** acabou: leia o erro, ajuste o argumento "
     "(caminho relativo à pasta de trabalho, trecho único no edit_file) e chame de novo — ou "
     "use outra ferramenta para chegar no mesmo resultado. Timeout, exceção, saída inválida "
@@ -167,10 +169,13 @@ PROMPT_FERRAMENTAS = (
     "15. Use os nomes exatos da lista acima. Nomes parecidos (`run_command`, "
     "`list_directory`, `run_code`, `read_file` para uma pasta) podem até ser aceitos, mas "
     "chamar a ferramenta certa é mais rápido e não gera erro de argumento.\n"
-    "16. **Tarefa grande começa com um plano.** Antes de mexer em qualquer coisa, divida o "
-    "pedido em itens curtos e concretos e registre com `update_todos` (todos os itens, o "
-    "primeiro com `atual: true`). Só depois comece a executar, item por item — e a cada "
-    "item terminado, chame `update_todos` de novo marcando-o com `feito: true` e apontando "
+    "16. **Tarefa grande começa com um plano, e o plano pede aceitação.** Antes de mexer em "
+    "qualquer coisa, divida o pedido em itens curtos e concretos e registre com `update_todos` "
+    "(todos os itens, o primeiro com `atual: true`). Em seguida apresente o plano num bloco "
+    "`plano` (com `o_que_e`, `pra_que`, `por_que`, `como`, `mudancas` e `resultado` — todos) e "
+    "PERGUNTE se pode começar. Numa tarefa grande, executar antes do sim é erro — é a exceção "
+    "legítima da regra 13. Depois do aceito, execute item por item — e a cada item terminado, "
+    "chame `update_todos` de novo marcando-o com `feito: true` e apontando "
     "o próximo como `atual: true`. A pessoa vê a lista na conversa e acompanha."
     "\n   É grande o que tem várias etapas, vários arquivos/partes, refatoração, migração, "
     "\"faz tudo\", ou um pedido longo. Não é grande o que se resolve em uma ou duas "
@@ -235,9 +240,10 @@ CARACTERES_PARA_PLANO = 600
 DIVIDIR_TAREFA = (
     "Antes de executar: esta tarefa é grande. Divida agora em itens curtos e concretos e "
     "registre o plano com `update_todos` (todos os itens de uma vez, o primeiro com "
-    "`atual: true`). Só depois comece a executar — e a cada item terminado, chame "
-    "`update_todos` de novo com a lista atualizada. Não comece pela ferramenta de trabalho "
-    "antes de a lista existir."
+    "`atual: true`). Em seguida apresente o plano num bloco `plano` (com `o_que_e`, "
+    "`pra_que`, `por_que`, `como`, `mudancas` e `resultado` — todos) e pergunte se pode "
+    "começar — só execute depois do sim. Quando a pessoa aceitar, execute item a item e, a "
+    "cada item terminado, chame `update_todos` de novo com a lista atualizada."
 )
 
 EXIGIR_PLANO = (
@@ -245,6 +251,43 @@ EXIGIR_PLANO = (
     "`update_todos` AGORA com todos os itens (o que já fez marcado com `feito: true`, o "
     "próximo com `atual: true`) e siga daí, mantendo a lista em dia."
 )
+
+#: Cobrança interna quando o plano foi registrado mas **não** foi apresentado no bloco
+#: visual — o caso do plano que sai em prosa e a pessoa nem vê a interface. Depois dela,
+#: o próximo texto do modelo tem de ser o bloco (e nada de ferramenta).
+EXIGIR_BLOCO_PLANO = (
+    "Você registrou o plano, mas não o apresentou no bloco visual — e é nele que a "
+    "pessoa decide. Reapresente o MESMO plano num único bloco ```koda-plano```, com as "
+    "seis partes (o_que_e, pra_que, por_que, como, mudancas e resultado), e PARE. "
+    "Nenhuma ferramenta a partir de agora: quem autoriza o começo é a pessoa, não você."
+)
+
+#: O plano apresentado no cartão interativo. É esta marca (e não vocabulário de "plano")
+#: que o portão procura no texto do modelo.
+BLOCO_PLANO = re.compile(r"```koda-plano\b", re.IGNORECASE)
+
+#: A fala da pessoa que **destrava** o plano. Lista conservadora de propósito: o portão
+#: segura o trabalho, então um falso positivo aqui pularia o portão — e um falso negativo
+#: só custa a pessoa dizer "pode começar" (ou apertar o botão do cartão).
+FALA_ACEITE = re.compile(
+    r"plano\s+aceito|aceito\s+o\s+plano|t[áa]\s+aprovado|aprov[oóa]|pode\s+come[çc]ar|"
+    r"pode\s+iniciar|pode\s+seguir|manda\s+ver|vai\s+em\s+frente|bora\b|"
+    r"continu[ae]\b|retom[ae]\b",
+    re.IGNORECASE,
+)
+
+
+def _aceitou_plano(mensagens: list[dict[str, Any]]) -> bool:
+    """A pessoa já disse «pode começar» (ou variante) na última fala dela?
+
+    Olha a **última** mensagem de pessoa: o plano destrava pela resposta ao cartão, não
+    por um sim antigo no meio da conversa. Mensagens internas do loop não contam — elas
+    entram no `historico`, nunca nas `mensagens` originais.
+    """
+    for mensagem in reversed(mensagens):
+        if mensagem.get("role") == "user":
+            return bool(FALA_ACEITE.search(str(mensagem.get("content", ""))))
+    return False
 
 
 # ------------------------------------------------- tetos de persistência (não de trabalho)
@@ -1642,6 +1685,8 @@ MAX_VAZIAS = 30
 # mudar os dois lados.
 PARADA_PENDENTES = "pending_steps"
 """A lista que o próprio modelo registrou ficou com item em aberto."""
+PARADA_AGUARDANDO_ACEITE = "awaiting_plan_approval"
+"""O plano está apresentado e a rodada fechou esperando o sim (ou o botão) da pessoa."""
 PARADA_ANUNCIO = "announced_only"
 """O modelo anunciou o próximo passo e encerrou sem executá-lo."""
 PARADA_TEMPO = "time_limit"
@@ -1853,6 +1898,7 @@ async def executar(
     anexos: Any = None,
     skills: Any = None,
     settings: Settings | None = None,
+    planejar: bool = False,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -2022,6 +2068,14 @@ async def executar(
         # A instrução entra como mensagem de pessoa, depois do pedido: é o formato que o
         # provedor aceita, e o modelo lê o "divida antes de executar" junto do pedido.
         historico.append({"role": "user", "content": DIVIDIR_TAREFA})
+    # PORTÃO DO PLANO: o estado que segura a execução. `aceito` nasce da última fala da
+    # pessoa ("plano aceito, pode começar" — o botão do cartão manda exatamente isso);
+    # enquanto falso, todo plano registrado congela a rodada. Vale para plano pedido
+    # (`grande`) e para plano que o modelo montou por conta: quem registrou itens
+    # declarou que a coisa é grande.
+    aceito = _aceitou_plano(mensagens)
+    #: Quantas vezes o loop já cobrou o bloco visual do plano (ver EXIGIR_BLOCO_PLANO).
+    cobrancas_plano = 0
     limite = time.monotonic() + timeout_s if timeout_s else None
 
     async def passo_de_retoma(
@@ -2348,6 +2402,16 @@ async def executar(
                 retomadas = 0
                 cobrancas = 0
                 verificacoes = 0
+            # PORTÃO DO PLANO (fechamento por texto): o plano está apresentado e a
+            # pessoa ainda não disse sim. A rodada **fecha aqui** — pendência de plano
+            # esperando aceite não é item esquecido a retomar, e a cobrança abaixo não
+            # pode empurrar o modelo a "continuar" por conta própria.
+            if todos and plano_feito and not aceito:
+                texto_final = resultado.text
+                completou = False
+                motivo = PARADA_AGUARDANDO_ACEITE
+                break
+
 
             # 1. O que o próprio modelo registrou que faltava fazer — o sinal mais forte,
             #    porque não depende do vocabulário da resposta.
@@ -2678,6 +2742,21 @@ async def executar(
                 )
             if negado_por_codigo and oportunidade is not None:
                 saida = aviso_de_ferramenta(oportunidade)
+            elif planejar and _muda_algo(chamada.name, argumentos, workspace):
+                # Modo **Plan**: a ferramenta que MUDA algo não roda — só a de leitura
+                # passa. É o que faz o modo ser "planeje e pare" de verdade, e não "planeje
+                # e faça igual": o modelo lê o projeto à vontade, monta o plano e para.
+                #
+                # O critério é o mesmo do cartão de permissão (`ferramentas.classificar`
+                # devolver algo = muda o disco ou roda comando). Reusar essa régua é o que
+                # mantém as duas coisas de acordo — não há uma segunda lista para sair de
+                # sincronia quando uma ferramenta nova entra.
+                saida = (
+                    "PLANO: você está no modo Plan, então esta ferramenta NÃO foi executada "
+                    f"(`{chamada.name}`). Nada foi alterado. Registre o que pretendia fazer "
+                    "com `update_todos`, explique o plano em poucas linhas e encerre — quem "
+                    "decide seguir é a pessoa."
+                )
             elif chamada.name == subagente.FERRAMENTA:
                 # O sub-agente roda **aqui**, e não pelo despacho: quem sabe rodá-lo é o laço
                 # (`agent`), e `tools` não pode importar `agent` — seria import para cima.
@@ -2810,6 +2889,26 @@ async def executar(
             historico.append(
                 {"role": "tool", "tool_call_id": chamada.id, "content": saida}
             )
+
+        # PORTÃO DO PLANO (passo com ferramenta): o plano foi registrado e a pessoa ainda
+        # não aceitou — nada mais roda nesta rodada. Se o texto do passo já trouxe o
+        # bloco `koda-plano`, o cartão está na tela e basta parar; se não trouxe, o loop
+        # cobra o bloco (EXIGIR_BLOCO_PLANO) uma vez antes de fechar, para a interface
+        # interativa aparecer em vez de um plano em prosa.
+        if todos and plano_feito and not aceito:
+            if BLOCO_PLANO.search(resultado.text):
+                texto_final = resultado.text
+                completou = False
+                motivo = PARADA_AGUARDANDO_ACEITE
+                break
+            if cobrancas_plano < MAX_COBRANCAS:
+                cobrancas_plano += 1
+                historico.append({"role": "user", "content": EXIGIR_BLOCO_PLANO})
+                continue
+            texto_final = resultado.text
+            completou = False
+            motivo = PARADA_AGUARDANDO_ACEITE
+            break
 
         if limite and time.monotonic() > limite:
             motivo = PARADA_TEMPO
@@ -2956,6 +3055,23 @@ def _mensagem_assistente(resultado: StepResult) -> dict[str, Any]:
     if resultado.calls:
         mensagem["tool_calls"] = [chamada.para_mensagem() for chamada in resultado.calls]
     return mensagem
+
+
+def _muda_algo(nome: str, argumentos: dict[str, Any], workspace: Path) -> bool:
+    """Esta chamada altera algo no disco ou roda comando?
+
+    A régua é a do cartão de permissão: `ferramentas.classificar` devolve uma descrição
+    quando a chamada **faz** algo, e `None` quando ela só lê (buscar arquivo, ler página,
+    procurar no código). Reusar a mesma função é o que mantém o modo Plan e o cartão de
+    acordo — uma lista própria aqui sairia de sincronia na primeira ferramenta nova.
+
+    Na dúvida (falha ao classificar), responde `True`: no modo Plan o erro seguro é **não
+    executar**.
+    """
+    try:
+        return ferramentas.classificar(nome, argumentos, workspace) is not None
+    except Exception:  # noqa: BLE001 — classificar não deveria levantar; se levantar, não executa
+        return True
 
 
 def _chave_de_anuncio(texto: str) -> str:

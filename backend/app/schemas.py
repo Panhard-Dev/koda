@@ -501,7 +501,7 @@ class Health(BaseModel):
 Permissao = Literal["sim", "sempre", "nao", "nunca"]
 """As quatro respostas do cartão de permissão (Sim, Sempre permitir, Não, Nunca permitir)."""
 
-ModoPermissao = Literal["manual", "default", "auto", "livre"]
+ModoPermissao = Literal["plan", "manual", "default", "auto", "livre"]
 
 
 class ApprovalDecision(BaseModel):

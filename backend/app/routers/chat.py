@@ -459,6 +459,10 @@ async def _agente(
                 reasoning=payload.reasoning,
                 effort=_effort(payload),
                 aprovar=None if modo_permissao in ("auto", "livre") else aprovar,
+                # Modo Plan: a rodada planeja e para. A ferramenta que muda algo não roda —
+                # só a de leitura —, e o laço devolve ao modelo o aviso de que ele está
+                # planejando (ver `planejar` e `_muda_algo` em `agent/loop.py`).
+                planejar=approvals.planejando(modo_permissao),
                 # Teto de contexto da tarefa: passando dele, o histórico do loop compacta
                 # em vez de estourar o que o provedor aceita.
                 orcamento=settings.contexto_tokens,

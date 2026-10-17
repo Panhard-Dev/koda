@@ -1,13 +1,21 @@
 """Permissão antes de mexer na máquina.
 
-São quatro modos, escolhidos no prompt box:
+São cinco modos, escolhidos no prompt box:
 
+- **plan** — **não executa nada**: divide o pedido em itens e mostra o plano, para a pessoa
+  aprovar antes de qualquer coisa acontecer. É o modo de quem quer ver o caminho antes de
+  o agente andar por ele;
 - **manual** — pergunta antes de rodar comando, escrever/editar, apagar ou sair da pasta
   do projeto;
 - **default** — deixa passar o trabalho comum (escrever arquivo dentro da pasta) e
   pergunta no que é difícil de desfazer: comando, exclusão, mexer fora da pasta;
 - **auto** — não pergunta nada; as ferramentas de arquivo continuam no projeto;
 - **livre** — não pergunta nada e libera as ferramentas de arquivo fora do projeto.
+
+O `plan` é o único que não é uma régua de permissão, e sim de **execução**: em vez de
+decidir *se pergunta*, ele decide *se faz*. Por isso não aparece em `PERGUNTA` — nenhuma
+ferramenta chega a ser classificada nele, porque nenhuma chega a rodar (ver `planejando()`
+e o corte em `agent/loop.py`).
 
 Ferramenta de **servidor externo** (MCP) pergunta em manual e em default. O Koda não sabe o
 que ela faz — roda no processo do servidor, e o que ela pode fazer é o que o servidor
@@ -33,7 +41,19 @@ import time
 
 from ..repository import new_id
 
-MODOS = ("manual", "default", "auto", "livre")
+MODOS = ("plan", "manual", "default", "auto", "livre")
+
+#: O modo em que o agente **planeja e para**, sem executar nada.
+MODO_PLAN = "plan"
+
+
+def planejando(modo: str) -> bool:
+    """O modo atual só planeja? Nenhuma ferramenta de efeito pode rodar nele.
+
+    Quem consulta é o laço do agente, antes de executar qualquer passo. Leitura continua
+    liberada: planejar exige olhar o projeto — o que não pode é **mexer** nele.
+    """
+    return modo == MODO_PLAN
 
 #: Os tipos de ação que podem exigir permissão.
 KINDS = ("comando", "escrita", "exclusao", "fora_da_pasta", "ferramenta_externa")
@@ -44,6 +64,9 @@ KINDS = ("comando", "escrita", "exclusao", "fora_da_pasta", "ferramenta_externa"
 #: uma ferramenta de fora faz, e «difícil de desfazer» é exatamente o caso dela. Fica de
 #: fora de **auto** e **livre**, que são os modos em que a pessoa já disse que não quer
 #: pergunta nenhuma (é o mesmo `PERGUNTA` que faz o `chat.py` passar `aprovar=None`).
+#:
+#: **plan** não aparece aqui de propósito: nele nada é classificado porque nada executa —
+#: a régua dele é `planejando()`, não a pergunta.
 PERGUNTA: dict[str, set[str]] = {
     "manual": {"comando", "escrita", "exclusao", "fora_da_pasta", "ferramenta_externa"},
     "default": {"comando", "exclusao", "fora_da_pasta", "ferramenta_externa"},
