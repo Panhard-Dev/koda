@@ -11,6 +11,7 @@ fazia o seletor oferecer os modelos da casa a um serviço que não os tem.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -19,6 +20,7 @@ import httpx
 from .. import host_auth
 from ..config import Settings
 from ..limits import LIMITE_DE_REQUISICOES, TetoAtingido
+from . import host_boot
 from .base import (
     Piece,
     ChatOptions,
@@ -34,6 +36,7 @@ from .openai_compat import HostProvider, OpenAICompatibleProvider, conteudo_do_t
 __all__ = [
     "ChatOptions",
     "ChatTurn",
+    "ComTeto",
     "HostProvider",
     "LocalProvider",
     "OpenAICompatibleProvider",
@@ -42,6 +45,7 @@ __all__ = [
     "TransientProviderError",
     "build_provider",
     "conteudo_do_turno",
+    "host_boot",
     "host_disponivel",
     "system_prompt",
 ]
@@ -131,4 +135,16 @@ def build_provider(settings: Settings) -> Provider:
         return ComTeto(HostProvider(settings))
     if host_disponivel(settings):
         return ComTeto(HostProvider(settings))
+    # O host não respondeu. Antes de aceitar o local — que não tem ferramentas —, tenta
+    # **reerguer** o serviço de modelos. É o que dá ao «Reconectando» o poder de reabrir o
+    # host: a tela insiste, a reescolha acontece, e o processo volta ao ar sozinho. No app
+    # instalado quem cuida disso é o vigia do shell, e aí esta tentativa nem acontece (ver
+    # `host_boot.dono_e_o_shell`).
+    if host_boot.subir(settings):
+        # O binário leva cerca de um segundo para abrir a porta: espera curta e em pedaços,
+        # para não segurar a resposta da tela por causa de um host que não vem.
+        for _ in range(8):
+            if host_disponivel(settings, timeout=0.5):
+                return ComTeto(HostProvider(settings))
+            time.sleep(0.35)
     return ComTeto(LocalProvider(settings))

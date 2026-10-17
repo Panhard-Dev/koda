@@ -27,7 +27,14 @@ from ..db import Database
 from ..deps import call, database, provider
 from ..identidade import regras as regras_identidade
 from ..identidade import remover_intro
-from ..providers import ChatOptions, ChatTurn, ProviderError, conteudo_do_turno, system_prompt
+from ..providers import (
+    ChatOptions,
+    ChatTurn,
+    ProviderError,
+    build_provider,
+    conteudo_do_turno,
+    system_prompt,
+)
 from ..repository import (
     append_message,
     ensure_conversation,
@@ -299,11 +306,33 @@ async def _texto(
 # --------------------------------------------------------------- modo agente
 
 
+async def _engine_da_rodada(request: Request, settings: Settings) -> Any:
+    """O provider desta rodada — reescolhido se o host dos modelos tiver voltado.
+
+    Quem reescolhe hoje é a sessão da conta (`/host/sessao`), que o front renova de minutos
+    em minutos. Se o host cair **e voltar** dentro dessa janela, a rodada seguinte ainda
+    pegaria o provider local — que não tem ferramentas — e o agente morraria. Ressondar
+    antes de cada rodada: host de pé, host provider de volta na hora; host caído, o local
+    responde (o chat avulso) e o agente falha com erro claro em vez de crash.
+
+    A sonda é bloqueante (o `GET /models` do host com timeout), por isso em thread: no
+    event loop ela seguraria a resposta da própria rodada.
+    """
+    engine = provider(request)
+    if engine.name != "local" or settings.provider == "local":
+        return engine
+    reescolhido = await call(build_provider, settings)
+    if reescolhido.name != "local":
+        request.app.state.provider = reescolhido
+        return reescolhido
+    return engine
+
+
 async def _agente(
     request: Request, settings: Settings, payload: ChatRequest
 ) -> AsyncIterator[str]:
     db = database(request)
-    engine = provider(request)
+    engine = await _engine_da_rodada(request, settings)
 
     started = time.perf_counter()
     store = _store_de_anexos(request)

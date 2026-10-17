@@ -48,10 +48,13 @@ TRANSITORIOS_PROXY = TRANSITORIOS
 #: sempre**, e todo modelo caía no esforço padrão pelo resto da sessão.
 CATALOGO_TTL_S = 300.0
 
-#: Não impõe prazo de leitura: um modelo pode passar bastante tempo raciocinando antes
-#: do primeiro byte. A chamada termina por resposta, erro de transporte ou cancelamento
-#: explícito do usuário; não por um relógio local. O prazo de conexão continua curto.
-TEMPO_DE_LEITURA: float | None = None
+#: Teto de leitura do provedor, em segundos. Antes era `None` (sem prazo): um host que
+#: aceitava a conexão e parava de mandar dados deixava o backend esperando **para
+#: sempre** — a rodada ficava viva, sem evento e sem erro, e a tela nunca mais
+#: respondia (o «para e não responde mais»). 90 s é mais que qualquer pensamento
+#: legítimo de modelo: quem raciocina emite `reasoning` continuamente, e 90 s de
+#: silêncio total do host é host morto. O prazo de conexão continua curto.
+TEMPO_DE_LEITURA: float = 90.0
 TIME_STREAM = httpx.Timeout(TEMPO_DE_LEITURA, connect=10.0)
 
 #: Teto de tokens **de saída** em cada passo, mandado explícito no pedido.
