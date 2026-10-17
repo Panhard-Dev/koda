@@ -34,6 +34,7 @@ from .routers import (
     models,
     nuvem,
     projects,
+    prompt,
     skills,
     store,
     usage,
@@ -205,6 +206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(store.router, prefix="/api")
     app.include_router(dev_browser.router, prefix="/api")
     app.include_router(dev_logs.router, prefix="/api")
+    app.include_router(prompt.router, prefix="/api")
 
     @app.get("/api/handshake", tags=["system"])
     async def handshake(nonce: str = "") -> dict[str, str]:
