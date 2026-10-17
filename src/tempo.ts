@@ -88,9 +88,14 @@ let gastos = 0
  * e rascunho ilegível. Nada aqui pode lançar: sem `localStorage` (janela privada, armazenamento
  * bloqueado) o app tem de continuar contando — só que sem lembrar entre sessões.
  */
-function carregar(): number {
+/**
+ * Lê o rascunho de **uma chave específica** — a de «ninguém» ou a de outra conta.
+ *
+ * O corpo é o do `carregar()`, que passa a ser só um atalho para a chave da conta atual.
+ */
+function carregarNa(chave: string): number {
   try {
-    const cru = window.localStorage.getItem(chaveDe())
+    const cru = window.localStorage.getItem(chave)
     if (!cru) return 0
     const guardado = JSON.parse(cru) as { dia?: string; gastos?: number; restante?: number }
     if (guardado.dia !== diaDeHoje()) return 0
@@ -107,6 +112,10 @@ function carregar(): number {
   }
 }
 
+function carregar(): number {
+  return carregarNa(chaveDe())
+}
+
 gastos = carregar()
 let relogio: ReturnType<typeof setInterval> | null = null
 const ouvintes = new Set<() => void>()
@@ -119,6 +128,15 @@ function avisar() {
 function guardar() {
   try {
     window.localStorage.setItem(chaveDe(), JSON.stringify({ dia: diaDoGasto, gastos }))
+  } catch {
+    // Sem localStorage: o rascunho vale só para esta sessão.
+  }
+}
+
+/** Grava o rascunho **numa chave específica** — a da conta que está saindo. */
+function guardarNa(chave: string) {
+  try {
+    window.localStorage.setItem(chave, JSON.stringify({ dia: diaDoGasto, gastos }))
   } catch {
     // Sem localStorage: o rascunho vale só para esta sessão.
   }
@@ -151,13 +169,38 @@ export function definirHorasDoDia(horas: number): void {
  * Quem chama é o `App`, quando a conta entra ou sai. O valor que estava na conta anterior
  * fica onde está (a chave é dela): voltar para aquela conta reencontra o rascunho, e o
  * backend, quando responde, corrige os dois pelo que ele gravou.
+ *
+ * **Trocar de conta não pode apagar o que esta sessão já contou.** A sonda de sessão
+ * leva um tempo para dizer quem está aqui, e uma resposta pode sair antes dela: os
+ * segundos contados nesse intervalo ficavam na chave de «ninguém» e morriam quando a
+ * conta chegava — a pessoa via `07:59:56`, reiniciava (ou a conta caía) e o relógio
+ * voltava a `08:00:00`, com o backend **tendo** o gasto gravado. Por isso:
+ *
+ * - **ninguém → conta**: os segundos sem dono são de quem chegou. Se a conta nova não
+ *   tem rascunho de hoje, eles passam a ser dela (e são gravados na chave nova);
+ * - **conta → conta**: o que foi contado desde a última troca é da conta que está
+ *   saindo — é fechado na chave **dela** antes de a nova ser carregada.
  */
 export function definirConta(identificador: string | null): void {
   const limpo = (identificador ?? '').trim().toLowerCase() || null
   if (limpo === contaAtual) return
+  const gastosDaSessao = gastos
+  const veioDeNinguem = contaAtual === null
+  const chaveAntiga = chaveDe()
   contaAtual = limpo
-  gastos = carregar()
+  const daNovaConta = carregar()
+  if (veioDeNinguem) {
+    // Sem dono, os segundos são de quem chegou — e o rascunho de «ninguém» também:
+    // uma resposta pode ter sido contada antes de a sonda dizer quem era (ou depois de
+    // um reload, que só lê a chave genérica no init). Esse tempo está na chave de
+    // ninguém e morreria se a chave da conta fosse a única lida. Fica o maior dos três.
+    gastos = Math.max(gastosDaSessao, daNovaConta, carregarNa(CHAVE))
+  } else {
+    if (gastosDaSessao > 0) guardarNa(chaveAntiga)
+    gastos = daNovaConta
+  }
   diaDoGasto = diaDeHoje()
+  guardar()
   avisar()
 }
 
@@ -195,12 +238,32 @@ export function ligar(ativo: boolean): void {
  * manda aqui. O tique local continua: ele é o que faz o número **andar durante a resposta**,
  * antes de a mensagem ser gravada; quando ela é, esta leitura corrige o que o tique estimou.
  *
- * Sem isto, o rascunho era a única fonte: apagar os dados do app devolvia as horas gastas, e
- * o mostrador podia discordar do que a tela de Uso mostra — que lê o banco.
+ * **A invariante: dentro do mesmo dia, o gasto nunca diminui.** Só a virada da meia-noite
+ * (no tique) e a troca de conta de propósito fazem o número descer — tudo o mais só sobe.
+ * Uma leitura atrasada do servidor, portanto, nunca devolve horas já gastas: o pior que
+ * ela faz é chegar com um número menor, e o `max` a ignora.
  */
 export function sincronizar(segundosGastos: number): void {
-  gastos = Number.isFinite(segundosGastos) ? Math.max(0, Math.floor(segundosGastos)) : 0
-  diaDoGasto = diaDeHoje()
+  const doServidor = Number.isFinite(segundosGastos)
+    ? Math.max(0, Math.floor(segundosGastos))
+    : 0
+  const hoje = diaDeHoje()
+  // Virou o dia com o app aberto: o gasto de ontem morreu — sem isto, o `max` abaixo
+  // carregaria para hoje as horas de ontem. É a **única** queda legítima do dia.
+  //
+  // Daqui para baixo o gasto **só sobe**: o número do servidor é um piso, nunca um teto,
+  // e nenhuma leitura atrasada — sonda rodando no meio da rodada, consulta que tropeça,
+  // painel que ainda não gravou a resposta em curso — pode devolver horas que a pessoa
+  // já gastou. Foi assim que o dono perdeu 2 h no mostrador durante um turno longo: a
+  // aba pulou de `06:00:00` para perto de `07:00:00`, e a verdade só voltava quando a
+  // rodada fechava e o servidor finalmente sabia dela. Antes havia um ramo que
+  // **substituía** o gasto quando o dia não batia; agora o dia é tratado antes, e o
+  // `max` é incondicional.
+  if (hoje !== diaDoGasto) {
+    diaDoGasto = hoje
+    gastos = 0
+  }
+  gastos = Math.max(gastos, doServidor)
   guardar()
   avisar()
 }
