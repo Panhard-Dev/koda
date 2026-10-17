@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Download, Loader2, X } from 'lucide-react'
 import Composer from './components/Composer'
-import type { SendPayload } from './components/Composer'
+import type { ItemDaFila, SendPayload } from './components/Composer'
 import Header from './components/Header'
 import type { ConversationSummary } from './components/Header'
 import KodaLogo from './components/KodaLogo'
@@ -1056,6 +1056,21 @@ function App() {
     setRodadas(rodadasRef.current)
   }
 
+  /**
+   * A fila: as mensagens escritas enquanto o agente trabalhava.
+   *
+   * Espelho do estado na ref, pelo mesmo motivo das rodadas — quem lê a fila de dentro
+   * de um efeito precisa da lista de agora, não da do render em que ele foi montado.
+   * Cada item carrega a conversa em que nasceu: a fila de uma conversa não vaza na
+   * outra, e uma mensagem nunca é mandada para a conversa errada.
+   */
+  const filaRef = useRef<ItemDaFila[]>([])
+  const [fila, setFila] = useState<ItemDaFila[]>([])
+  const escreverFila = (mudar: (atual: ItemDaFila[]) => ItemDaFila[]) => {
+    filaRef.current = mudar(filaRef.current)
+    setFila(filaRef.current)
+  }
+
   /** Muda a resposta de uma rodada sem tirá-la de curso. */
   const patchRodada = (id: string, patch: (mensagem: Message) => Message) =>
     escreverRodadas((atual) =>
@@ -1109,6 +1124,8 @@ function App() {
   const pararTudo = () => {
     rodadasRef.current.forEach((item) => item.controller.abort())
     escreverRodadas(() => [])
+    // A fila morre junto: sem sessão, o que ela tem não tem para onde ir.
+    escreverFila(() => [])
     timersRef.current.forEach((timer) => window.clearTimeout(timer))
     timersRef.current = []
   }
@@ -2232,6 +2249,19 @@ function App() {
   }, [model])
 
   const handleSend = async (payload: PayloadDeEnvio) => {
+    /**
+     * A resposta desta conversa está em curso? Então a mensagem **não** é enviada agora:
+     * ela vai para a fila e sai quando a rodada terminar.
+     *
+     * Quem decide é daqui, e não a caixa. A caixa olharia o `busy` do render dela, e
+     * entre a rodada acabar e o render chegar existe um vão em que a prop está velha —
+     * por esse vão uma mensagem entraria na fila já sem ninguém trabalhando, e ninguém
+     * mais a mandaria. A `rodadasRef` é a lista de agora, sem vão nenhum.
+     */
+    if (rodadasRef.current.some((item) => item.conversa === conversationIdRef.current)) {
+      handleEnfileirar(payload)
+      return
+    }
     // De qual visita à conversa é este envio. O `start` do stream chega depois, e é esta
     // marca que diz se ele ainda fala da conversa que está na tela.
     const visitaNoEnvio = visitaRef.current
@@ -2446,7 +2476,19 @@ function App() {
             )
             // A tela só passa a ser esta conversa se ela ainda for a mesma de quando a
             // mensagem saiu: se a pessoa já abriu outra, quem manda é ela, não o backend.
-            if (visitaRef.current === visitaNoEnvio) definirConversa(data.conversation_id)
+            if (visitaRef.current === visitaNoEnvio) {
+              definirConversa(data.conversation_id)
+              // O que estiver na fila desta conversa nova ainda não tinha id — a conversa
+              // era `null` quando a mensagem foi enfileirada. Sem este re-apontamento a
+              // fila nunca saberia que é desta conversa, e a mensagem ficaria esperando
+              // para sempre. Só vale enquanto a tela continua nesta conversa: se a pessoa
+              // foi para outra, o `null` continua sendo da conversa de origem dela.
+              escreverFila((atual) =>
+                atual.map((item) =>
+                  item.conversa === null ? { ...item, conversa: data.conversation_id } : item,
+                ),
+              )
+            }
           },
           onDelta: (text) => {
             sinal()
@@ -2635,6 +2677,103 @@ function App() {
       setSubs((atual) => atual.map((item) => ({ ...item, vivo: false })))
     }
     }
+  }
+
+  /**
+   * Guarda a mensagem para depois — o «manda outro prompt por cima».
+   *
+   * O agente está trabalhando: a resposta em curso é que está usando a conversa, e
+   * enviar agora poria duas respostas brigando pelo mesmo histórico. A mensagem espera
+   * a vez na fila, presa à conversa em que nasceu, e sai quando a rodada daqui terminar
+   * (ver o efeito logo abaixo). Quem chama é o `handleSend`, que sabe pela `rodadasRef`
+   * se há rodada viva — sem depender de prop nenhuma.
+   */
+  const handleEnfileirar = (payload: SendPayload) => {
+    // `conversationIdRef`, e não o estado: enfileirar pode acontecer num retorno
+    // assíncrono, e a ref é o valor de agora.
+    escreverFila((atual) => [
+      ...atual,
+      { id: newId(), conversa: conversationIdRef.current, payload },
+    ])
+  }
+
+  /** Tira uma mensagem da fila — desistiu, ou ela voltou para a caixa pelo lápis. */
+  const handleRemoverDaFila = (id: string) => {
+    escreverFila((atual) => atual.filter((item) => item.id !== id))
+  }
+
+  /**
+   * O envio mais recente, lido por efeito sem prender o efeito a este render.
+   *
+   * `handleSend` muda de identidade a cada render (não é memoizado), e um efeito que
+   * dependesse dele rodaria a cada render. A ref guarda o de agora — que é o que vale
+   * quando o efeito dispara.
+   */
+  const handleSendRef = useRef(handleSend)
+  handleSendRef.current = handleSend
+
+  /**
+   * O `busy` da vista anterior. A fila só dispara na **transição** — trabalhando →
+   * parado —, e não em qualquer mexida no estado enquanto parado.
+   *
+   * Sem esta marca o primeiro disparo já mudava a fila, o efeito corria de novo por
+   * causa da dependência `fila`, e a fila **inteira** sairia de uma vez: três correções
+   * escritas durante uma resposta virariam três rodadas paralelas. A fila é o contrário
+   * disso — uma mensagem de cada vez, cada uma depois da resposta da anterior. Foi a
+   * bancada `fila-check.tsx` que pegou este despertar sozinho.
+   */
+  const busyAnteriorRef = useRef(busy)
+
+  /**
+   * A fila anda sozinha: quando o trabalho desta conversa termina, a primeira mensagem
+   * esperando sai.
+   *
+   * Duas travas, ambas pela mesma razão — a fila é da conversa:
+   * 1. só dispara na transição trabalhando → parado, isto é, quando a rodada desta
+   *    conversa acabou (a rodada de outra conversa não segura a fila desta, e
+   *    vice-versa);
+   * 2. só manda o que pertence a esta conversa — trocar de conversa não leva a fila
+   *    junto, e a mensagem esperando não vaza na conversa errada.
+   *
+   * O item sai da fila **antes** de ser mandado: se o envio falhar, ele não fica preso
+   * esperando uma rodada que não existe mais. Quem o efeito lê é o `filaRef`, não o
+   * estado — é a lista de agora, não a do render em que ele foi montado.
+   */
+  useEffect(() => {
+    const estavaTrabalhando = busyAnteriorRef.current
+    busyAnteriorRef.current = busy
+    if (busy || !estavaTrabalhando) return
+    const proximo = filaRef.current[0]
+    if (!proximo || proximo.conversa !== conversa) return
+    escreverFila((atual) => atual.slice(1))
+    void handleSendRef.current(proximo.payload)
+  }, [busy, conversa, fila])
+
+  /**
+   * Manda uma mensagem da fila **agora**, no meio da resposta.
+   *
+   * É o «manda outro prompt por cima pra arrumar o que fiz» no sentido literal: a rodada
+   * em curso é interrompida — a resposta pela metade fica marcada como interrompida,
+   * como em qualquer Parar — e a mensagem segue no mesmo instante.
+   *
+   * A ordem importa, e é esta:
+   * 1. a mensagem sai da fila **antes** — senão o disparo automático a pegaria no vão
+   *    entre a rodada parar e a nova nascer, e as duas sairiam juntas;
+   * 2. a rodada é parada antes do envio — o `handleSend` decide pela `rodadasRef`, e
+   *    com a rodada ainda na lista a mensagem nova seria enfileirada em vez de enviada;
+   * 3. o envio vem no **mesmo** bater do clique: o React agrupa os estados das três
+   *    mexidas, a tela nunca vê o «sem rodada» no meio do caminho, e o efeito da fila
+   *    não dispara no vão — só a rodada nova nasce.
+   *
+   * O resto da fila fica como estava: enviar agora uma mensagem não é desistir das
+   * seguintes — elas continuam esperando a vez.
+   */
+  const handleEnviarAgora = (id: string) => {
+    const item = filaRef.current.find((espera) => espera.id === id)
+    if (!item) return
+    escreverFila((atual) => atual.filter((espera) => espera.id !== id))
+    if (rodada) pararRodada(rodada.id)
+    void handleSendRef.current(item.payload)
   }
 
   /**
@@ -3137,6 +3276,11 @@ function App() {
               onSend={handleSend}
               onStop={handleStop}
               busy={busy}
+              // Só a fila desta conversa: a de outra não aparece aqui, e o que ela tem
+              // não é mandado daqui.
+              fila={fila.filter((item) => item.conversa === conversa)}
+              onEnviarAgora={handleEnviarAgora}
+              onRemoverDaFila={handleRemoverDaFila}
               variant={hasMessages ? 'chat' : 'home'}
               projects={projects}
               projectId={projectId}
