@@ -18,6 +18,12 @@ export type ModoDePermissao = {
 
 export const MODOS_PERMISSAO: ModoDePermissao[] = [
   {
+    id: 'plan',
+    label: 'Plan — planejar antes de fazer',
+    hint: 'Divide o pedido em itens e mostra o plano para você aprovar; não mexe em nada até você mandar seguir',
+    curto: 'Plan',
+  },
+  {
     id: 'manual',
     label: 'Perguntar sempre',
     hint: 'Pede antes de rodar comando, escrever, apagar ou sair da pasta',

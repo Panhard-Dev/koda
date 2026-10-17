@@ -786,7 +786,7 @@ export type ApiProject = {
   existe: boolean
 }
 
-export type ModoPermissao = 'manual' | 'default' | 'auto' | 'livre'
+export type ModoPermissao = 'plan' | 'manual' | 'default' | 'auto' | 'livre'
 
 export type ProjectsEstado = {
   projetos: ApiProject[]

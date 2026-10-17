@@ -2201,6 +2201,34 @@ function App() {
     void sair()
   }
 
+  /**
+   * O cartão do plano (`bloco plano`) decide o destino da tarefa: **Fazer** aceita e
+   * **Desistir** recusa. O clique nasce lá dentro (sem saber quem envia) e chega aqui
+   * como evento de janela — este é o único ouvido, e ele transforma a decisão na
+   * mensagem que o agente entende. As configurações (modelo, esforço, web, pasta) são
+   * as do último envio, porque aceitar um plano é continuar a mesma conversa; sem
+   * último envio, sai do modelo ativo com o resto no padrão.
+   */
+  useEffect(() => {
+    const aoDecidir = (evento: Event) => {
+      const aceito = (evento as CustomEvent<{ aceito?: boolean }>).detail?.aceito !== false
+      const anterior = ultimoPayloadRef.current
+      const payload: PayloadDeEnvio = {
+        text: aceito ? 'Plano aceito, pode começar.' : 'Desisti do plano, não faça nada.',
+        attachments: anterior?.attachments ?? [],
+        model: anterior?.model ?? model,
+        reasoning: anterior?.reasoning ?? true,
+        web: anterior?.web ?? false,
+        effort: anterior?.effort ?? EFFORT_PADRAO,
+        project_path: anterior?.project_path ?? null,
+      }
+      void handleSend(payload)
+    }
+    window.addEventListener('koda-plano', aoDecidir)
+    return () => window.removeEventListener('koda-plano', aoDecidir)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model])
+
   const handleSend = async (payload: PayloadDeEnvio) => {
     // De qual visita à conversa é este envio. O `start` do stream chega depois, e é esta
     // marca que diz se ele ainda fala da conversa que está na tela.
