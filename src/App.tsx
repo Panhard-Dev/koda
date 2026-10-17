@@ -7,6 +7,7 @@ import type { ConversationSummary } from './components/Header'
 import KodaLogo from './components/KodaLogo'
 import LoginScreen from './components/LoginScreen'
 import Presente, { type Aba } from './components/Presente'
+import Store from './components/Store'
 import type { PlanoDaConta } from './api/cloud'
 import CheckoutScreen, { type CompraDoCheckout } from './components/CheckoutScreen'
 
@@ -879,7 +880,9 @@ function App() {
    */
   const [mostrarTraces, setMostrarTraces] = useState(true)
   const [history, setHistory] = useState<Conversation[]>([])
-  const [view, setView] = useState<'chat' | 'settings' | 'presente' | 'checkout'>('chat')
+  const [view, setView] = useState<'chat' | 'settings' | 'presente' | 'checkout' | 'store'>(
+    'chat',
+  )
   // A área do presente é a única tela que guarda em que vista abre, e são dois caminhos que
   // discordam: o botão do cabeçalho abre no «Free» — o que a pessoa já tem, porque abrir no que
   // ela não tem é vender antes de deixar olhar — e o checkout devolve para «Planos», que é a
@@ -2076,6 +2079,19 @@ function App() {
   }
 
   /**
+   * Um conector da Store mudou de estado: relê a lista de MCPs.
+   *
+   * É o que faz o conector ativado na Store **aparecer na área MCP** (Ajustes → MCPs e o
+   * submenu do cabeçalho) sem a pessoa sair e voltar. Sem isto, a Store dizia «Ativo» e o
+   * resto do app continuava mostrando a lista de antes — duas verdades na mesma tela.
+   */
+  const handleConectoresMudaram = () => {
+    listMcps()
+      .then(setMcps)
+      .catch(() => {})
+  }
+
+  /**
    * Salva um sub-agente e fica com a lista que o backend devolveu.
    *
    * A lista vem do backend, e não de um `[...current, agente]` montado aqui: salvar com um
@@ -2676,6 +2692,7 @@ function App() {
             setAbaDoPresente('free')
             setView('presente')
           }}
+          onOpenStore={() => setView('store')}
           painelAberto={painelAberto}
           onTogglePainel={() => setPainelAberto((aberto) => !aberto)}
           onAbrirBarraCamera={() => setBarraCameraAberta(true)}
@@ -2831,6 +2848,11 @@ function App() {
             setView('presente')
           }}
         />
+      ) : view === 'store' ? (
+        // A Store entra no **mesmo if/else** das outras áreas, e não como irmã solta: quem não
+        // está numa vista cai no chat, então uma condição solta desenharia a Store por cima da
+        // conversa — o mesmo defeito que a área do presente já teve.
+        <Store onClose={() => setView('chat')} onConectoresMudaram={handleConectoresMudaram} />
       ) : (
         <main className="flex min-h-0 flex-1 flex-col">
         {/*

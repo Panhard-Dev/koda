@@ -46,6 +46,9 @@ def _info(item: dict, estado: dict[str, dict] | None = None) -> McpInfo:
     (que só tinha nome e descrição) continuar valendo."""
     nome = str(item["name"])
     vivo = (estado or {}).get(nome, {})
+    # `env` não sai daqui — só o «tem ou não tem». Ver `McpInfo.credencial`.
+    env = item.get("env")
+    tem_credencial = isinstance(env, dict) and any(str(v).strip() for v in env.values())
     return McpInfo(
         name=nome,
         description=str(item.get("description", "")),
@@ -55,6 +58,7 @@ def _info(item: dict, estado: dict[str, dict] | None = None) -> McpInfo:
         conectado=bool(vivo.get("conectado", False)),
         erro=vivo.get("erro"),
         ferramentas=int(vivo.get("ferramentas", 0) or 0),
+        credencial=tem_credencial,
     )
 
 

@@ -425,6 +425,13 @@ class McpInfo(BaseModel):
     erro: str | None = None
     """Quantas ferramentas o servidor publicou no `tools/list`."""
     ferramentas: int = 0
+    """Este servidor já tem **alguma** credencial guardada (o login da Store foi feito)?
+
+    Só o sim/não, nunca o valor — é o que a tela precisa para mostrar «Entrar» ou
+    «Ativar», e vazar o token do Supabase para a interface seria trocar a segurança por
+    uma conveniência de tela.
+    """
+    credencial: bool = False
 
 
 class McpCreate(BaseModel):

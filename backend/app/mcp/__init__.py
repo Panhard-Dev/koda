@@ -28,9 +28,11 @@ oferecidas nesta rodada, em vez de a conversa travar esperando.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,16 @@ class Servidor:
     params: str = ""
     descricao: str = ""
     enabled: bool = True
+    """Variáveis de ambiente **só deste servidor**.
+
+    É onde a credencial de um conector da Store chega ao processo: quase todo servidor de
+    provedor (Supabase, Cloudflare, Firebase) não sobe sem um token, e o token não pode ir
+    no comando — iria para o `ps` da máquina e para qualquer log que imprima o argv.
+
+    O valor **nunca** volta para a interface: a rota devolve só `credencial: true`, que é o
+    que a tela precisa para saber se o login já foi feito.
+    """
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -140,6 +152,7 @@ class Gerenciador:
                     params=str(item.get("params", "")),
                     descricao=str(item.get("description", "")),
                     enabled=bool(item.get("enabled", True)),
+                    env=_env_do_item(item),
                 )
             )
         return servidores
@@ -189,9 +202,10 @@ class Gerenciador:
             return Ligacao(config=config, erro="desligado")
         cliente = ServidorMCP(
             nome=config.nome,
-            comando=self._comando_de_verdade(config.comando),
+            comando=self._resolver_no_path(self._comando_de_verdade(config.comando)),
             params=config.params,
             tempo_s=TEMPO_HANDSHAKE_S,
+            env=config.env,
         )
         if not cliente.abrir():
             motivo = cliente.erro or "não respondeu ao handshake"
@@ -228,15 +242,46 @@ class Gerenciador:
         e os dois servidores que o app traz são programas Node. Então, quando o Node que vem
         junto existe, é ele que roda.
 
+        Vale para `npx` também, e pelo mesmo motivo: os conectores da Store publicam
+        `"command": "npx"` (é assim que o provedor documenta o servidor dele), e o `npx` da
+        máquina não existe no app instalado — sem isto, todo conector baixado morria em
+        «não foi possível iniciar 'npx'» justamente onde o app promete não precisar de nada.
+
         Comando que já é caminho (tem pasta) passa intacto: quem escreveu escolheu.
         """
         if self._node is None or not self._node.is_file():
             return comando
         if len(Path(comando).parts) > 1:
             return comando
-        if comando.strip().lower() not in ("node", "node.exe"):
+        nome = comando.strip().lower()
+        if nome not in ("node", "node.exe", "npx", "npx.cmd", "npm", "npm.cmd"):
             return comando
-        return str(self._node)
+        if nome in ("node", "node.exe"):
+            return str(self._node)
+        # `npx`/`npm` moram ao lado do `node.exe`: é lá que o runtime do app os deixa.
+        for sufixo in (f"{nome}.cmd", nome, f"{nome}.exe"):
+            vizinho = self._node.parent / sufixo
+            if vizinho.is_file():
+                return str(vizinho)
+        # Não achou ao lado do Node: devolve como está e deixa o PATH da máquina decidir,
+        # que é o que já acontecia antes.
+        return comando
+
+    @staticmethod
+    def _resolver_no_path(comando: str) -> str:
+        """Nome solto que o `Popen` não sabe abrir -> caminho que ele sabe.
+
+        No Windows o `npx` do PATH é um **script de shell** sem extensão: o `CreateProcess`
+        não o executa e a falha aparece como «não foi possível iniciar 'npx'», mesmo o npx
+        estando instalado — foi exatamente o erro que o primeiro conector da Store deu. O
+        `shutil.which` procura pelas extensões do `PATHEXT` e devolve o `npx.cmd`, que abre.
+
+        Continua sem `shell=True`: resolver o caminho é o oposto de passar comando por shell.
+        """
+        if os.name != "nt" or len(Path(comando).parts) > 1:
+            return comando
+        achado = shutil.which(comando)
+        return achado or comando
 
     def _montar_mapa(self, ligacoes: dict[str, Ligacao]) -> dict[str, tuple[str, str]]:
         """O mapa `nome externo -> (servidor, ferramenta real)`.
@@ -466,6 +511,23 @@ class Gerenciador:
                 }
             )
         return saida
+
+
+def _env_do_item(item: dict[str, Any]) -> dict[str, str]:
+    """O `env` de um item do `mcps.json`, já limpo.
+
+    Só par `chave: valor` textual entra, e chave vazia é descartada: um `env` com chave sem
+    nome daria `NameError` no `Popen` ou, pior, sobrescreveria variável de sistema com lixo.
+    O arquivo é editável à mão, então tudo aqui é defesa, não zelo excessivo.
+    """
+    bruto = item.get("env")
+    if not isinstance(bruto, dict):
+        return {}
+    return {
+        str(chave).strip(): str(valor)
+        for chave, valor in bruto.items()
+        if str(chave).strip() and valor is not None
+    }
 
 
 def _esquema(bruto: dict[str, Any]) -> dict[str, Any]:
