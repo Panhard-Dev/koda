@@ -132,9 +132,9 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), arquivoLocal()],
   build: {
     // As páginas de teste entram no build junto com o app. Sem declarar o `input`, o Vite
-    // só compila o `index.html` — e `blocos.html` existiria no dev e sumiria no `dist`,
-    // que é o jeito mais fácil de uma página de conferência morrer sem ninguém perceber.
-    // Ela é pequena e não custa nada ao pacote.
+    // só compila o `index.html` — e `blocos.html` e `chat.html` existiriam no dev e
+    // sumiriam no `dist`, que é o jeito mais fácil de uma página de conferência morrer sem
+    // ninguém perceber. Elas são pequenas e não custam nada ao pacote.
     rollupOptions: {
       input: {
         // Caminhos relativos: o `package.json` é `type: module`, e ali `__dirname` não
@@ -142,6 +142,7 @@ export default defineConfig({
         // moram.
         principal: 'index.html',
         blocos: 'blocos.html',
+        chat: 'chat.html',
       },
     },
   },
