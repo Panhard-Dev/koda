@@ -8,8 +8,9 @@ import {
   BrainCircuit,
   ChevronDown,
   CircleDot,
-  FilePlus2,
   ClipboardList,
+  Clock,
+  FilePlus2,
   FolderKanban,
   FolderOpen,
   FolderPlus,
@@ -23,6 +24,7 @@ import {
   Unlock,
   Mic,
   Paperclip,
+  Pencil,
   Plus,
   ShieldAlert,
   ShieldCheck,
@@ -157,6 +159,26 @@ export type SendPayload = {
 }
 
 
+/**
+ * Uma mensagem esperando a vez: o que a pessoa escreveu enquanto o Koda trabalhava.
+ *
+ * Ela **não** é enviada na hora — o backend está com a resposta da rodada em curso, e
+ * duas respostas ao mesmo tempo na mesma conversa não existem. Fica nesta lista, presa
+ * à conversa em que nasceu, e sai quando a rodada dela terminar. É o «manda outro
+ * prompt por cima pra arrumar o que fiz»: enquanto o agente trabalha, a pessoa escreve
+ * o conserto, e ele chega logo depois, sem ninguém ter de ficar esperando com a mão no
+ * mouse.
+ */
+export type ItemDaFila = {
+  /** Identidade da linha na tela. Não é id de mensagem: é id da espera. */
+  id: string
+  /** A conversa a que ela pertence (`null` enquanto a conversa nova não tem id). */
+  conversa: string | null
+  /** O pedido inteiro: texto, anexos e os ajustes escolhidos na hora de escrever. */
+  payload: SendPayload
+}
+
+
 const PLUS_ACTIONS = [
   {
     value: 'image',
@@ -265,6 +287,9 @@ export function Composer({
   onStop,
   busy = false,
   variant = 'home',
+  fila = [],
+  onEnviarAgora,
+  onRemoverDaFila,
   projects = [],
   projectId = null,
   pastaPadrao = '',
@@ -291,6 +316,16 @@ export function Composer({
   onStop?: () => void
   busy?: boolean
   variant?: 'home' | 'chat'
+  /**
+   * As mensagens esperando a vez — as que a pessoa escreveu enquanto o agente
+   * trabalhava. Chegam **filtradas** pelo App: só as da conversa aberta, porque a fila
+   * de uma conversa não é a da outra.
+   */
+  fila?: readonly ItemDaFila[]
+  /** Manda uma mensagem da fila **agora**: interrompe a resposta em curso e a envia. */
+  onEnviarAgora?: (id: string) => void
+  /** Tira uma mensagem da fila — desistência, ou porque ela voltou para a caixa. */
+  onRemoverDaFila?: (id: string) => void
   /** Pastas registradas nesta máquina (o projeto é sempre uma pasta de verdade). */
   projects?: ApiProject[]
   /** Id da pasta aberta agora; `null` = conversa solta. */
@@ -474,8 +509,15 @@ export function Composer({
     })
   }
 
-  const canSend =
-    !busy && !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
+  /**
+   * Pode enviar? Com o agente trabalhando, **pode**.
+   *
+   * Antes o `busy` segurava o envio, e a pessoa ficava sem poder escrever o conserto
+   * enquanto o Koda fazia o que ela tinha pedido antes. Agora a mensagem vai para a
+   * fila e sai quando a resposta em curso terminar. O que continua segurando o envio é
+   * o anexo subindo — mandar a mensagem sem o arquivo pronto seria perder o arquivo.
+   */
+  const canSend = !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
   const activeModel = findModel(model, remoteModels)
   const effort = effortDoModelo(efforts, model)
   const ativo = projects.find((item) => item.id === projectId) ?? null
@@ -849,6 +891,63 @@ export function Composer({
           </ul>
         ) : null}
 
+        {/* A fila: o que a pessoa escreveu enquanto o Koda trabalhava. Cada linha é
+            uma mensagem inteira esperando a vez. A seta manda **agora** (interrompendo a
+            resposta em curso), o lápis devolve para a caixa (com os anexos) e o X
+            cancela. O estilo é o dos anexos de propósito: é a mesma idéia — algo
+            pendurado esperando o envio. */}
+        {fila.length > 0 ? (
+          <ul className="mb-2 flex flex-col gap-1.5 px-1" aria-label="Mensagens na fila">
+            {fila.map((item) => (
+              <li
+                key={item.id}
+                title="Na fila — será enviada quando o Koda terminar esta resposta"
+                className="flex items-center gap-1.5 rounded-lg bg-koda-fg/6 py-1 pr-1.5 pl-2.5 text-[12px] text-koda-fg/75"
+              >
+                <Clock className="h-3.5 w-3.5 shrink-0 text-koda-fg/45" strokeWidth={1.8} />
+                <span className="min-w-0 flex-1 truncate">
+                  {item.payload.text.trim() || 'anexo'}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Enviar agora"
+                  title="Enviar agora — interrompe a resposta em curso e manda esta mensagem"
+                  onClick={() => onEnviarAgora?.(item.id)}
+                  className="flex h-4 w-4 items-center justify-center rounded text-koda-fg/45 transition-colors hover:bg-koda-fg/10 hover:text-koda-fg"
+                >
+                  <ArrowUp className="h-3 w-3" strokeWidth={2.2} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Editar mensagem da fila"
+                  title="Editar — volta para a caixa"
+                  onClick={() => {
+                    // Editar é continuar escrevendo: o texto e os anexos voltam para a
+                    // caixa, e a linha sai da fila. Perder o rascunho que já estava na
+                    // caixa é o preço de editar — o clique é explícito.
+                    setMessage(item.payload.text)
+                    setAttachments(item.payload.attachments)
+                    onRemoverDaFila?.(item.id)
+                    textareaRef.current?.focus()
+                  }}
+                  className="flex h-4 w-4 items-center justify-center rounded text-koda-fg/45 transition-colors hover:bg-koda-fg/10 hover:text-koda-fg"
+                >
+                  <Pencil className="h-3 w-3" strokeWidth={2.2} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Remover mensagem da fila"
+                  title="Remover da fila"
+                  onClick={() => onRemoverDaFila?.(item.id)}
+                  className="flex h-4 w-4 items-center justify-center rounded text-koda-fg/45 transition-colors hover:bg-koda-fg/10 hover:text-koda-fg"
+                >
+                  <X className="h-3 w-3" strokeWidth={2.2} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
         {mostrarComandos ? (
           <div className="mb-1">
             <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
@@ -973,7 +1072,7 @@ export function Composer({
         ) : null}
 
         <label htmlFor="koda-input" className="sr-only">
-          Message Koda
+          Escreva sua mensagem para o Koda
         </label>
         {/*
          * A cor por tipo **dentro da caixa**.
@@ -1089,7 +1188,7 @@ export function Composer({
           autoCorrect="off"
           autoCapitalize="off"
           autoComplete="off"
-          placeholder="Message Koda"
+          placeholder="Escreva sua mensagem para o Koda"
           className={[
             'min-h-[72px] w-full resize-none overflow-y-auto bg-transparent px-1',
             // Com marca no texto, quem desenha é a camada de trás: o texto daqui fica
@@ -1298,7 +1397,17 @@ export function Composer({
               </button>
             )}
 
-            {isChat && busy ? (
+            {/*
+              Um botão só, e ele troca conforme o que dá para fazer:
+              - **quadrado** (Parar) enquanto o Koda trabalha e a caixa está vazia — não
+                há o que enviar, então o botão útil é o que pára o trabalho;
+              - **seta** nos outros casos. Com o Koda trabalhando **e** texto na caixa, a
+                seta manda para a fila (a mensagem sai quando a resposta terminar) — e é
+                por isso que escrever faz o quadrado dar lugar a ela: com um conserto a
+                caminho, poder mandar vale mais que poder parar. Apagar o texto traz o
+                quadrado de volta.
+            */}
+            {isChat && busy && !canSend ? (
               <button
                 type="button"
                 aria-label="Parar geração"
@@ -1311,8 +1420,8 @@ export function Composer({
             ) : (
               <button
                 type="button"
-                aria-label="Enviar mensagem"
-                title="Enviar mensagem"
+                aria-label={busy ? 'Enviar mensagem (entra na fila)' : 'Enviar mensagem'}
+                title={busy ? 'Enviar — entra na fila e sai quando o Koda terminar' : 'Enviar mensagem'}
                 disabled={!canSend}
                 onClick={send}
                 className={[
