@@ -312,19 +312,25 @@ html {
   animation: dot-pulse 1.2s infinite ease-in-out;
 }
 
-/* Brilho que atravessa a coroa enquanto o Koda pensa. */
+/* Brilho que atravessa a coroa enquanto o Koda pensa.
+   A faixa (o `rect.thinking-shine` em ThinkingMark.tsx) tem duas viewBox (1620) e
+   carrega dois brilhos numa repetição de 810: a viagem é exatamente UM período
+   (-810px → 0), então o desenho no fim do ciclo é igual ao do começo — laço sem
+   salto, e a coroa nunca fica sem brilho. Velocidade LINEAR: o easing antigo
+   (cubic-bezier) fazia a faixa parar nas duas pontas, e o brilho parecia piscar
+   de um lado para o outro em vez de atravessar. */
 @keyframes thinking-shine {
   from {
-    transform: translateX(-100%);
+    transform: translateX(-810px);
   }
   to {
-    transform: translateX(100%);
+    transform: translateX(0);
   }
 }
 
 .thinking-shine {
-  fill: var(--koda-accent);
-  animation: thinking-shine 1.5s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  /* A cor vem do gradiente (`koda-thinking-shine`); aqui só a viagem. */
+  animation: thinking-shine 1.5s linear infinite;
   will-change: transform;
 }
 

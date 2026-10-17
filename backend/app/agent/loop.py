@@ -2431,6 +2431,8 @@ async def executar(
                 emit,
                 f"O provedor respondeu vazio — insistindo ({vazias}/{MAX_VAZIAS}) em "
                 f"{espera:.0f} s. O Parar interrompe.",
+                tentativa=vazias,
+                total=MAX_VAZIAS,
             )
             if not await _esperar(espera, limite):
                 motivo = PARADA_TEMPO
@@ -3279,15 +3281,25 @@ async def _esperar(segundos: float, limite: float | None) -> bool:
     return True
 
 
-async def _avisar_espera(emit: Emit, texto: str) -> None:
+async def _avisar_espera(
+    emit: Emit, texto: str, tentativa: int | None = None, total: int | None = None
+) -> None:
     """Diz na tela que a rodada está **esperando** — a tela nunca fica muda.
 
     Vai como evento próprio (`aviso`), e **não** como `delta`: é estado da rodada, não fala
     do modelo. Um `delta` entraria no texto gravado da mensagem, e uma espera de doze minutos
     encheria a resposta de linhas de progresso. O `aviso` aparece enquanto dura e sai de cena
     quando a rodada segue.
+
+    `tentativa`/`total` são o contador da insistência — qual das quantas. Quando vêm, o app
+    acende a linha «Reconectando… NN/NN` com esses números (regra do dono: a linha vale para
+    **qualquer** erro, inclusive a insistência daqui). O `texto` fica para quem lê o SSE cru.
     """
-    await emit("aviso", {"text": texto})
+    dados: dict[str, Any] = {"text": texto}
+    if tentativa is not None:
+        dados["tentativa"] = tentativa
+        dados["total"] = total if total is not None else tentativa
+    await emit("aviso", dados)
 
 
 async def _trocar_conta(modelo: ToolModel, emit: Emit, numero: int) -> bool:
@@ -3371,6 +3383,9 @@ async def _com_tentativas(
     restantes = max(1, tentativas)
     fatais = 1  # uma segunda chance por erro não-transitório, se houver outra conta
     ultima_cartada = espera_final > 0
+    #: Total de tentativas desta insistência, contando a última cartada quando ela existe.
+    #: É o denominador do contador que o app mostra («Reconectando… NN/NN»).
+    total_de_tentativas = tentativas + (1 if ultima_cartada else 0)
     #: `estado["mostrou"]` vira `True` quando já saiu texto na tela: repetir o passo
     #: duplicaria o que o usuário já leu, então nesse caso é melhor parar e avisar.
     if estado is None:
@@ -3395,10 +3410,15 @@ async def _com_tentativas(
                 espera = min(ESPERA_BASE * usadas, 10)
                 # A espera do retry também é avisada: sem isto ela era um silêncio de até 10 s
                 # por tentativa, com a tela girando sem dizer que o provedor tinha falhado.
+                # O contador vai junto: o app mostra «Reconectando… NN/NN» com ele. O número
+                # é o da tentativa que **vai rodar** (a primeira já rodou e falhou) — sem
+                # isto a última cartada aparecia como 04 depois do 02, pulando o 03.
                 await _avisar_espera(
                     emit,
                     f"O provedor falhou — tentando de novo em {espera:.0f} s "
                     f"(restam {restantes}).",
+                    tentativa=usadas + 1,
+                    total=total_de_tentativas,
                 )
                 if not await _esperar(espera, limite):
                     return None
@@ -3407,7 +3427,10 @@ async def _com_tentativas(
                 ultima_cartada = False
                 restantes = 1
                 await _avisar_espera(
-                    emit, f"O provedor caiu — última tentativa em {espera_final:.0f} s."
+                    emit,
+                    f"O provedor caiu — última tentativa em {espera_final:.0f} s.",
+                    tentativa=total_de_tentativas,
+                    total=total_de_tentativas,
                 )
                 if not await _esperar(espera_final, limite):
                     return None

@@ -25,6 +25,7 @@ import CartaoDeCompactacao from './components/Compactacao'
 import { separarCompactacoes } from './compactacao'
 import type { Compactacao as AvisoDeCompactacao } from './compactacao'
 import WorkingLine from './components/WorkingLine'
+import ReconnectingLine from './components/ReconnectingLine'
 import { SUBS_POR_RODADA } from './components/Subs'
 import type { SessaoDeSub } from './components/Subs'
 import {
@@ -109,6 +110,14 @@ import type {
   ToolStep,
   UsageWindow,
 } from './api/client'
+import {
+  dormir,
+  ehFalhaDeConexao,
+  ErroDoServico,
+  esperaDaTentativa as esperaDeReconexao,
+  QuedaDeConexao,
+  TENTATIVAS_DE_RECONEXAO,
+} from './reconectar'
 
 /** Uma janela de uso já com as moedas contadas — o que a tela de Uso desenha. */
 type ResumoDaJanela = { tempoMs: number; creditos: number }
@@ -628,40 +637,6 @@ function AvisoDaSessao() {
 }
 
 /**
- * A caixinha do canto enquanto a rodada **espera**: o provedor falhou ou respondeu vazio, e o
- * app vai tentar de novo.
- *
- * Existe para uma espera longa não ser uma tela muda. Antes, a insistência do loop (até
- * `MAX_VAZIAS`, ~12 min com o teto de 30 s) aparecia como um "trabalhando…" girando sem
- * motivo: quem estava olhando não tinha como saber se era lento, travado ou desistindo. O
- * texto diz o que está acontecendo, quanto falta e que o Parar interrompe.
- *
- * Some sozinha quando a rodada segue — o próximo aviso substitui, e o `done`/`error` limpa.
- */
-function AvisoDaEspera({ texto }: { texto: string }) {
-  return (
-    <div className="msg-in fixed right-6 bottom-6 z-40" role="status">
-      <div
-        className={[
-          'w-72 rounded-2xl p-4 backdrop-blur-2xl backdrop-saturate-150',
-          'bg-koda-surface/55 bg-gradient-to-b from-koda-fg/6 to-transparent',
-          'ring-1 ring-koda-fg/12',
-          'shadow-[0_28px_60px_-24px_var(--koda-shadow)]',
-        ].join(' ')}
-      >
-        <p className="flex items-start gap-2.5 text-[12.5px] leading-5 text-koda-fg/70">
-          <Loader2
-            className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-koda-accent"
-            strokeWidth={1.8}
-          />
-          {texto}
-        </p>
-      </div>
-    </div>
-  )
-}
-
-/**
  * O que a janela mostra enquanto a sessão é conferida ou o backend inicia.
  *
  * Com sessão e backend prontos esta tela passa voando. Se a API Python demorar, ela
@@ -1028,8 +1003,16 @@ function App() {
   }
   /** Último sinal de vida vindo do backend (pensamento, palavra, ferramenta). */
   const ultimoSinalRef = useRef(0)
-  /** O aviso transitório da rodada (espera do provedor) — ver `StreamData['aviso']`. */
-  const [avisoDaEspera, setAvisoDaEspera] = useState<string | null>(null)
+  /**
+   * A rodada está **insistindo sozinha** — a conexão caiu (o laço da reconexão tentando de
+   * novo) ou o provedor falhou/respondeu vazio (o loop do agente, pelo evento `aviso`) — e
+   * a linha «Reconectando… NN/NN» diz qual tentativa é esta, sobre quantas.
+   *
+   * Regra do dono: a linha vale para **qualquer** erro, não só queda de rede. Apagada no
+   * primeiro evento de verdade que chega (`sinal`): se o backend respondeu, a insistência
+   * acabou e a linha sai de cena. `null` = ninguém insistindo.
+   */
+  const [reconexao, setReconexao] = useState<{ tentativa: number; total?: number } | null>(null)
   /** Quando a resposta em curso começou (a linha de trabalho conta a partir daqui). */
   const inicioDaRespostaRef = useRef(0)
   const timersRef = useRef<number[]>([])
@@ -2390,30 +2373,69 @@ function App() {
         blocos: fecharPassoNosBlocos(message.blocos, patch),
       }))
 
-    /** Cada evento que chega do backend reinicia o silêncio que faz a linha de trabalho aparecer. */
+    /**
+     * Cada evento que chega do backend reinicia o silêncio que faz a linha de trabalho
+     * aparecer — e apaga a linha «Reconectando…»: se algo chegou de verdade, a insistência
+     * acabou (ou nunca houve) e a linha sai de cena.
+     */
     const sinal = () => {
       ultimoSinalRef.current = Date.now()
+      setReconexao(null)
     }
 
-    try {
-      await streamChat(
-        {
-          text: payload.text,
-          model: payload.model,
-          reasoning: payload.reasoning,
-          effort: payload.effort,
-          web: payload.web,
-          project_path: payload.project_path,
-          // O chat manda os **ids** dos anexos (o conteúdo já subiu no upload); o backend
-          // resolve cada id no store e a `read_attachment` é quem lê o arquivo.
-          attachments: payload.attachments.map((anexo) => anexo.id),
-          conversation_id: conversationIdRef.current,
-          tz_offset_minutes: new Date().getTimezoneOffset(),
-          resume: payload.resume,
-        },
-        {
+    /**
+     * O corpo do pedido, do jeito que a tentativa precisa.
+     *
+     * `retomando` é a reconexão no meio da resposta: o backend já tem a mensagem do
+     * usuário gravada e continua **do histórico** (`resume`), em vez de receber a
+     * mesma pergunta de novo e respondê-la duas vezes. Sem `start` a tentativa ainda
+     * não tinha chegado ao backend, e aí o pedido original é o certo.
+     */
+    const pedido = (retomando: boolean) => ({
+      text: payload.text,
+      model: payload.model,
+      reasoning: payload.reasoning,
+      effort: payload.effort,
+      web: payload.web,
+      project_path: payload.project_path,
+      // O chat manda os **ids** dos anexos (o conteúdo já subiu no upload); o backend
+      // resolve cada id no store e a `read_attachment` é quem lê o arquivo.
+      attachments: payload.attachments.map((anexo) => anexo.id),
+      conversation_id: conversationIdRef.current,
+      tz_offset_minutes: new Date().getTimezoneOffset(),
+      resume: retomando ? true : payload.resume,
+    })
+
+    /**
+     * O laço da reconexão: até 10 tentativas, uma depois da outra, para **qualquer**
+     * erro — queda de rede (o `fetch` sem resposta), 5xx do serviço, fluxo fechado no
+     * meio, silêncio estourado (o sinal de vivo do cliente) e até os erros de pedido
+     * (401/422/404: repetir pode não adiantar, mas dez tentativas com aviso na tela
+     * custam menos que a rodada morrer sem explicar). Só o **Parar** encerra na hora.
+     * Acertando, a rodada segue normalmente — o contexto é o do backend, que nunca
+     * saiu de lá. Esgotando, a rodada morre dizendo o erro.
+     */
+    // Fora do laço de propósito: a tentativa 2 precisa de saber se a 1 chegou a
+    // começar (aí o pedido vai como `resume`, e não como pergunta nova).
+    let comecouEmAlgumaTentativa = false
+    // A conversa já existia **antes** deste envio: a pessoa está numa conversa aberta,
+    // ou mandou pelo Continuar. Vale pelo mesmo motivo do `comecou...`: o
+    // `append_message` do backend corre **antes** do primeiro evento (`start`), então
+    // uma falha entre os dois já gravou a mensagem — e a tentativa seguinte precisa de
+    // `resume` para não gravá-la uma segunda vez. Conversa nova sem `start`: nada foi
+    // gravado ainda, e repetir como pedido novo é o certo.
+    const conversaExistiaAntes =
+      Boolean(conversationIdRef.current) || payload.resume === true
+    for (let tentativa = 1; tentativa <= TENTATIVAS_DE_RECONEXAO; tentativa++) {
+      // O fluxo fechou sem `done`/`error` nesta tentativa — queda no meio da resposta.
+      let fechouSemTerminal = false
+      const retomando =
+        tentativa > 1 && (comecouEmAlgumaTentativa || conversaExistiaAntes)
+      try {
+        await streamChat(pedido(retomando), {
           signal: controller.signal,
           onStart: (data) => {
+            comecouEmAlgumaTentativa = true
             // O backend é quem dá o id da conversa. A rodada passa a ser dela — é isto que
             // faz a resposta continuar sendo desenhada na conversa certa, e não na que
             // estiver na tela quando o primeiro pedaço de texto chegar.
@@ -2442,11 +2464,15 @@ function App() {
               blocos: anexarRaciocinio(message.blocos, text),
             }))
           },
-          // A rodada está esperando e diz por quê. É estado, não fala: vai para a caixinha do
-          // canto em vez de entrar na resposta.
-          onAviso: (texto) => {
+          // O provedor falhou (ou respondeu vazio) e o **backend** está insistindo: em vez
+          // de um texto de aviso, a linha «Reconectando… NN/NN» acende com o contador dele.
+          // É o que faz a linha aparecer para qualquer erro, e não só quando a conexão cai —
+          // regra do dono. O `text` do evento não é mostrado em lugar nenhum.
+          onAviso: (data) => {
             sinal()
-            setAvisoDaEspera(texto)
+            if (data.tentativa != null) {
+              setReconexao({ tentativa: data.tentativa, total: data.total })
+            }
           },
           onToolCall: (data) => {
             sinal()
@@ -2508,7 +2534,6 @@ function App() {
             }))
             // O pedido de permissão morre junto com a resposta que o fez — e a espera acabou.
             setPermissaoPendente(null)
-            setAvisoDaEspera(null)
             /*
              * O gasto desta resposta **sobe para o painel** — é ele que guarda o limite da
              * conta. O backend local mediu (é ele que viu a resposta acontecer), mas quem
@@ -2530,47 +2555,85 @@ function App() {
             void refreshHistory()
           },
           onError: (message) => {
-            // Achado 9: o erro encerra a rodada, e a tela tem de sair de "Pensando" /
-            // "Trabalhando…". Antes só o `done` desbloqueava, e o `done` não sai quando o
-            // provedor falha — a interface ficava presa para sempre.
-            concluirRodada(rodadaId, (mensagem) => ({
-              ...mensagem,
-              text: mensagem.text ? `${mensagem.text}\n\n${message}` : message,
-            }))
+            // O backend respondeu que a rodada falhou (provedor estourou, cota,
+            // modelo recusou). Antes encerrava a rodada na hora; agora o erro passa
+            // pelo mesmo laço de 10 tentativas — regra do dono: **todo** erro tenta.
+            // Se for passageiro (o host reiniciando, um soluço do provedor), a
+            // tentativa seguinte acerta e o contexto continua; se não for, morre em
+            // 10 tentativas dizendo o motivo. Lançar aqui atravessa o `dispatch` do
+            // cliente e sai do `streamChat` como qualquer outra falha.
+            // (A tela continua saindo de "Trabalhando…": o laço, em qualquer saída,
+            // ou insiste em silêncio ou encerra a rodada.)
             setPermissaoPendente(null)
-            setAvisoDaEspera(null)
+            throw new ErroDoServico(message)
           },
-          // Contrato de vivacidade: fluxo fechado sem terminal é rodada encerrada.
+          // Contrato de vivacidade: fluxo fechado sem terminal. Não encerra a rodada
+          // aqui dentro — quem decide é o laço da reconexão lá fora: se ainda há
+          // tentativa, queda no meio é erro de conexão, e não fim de resposta.
           onClosed: () => {
-            concluirRodada(rodadaId, (mensagem) => mensagem)
+            fechouSemTerminal = true
             setPermissaoPendente(null)
-            setAvisoDaEspera(null)
           },
         },
       )
-    } catch (error) {
-      // A rodada morreu por falha de rede ou pelo Parar: a espera acabou junto.
-      setAvisoDaEspera(null)
+        // A tentativa acabou. Fluxo fechado no meio (e ninguém parou no botão) é queda
+        // de conexão: lança para cair no mesmo caminho da falha de rede, com reconexão.
+        if (fechouSemTerminal && !controller.signal.aborted) throw new QuedaDeConexao()
+        return
+      } catch (error) {
       if (controller.signal.aborted) {
         // A pessoa parou no botão Parar. O que já saiu fica, e a resposta passa a **dizer
         // que parou** — o mesmo cartão de qualquer outra interrupção.
         concluirRodada(rodadaId, marcarInterrompida)
-      } else {
-        // Backend caiu durante a resposta: a próxima já cai na simulação local.
-        setBackend(null)
-        const detail = fraseDeFalha(error)
+      } else if (tentativa >= TENTATIVAS_DE_RECONEXAO) {
+        // Dez tentativas e o erro não passou: a rodada para e **diz o erro** — com
+        // quantas vezes tentou, para a pessoa saber que não foi desistência. Vale para
+        // **todo** erro (regra do dono), não só queda de rede: 401/422/404 e o
+        // silêncio estourado também tentam as dez antes de morrer.
+        if (ehFalhaDeConexao(error)) setBackend(null)
+        const detail =
+          error instanceof QuedaDeConexao ? error.message : fraseDeFalha(error)
+        const quantas = `${TENTATIVAS_DE_RECONEXAO} tentativas`
+        const porque = ehFalhaDeConexao(error)
+          ? `[a conexão com o serviço local caiu depois de ${quantas}: ${detail}]`
+          : `[o Koda tentou ${quantas} e não conseguiu: ${detail}]`
         concluirRodada(rodadaId, (mensagem) => ({
           ...mensagem,
           text: mensagem.text
-            ? `${mensagem.text}\n\n[A conexão com o serviço local caiu: ${detail}]`
-            : `Não consegui falar com o serviço local do Koda. ${detail} ${COMO_DIAGNOSTICAR}`,
+            ? `${mensagem.text}\n\n${porque}`
+            : `Não consegui falar com o serviço local do Koda depois de ${quantas}. ${detail} ${COMO_DIAGNOSTICAR}`,
         }))
+      } else {
+        // Ainda há tentativa: a linha «Reconectando…» acende com o contador **desta**
+        // insistência (a da conexão), espera o tempo da tentativa, limpa o que a tentativa
+        // anterior tinha desenhado e começa de novo. Vale para qualquer erro — regra do dono.
+        setReconexao({ tentativa: tentativa + 1, total: TENTATIVAS_DE_RECONEXAO })
+        await dormir(esperaDeReconexao(tentativa), controller.signal)
+        if (controller.signal.aborted) {
+          concluirRodada(rodadaId, marcarInterrompida)
+          return
+        }
+        // A tentativa que vem começa do zero na tela: com `resume`, o backend continua
+        // do histórico — o que já estava desenhado aqui repetiria a resposta.
+        patchAssistant((mensagem) => ({
+          ...mensagem,
+          text: '',
+          blocos: [],
+          steps: [],
+          reasoning: undefined,
+          todos: [],
+        }))
+        setPermissaoPendente(null)
+        continue
       }
     } finally {
       setPermissaoPendente(null)
+      // A rodada acabou: nenhuma insistência fica para trás, e a linha sai de cena.
+      setReconexao(null)
       // A rodada acabou: nenhum sub-agente dela está trabalhando. As abas ficam — o que ele
       // fez continua à vista —, mas nenhuma delas diz que ainda tem alguém ali.
       setSubs((atual) => atual.map((item) => ({ ...item, vivo: false })))
+    }
     }
   }
 
@@ -2967,9 +3030,21 @@ function App() {
                    * está fazendo. Aparece **sempre** enquanto a resposta está viva, e não só
                    * quando a tela fica calada: com o passo da ferramenta logo acima, a
                    * linha logo abaixo é o que mostra que a tarefa não parou ali.
+                   *
+                   * Uma linha só, e ela troca: durante a insistência (a conexão caindo ou o
+                   * provedor falhando) é a «Reconectando… NN/NN» que fala — no lugar dos
+                   * segundos. As duas juntas eram o defeito que o dono reprovou: a linha
+                   * daqui e a solta lá de baixo acendiam ao mesmo tempo.
                    */}
                   {ehViva ? (
-                    <WorkingLine passo={passoEmCurso} segundos={segundosDaResposta} />
+                    reconexao ? (
+                      <ReconnectingLine
+                        tentativa={reconexao.tentativa}
+                        total={reconexao.total}
+                      />
+                    ) : (
+                      <WorkingLine passo={passoEmCurso} segundos={segundosDaResposta} />
+                    )
                   ) : null}
                   {/* A ficha fecha a resposta: só quando ela terminou de verdade. */}
                   {message.elapsedMs ? (
@@ -3003,7 +3078,19 @@ function App() {
               )
             })}
 
-            {waiting ? <WorkingLine segundos={segundosDaResposta} /> : null}
+            {/*
+              A linha **solta**: só quando a resposta viva não está nesta lista — a
+              conversa foi trocada no meio da rodada, e a linha não tem mensagem para
+              morar. É a mesma regra de uma linha só: «Reconectando… NN/NN» durante a
+              insistência, «Trabalhando…» no resto. Quando a viva está na lista, quem
+              mostra a linha é ela (lá em cima) — nos dois lugares ao mesmo tempo é que
+              nascia a dupla que o dono reprovou.
+            */}
+            {!viva && reconexao ? (
+              <ReconnectingLine tentativa={reconexao.tentativa} total={reconexao.total} />
+            ) : waiting ? (
+              <WorkingLine segundos={segundosDaResposta} />
+            ) : null}
           </div>
         </div>
 
@@ -3076,8 +3163,6 @@ function App() {
               skills={skills}
               mcps={mcps}
             />
-            {/* A espera do provedor vem antes de tudo: é o que explica a tela parada. */}
-            {avisoDaEspera ? <AvisoDaEspera texto={avisoDaEspera} /> : null}
             {/* A sessão que não vale mais vem antes de qualquer novidade: uma conversa
                 respondida pelo servidor local é mais urgente que uma versão nova. */}
             {semModeloDaConta ? (
