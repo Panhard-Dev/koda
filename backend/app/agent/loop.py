@@ -290,6 +290,122 @@ def _aceitou_plano(mensagens: list[dict[str, Any]]) -> bool:
     return False
 
 
+#: O bloco visual que carrega quiz. Se o texto já tem **qualquer** bloco `koda-visual`,
+#: o modelo usou a interface — e a cobrança do portão não se aplica (a prosa em volta é
+#: só companhia do bloco, que é o que a pessoa clica).
+BLOCO_QUIZ = re.compile(r"```koda-visual\b", re.IGNORECASE)
+
+#: Uma pergunta numerada ("1. Qual é..." / "3) Em que ano...") no texto corrido.
+PERGUNTA_NUMERADA = re.compile(r"^\s*\d+[.)]\s+.+\?", re.MULTILINE)
+
+#: Vocabulário de quiz — só dispara junto com a lista numerada, para não pegar lista
+#: técnica ("3 passos?") nem sumário de conversa.
+ASSUNTO_QUIZ = re.compile(
+    r"\bquiz\b|\bteste\s+(seu|de)\s+conhecimento\b|\bperguntas\b|corrig|sua\s+nota|"
+    r"\bresponda\b",
+    re.IGNORECASE,
+)
+
+#: Cobrança interna do portão do quiz: o modelo escreveu as perguntas como texto e a
+#: pessoa fica sem clicar em nada. Vale para o modelo responder de novo, e não para
+#: avisar quem está olhando.
+EXIGIR_BLOCO_QUIZ = (
+    "Você escreveu o quiz como texto corrido — assim a pessoa não consegue responder "
+    "clicando. Reapresente as MESMAS perguntas em blocos ```koda-visual``` do tipo "
+    "`quiz`, um bloco por pergunta, cada um com o JSON "
+    '{"tipo":"quiz","pergunta","opcoes","correta","explicacao"} — o campo '
+    '`"tipo":"quiz"` é obrigatório; sem ele a interface não desenha o quiz — '
+    "e não repita a lista em texto depois."
+)
+
+
+def _quiz_em_texto(texto: str) -> bool:
+    """O modelo entregou quiz como lista de texto, sem bloco visual nenhum?
+
+    O sinal é estrutural: três ou mais perguntas numeradas terminando em «?» + assunto
+    de quiz. Três é o mínimo que distingue um quiz de verdade de um "quer perguntar
+    algo?" no meio da resposta. Com bloco `koda-visual` no texto, não há o que cobrar.
+    """
+    if BLOCO_QUIZ.search(texto):
+        return False
+    perguntas = re.findall(r"^\s*\d+[.)]\s+.+\?", texto, re.MULTILINE)
+    return len(perguntas) >= 3 and bool(ASSUNTO_QUIZ.search(texto))
+
+
+# ------------------------------------------------------- portão do bloco perdido (geral)
+#
+# O quiz é um caso do problema geral: **dado que a interface desenha** entregue como
+# texto. Os casos que o texto traem são três, e todos têm assinatura estrutural — não
+# depende do modelo "lembrar" do prompt:
+#
+#   1. JSON de bloco com a etiqueta errada: ```json { "tipo": "barras", ... } — os dados
+#      estão certos, o código da cerca é que não é `koda-visual`, e o Koda não desenha.
+#   2. Tabela em markdown: a interface tem o bloco `tabela` (com balão, com hover) —
+#      a versão em pipe é a mesma informação sem nada.
+#   3. Quiz em lista numerada (o detector próprio, acima).
+#
+#: Os tipos que o Koda desenha — o que procura dentro de uma cerca ```json``` é um
+#: destes valores em `"tipo"`.
+TIPOS_KODA = (
+    "barras|empilhadas|linhas|area|pizza|rosca|dispersao|bolha|radar|timeline|sankey|"
+    "tabela|mapa|mapa-radial|passos|comparacao|diffs|arvore|metrica|citacao|quiz|plano"
+)
+TIPO_DE_BLOCO_NO_JSON = re.compile(
+    r'"tipo"\s*:\s*"(?:' + TIPOS_KODA + r')"\s*[,}]', re.IGNORECASE
+)
+CERCA_CODIGO = re.compile(r"```[a-zA-Z]*\s*\n(.*?)```", re.DOTALL)
+LINHA_DE_TABELA = re.compile(r"^\s*\|.+\|\s*$", re.MULTILINE)
+SEPARADOR_DE_TABELA = re.compile(r"^\s*\|[\s:|-]+\|\s*$", re.MULTILINE)
+
+EXIGIR_ETIQUETA = (
+    "Você montou os dados de um bloco visual, mas usou a etiqueta errada na cerca — "
+    "com ```json``` o Koda NÃO desenha, mostra código cru. Reenvie o MESMO JSON dentro "
+    "de um bloco ```koda-visual``` (ou ```koda-grafico```/```koda-mapa```, conforme o "
+    "tipo) e não repita os dados em texto."
+)
+
+EXIGIR_TABELA = (
+    "Você desenhou a resposta como tabela em texto puro — a interface tem o bloco "
+    "`tabela`, que é clicável e legível. Reapresente num bloco ```koda-visual``` com o "
+    "JSON {\"titulo\",\"colunas\":[...],\"linhas\":[[...]]} e não repita a tabela em "
+    "markdown."
+)
+
+
+def _bloco_perdido(texto: str) -> str | None:
+    """Dado desenhável entregue como texto? Devolve a cobrança, ou None se não há.
+
+    Se o texto **já tem qualquer bloco koda-***, o modelo usou a interface — prosa em
+    volta de bloco é companhia, não defeito. A ordem importa: etiqueta errada é o pior
+    (mostra código cru na tela), depois tabela, depois quiz.
+    """
+    if re.search(r"```koda-", texto, re.IGNORECASE):
+        return None
+    for cerca in CERCA_CODIGO.finditer(texto):
+        if TIPO_DE_BLOCO_NO_JSON.search(cerca.group(1)):
+            return EXIGIR_ETIQUETA
+    if SEPARADOR_DE_TABELA.search(texto) and len(LINHA_DE_TABELA.findall(texto)) >= 4:
+        # header + separador + pelo menos duas linhas de dados
+        return EXIGIR_TABELA
+    if _quiz_em_texto(texto):
+        return EXIGIR_BLOCO_QUIZ
+    return None
+
+
+#: A resposta **entregou** dado desenhável pela interface — bloco koda-* (quiz, tabela,
+#: gráfico, mapa, plano). É o sinal único de "o pedido já está na tela do jeito que a
+#: pessoa clica": uma resposta assim **fecha** a rodada, mesmo que carregue uma frase de
+#: futuro ("posso montar mais uma rodada") ou que a rodada não tenha chamado ferramenta
+#: nenhuma.
+#:
+#: Sem esta régua, o quiz/tabela/gráfico entregue certinho ainda recebia cutucão de
+#: ferramenta ("nenhuma ferramenta sua funcionou") porque `de_acao` olha só o pedido —
+#: e "faça um quiz" tem verbo de ação. O modelo obedecia, saía listando a pasta do
+#: projeto que ninguém pediu para ver e oferecia mais uma rodada no fim, tudo **depois**
+#: de já ter entregue (visto em 16/10/2026).
+ENTREGOU_VISUAL = re.compile(r"```koda-", re.IGNORECASE)
+
+
 # ------------------------------------------------- tetos de persistência (não de trabalho)
 #
 # A regra é esta: **não existe teto de passos nem de chamadas**. Teto fixo trunca tarefa
@@ -2056,6 +2172,23 @@ async def executar(
     #: catálogo ("responda apenas", "não use ferramenta nenhuma") nem em rodada de resposta
     #: não há o que cobrar: forçar ferramenta aí é justamente o defeito que o QA viu.
     de_acao = pedido_de_acao(mensagens) and not sem_ferramentas and modo == MODO_CODIGO
+    #: **A régua de tudo: a rodada fechou e acabou.** Quando é `True`, o laço entrega a
+    #: resposta do modelo e sai — nenhum portão cutuca mais. É a única variável que
+    #: encerra um turno, e ela vira `True` assim que o modelo dá uma resposta **limpa**:
+    #: texto sem chamada de ferramenta, sem item do plano em aberto, sem comando rodando
+    #: e sem dado desenhável (quiz/tabela/gráfico) que precise voltar em bloco koda-*.
+    #
+    #: Antes disto, a resposta limpa ainda passava por quatro portões que podiam empurrar
+    #: mensagem interna (`retomar_tarefa`, `NARRAR`, `CONSERTAR_FERRAMENTA`, cobrança de
+    #: bloco) — e o modelo obedecia: listava a pasta do projeto que ninguém pediu e
+    #: oferecia "posso montar mais uma rodada", tudo **depois** de já ter entregue o
+    #: pedido (visto em 16/10/2026). Quem decide que a tarefa acabou é quem entregou: se
+    #: a pessoa quiser mais, ela pede na rodada seguinte.
+    fechou_limpo = False
+    #: A resposta desta rodada entregou dado desenhável pela interface (bloco koda-*:
+    #: quiz, tabela, gráfico, plano)? Vale para o turno inteiro — uma vez entregue, a
+    #: régua de cima fecha e nenhum cutucão de ferramenta volta a valer.
+    entregou_visual = False
     #: Tamanho do histórico no último aviso de compactação (ver o bloco no laço).
     avisado = 0
     #: Tarefa grande: começa com plano. `todos` é a última lista registrada, e
@@ -2076,6 +2209,9 @@ async def executar(
     aceito = _aceitou_plano(mensagens)
     #: Quantas vezes o loop já cobrou o bloco visual do plano (ver EXIGIR_BLOCO_PLANO).
     cobrancas_plano = 0
+    #: Quantas vezes o loop já cobrou bloco visual perdido em texto (tabela, quiz, JSON
+    #: com etiqueta errada — ver _bloco_perdido).
+    cobrancas_bloco = 0
     limite = time.monotonic() + timeout_s if timeout_s else None
 
     async def passo_de_retoma(
@@ -2348,9 +2484,16 @@ async def executar(
             # modelo escreveu nem de já ter rodado algo antes. Exigir `ferramentas_ok` aqui
             # era o furo: o primeiro anúncio de quem **ainda não executou nada** era o caso
             # mais comum, e era justamente o que encerrava a tarefa.
+            #
+            # A exceção é a régua única: resposta que **já entregou** dado desenhável
+            # (quiz/tabela/gráfico em bloco koda-*) fecha a rodada mesmo carregando uma
+            # frase de futuro — o que foi pedido está na tela, e cutucar ferramenta aí
+            # fazia o modelo listar a pasta do projeto e oferecer "mais uma rodada"
+            # (visto em 16/10/2026).
             if (
                 (anunciou(resultado.text) or comando_rodando)
                 and (modo == MODO_CODIGO or bool(comando_rodando))
+                and not entregou_visual
                 and not bloqueios
                 and tools
                 and retomadas_anuncio < MAX_RETOMADAS_ANUNCIO
@@ -2384,24 +2527,42 @@ async def executar(
             retomadas_anuncio = 0
 
         if not resultado.calls:
-            # Resposta de texto: **candidata** a fechamento. Antes de aceitar, portões de
-            # **estado** decidem se ainda há trabalho: itens do plano em aberto, mudança no
-            # disco sem conferência, anúncio sem execução. O sinal tem de ser de estado — o
-            # que foi mexido, o que ficou em aberto — e não de vocabulário: lista de verbos
-            # sempre deixa escapar a frase que o modelo inventou.
+            # Resposta de texto: **candidata** a fechamento. Antes de aceitar, uma única
+            # régua decide se ainda há trabalho de verdade: item do plano em aberto,
+            # comando rodando sem serem encerrados, dado desenhável que precisa voltar em
+            # bloco, ou anúncio de passo sem execução. O sinal é de **estado** — o que
+            # ficou em aberto, o que ainda está rodando — e nunca de vocabulário.
             #
-            # Nada aqui perde a resposta: o texto já saiu na tela e é ele que fica guardado.
-            # O portão só decide se a conversa continua com uma cobrança — e a cobrança é
-            # mensagem **interna** (entra no histórico, não na tela).
+            # Nada aqui perde a resposta: o texto já saiu na tela e é ele que fica
+            # guardado. A régua só decide se a rodada fecha de vez (`fechou_limpo`) ou se
+            # o loop cutuca o modelo com **uma** mensagem interna — nunca uma sequência
+            # de portões empilhados, que era o que fazia a IA continuar depois de entregar.
             pendentes = [item for item in todos if not item.get("feito")]
-            # Trabalho novo devolve o fôlego: os contadores são de **falas sem trabalho**, e
-            # não de trabalho. Enquanto o modelo age, retomar nunca esbarra em teto — é isso
-            # que faz uma tarefa legítima durar o quanto precisar.
+
+            # A régua de tudo: resposta limpa fecha a rodada. Só há trabalho a cutucar
+            # quando o estado mostra que sobrou algo (itens do plano em aberto, comando
+            # ainda rodando) ou quando o texto é anúncio/promessa do que **ia** fazer —
+            # quem já entregou não é cutucado, mesmo que a rodada não tenha chamado
+            # ferramenta nenhuma. É o caso do quiz/tabela/gráfico entregue pela interface:
+            # a entrega é o fim do turno, não um passo no meio.
+            entregou_visual = bool(ENTREGOU_VISUAL.search(resultado.text))
+            bloco_que_falta = None if entregou_visual else _bloco_perdido(resultado.text)
+            fechou_limpo = (
+                not pendentes
+                and not comando_rodando
+                and not bloco_que_falta
+                and not (anunciou(resultado.text) and not entregou_visual)
+            )
             if ferramentas_ok > retomada_base:
                 retomada_base = ferramentas_ok
                 retomadas = 0
                 cobrancas = 0
                 verificacoes = 0
+            if fechou_limpo:
+                texto_final = resultado.text
+                completou = True
+                break
+
             # PORTÃO DO PLANO (fechamento por texto): o plano está apresentado e a
             # pessoa ainda não disse sim. A rodada **fecha aqui** — pendência de plano
             # esperando aceite não é item esquecido a retomar, e a cobrança abaixo não
@@ -2412,18 +2573,19 @@ async def executar(
                 motivo = PARADA_AGUARDANDO_ACEITE
                 break
 
-
-            # 1. O que o próprio modelo registrou que faltava fazer — o sinal mais forte,
-            #    porque não depende do vocabulário da resposta.
+            # **Uma** cobrança por resposta, na ordem do estado: o que o próprio modelo
+            # registrou que faltava, o dado desenhável que precisa voltar em bloco, o
+            # trabalho alterado sem conferência e, por último, a ação em que nenhuma
+            # ferramenta funcionou. Cada uma escreve a sua mensagem interna e segue; a
+            # régua do topo decide sozinha, no passo seguinte, se ainda há o que cutucar.
             if pendentes and retomadas < MAX_RETOMADAS:
                 retomadas += 1
                 historico.append({"role": "user", "content": retomar_tarefa(pendentes)})
                 continue
-
-            # 2. Trabalho entregue sem conferência: o `verify-on-stop` do projeto de origem.
-            #    Editar e encerrar sem rodar nada é o jeito mais fácil de entregar código
-            #    quebrado, e a pergunta certa é "você conferiu?" — não "você chamou
-            #    ferramenta?". Mexer só em prosa (README, changelog) não pede conferência.
+            if bloco_que_falta and cobrancas_bloco < MAX_COBRANCAS:
+                cobrancas_bloco += 1
+                historico.append({"role": "user", "content": bloco_que_falta})
+                continue
             if (
                 VERIFICAR_AO_PARAR
                 and precisa_conferir
@@ -2435,19 +2597,16 @@ async def executar(
                     {"role": "user", "content": _aviso_de_conferencia(mudados)}
                 )
                 continue
-
-            # 3. Nenhuma ferramenta funcionou numa tarefa de ação: isso não é "não havia o
-            #    que fazer", é erro de argumento que precisa ser lido e corrigido.
             if not ferramentas_ok and de_acao and not bloqueios and cobrancas < MAX_COBRANCAS:
                 cobrancas += 1
                 historico.append({"role": "user", "content": CONSERTAR_FERRAMENTA})
                 continue
 
-            # Nada mais a cobrar: a rodada fecha com **o que o modelo escreveu**. O loop não
-            # inventa fechamento — o que faltou vira contrato estruturado (`motivo` com um
-            # código + `pendentes`), e é a interface que monta o cartão de tarefa não
-            # concluída. Era aqui que a resposta virava "me diga continue": instrução de
-            # uso de produto no lugar da resposta do modelo.
+            # Nada mais a cobrar: a rodada fecha com **o que o modelo escreveu**. O loop
+            # não inventa fechamento — o que faltou vira contrato estruturado (`motivo`
+            # com um código + `pendentes`), e é a interface que monta o cartão de tarefa
+            # não concluída. Era aqui que a resposta virava "me diga continue": instrução
+            # de uso de produto no lugar da resposta do modelo.
             texto_final = resultado.text
             completou = True
             if pendentes:
