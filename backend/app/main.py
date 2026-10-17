@@ -35,6 +35,7 @@ from .routers import (
     nuvem,
     projects,
     skills,
+    store,
     usage,
 )
 from .schemas import CloudEstado, Health, HealthMinimo
@@ -90,6 +91,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # crítico, num task que morre junto com o app.
         servico = ServicoNuvem(config)
         app.state.nuvem = servico
+        # O catálogo da Store em memória, com a origem dele (`nuvem` ou `casa`). É o que a
+        # rota de baixar/entrar consulta para achar o conector por `slug` sem ir à rede de
+        # novo a cada clique; vazio até a primeira leitura.
+        app.state.catalogo_store = ([], "casa")
         # O que o app entrega de fábrica entra **antes** de o gerenciador apontar para a
         # configuração: no instalado o `data/` nasce só com o banco, e sem esta semeadura o
         # app subiria sem servidor MCP nenhum. Nunca passa por cima do que já existe.
@@ -197,6 +202,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects.router, prefix="/api")
     app.include_router(agentes.router, prefix="/api")
     app.include_router(host.router, prefix="/api")
+    app.include_router(store.router, prefix="/api")
     app.include_router(dev_browser.router, prefix="/api")
     app.include_router(dev_logs.router, prefix="/api")
 

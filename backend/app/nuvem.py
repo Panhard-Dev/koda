@@ -253,3 +253,18 @@ class ServicoNuvem:
 
     async def changelog(self, canal: str | None = None) -> list[dict[str, Any]]:
         return await self.cliente.changelog(canal)
+
+    async def catalogo_mcps(self) -> list[dict[str, Any]]:
+        """O catálogo de conectores MCP que **o painel** publica.
+
+        Sem resposta devolve `[]`, e quem consome cai na lista da casa — pelo mesmo motivo do
+        catálogo de modelos: uma tela vazia por causa de um tropeço de rede é pior do que uma
+        lista que pode estar desatualizada.
+        """
+        dados = await self.cliente._get("/api/public/mcps", {})
+        if dados is None:
+            return []
+        itens = dados.get("conectores")
+        if not isinstance(itens, list):
+            return []
+        return [item for item in itens if isinstance(item, dict)]

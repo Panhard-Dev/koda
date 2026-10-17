@@ -161,11 +161,21 @@ class ServidorMCP:
     uma exceção sem contexto.
     """
 
-    def __init__(self, nome: str, comando: str, params: str = "", tempo_s: float = TEMPO_PADRAO_S):
+    def __init__(
+        self,
+        nome: str,
+        comando: str,
+        params: str = "",
+        tempo_s: float = TEMPO_PADRAO_S,
+        env: dict[str, str] | None = None,
+    ):
         self.nome = nome
         self.comando = comando
         self.params = params
         self.tempo_s = tempo_s
+        #: Variáveis de ambiente **extras** deste servidor: a credencial que o login da Store
+        #: produziu. Vazias não mudam nada no processo — ver o `env=` do `abrir()`.
+        self.env = dict(env or {})
         self.erro: str | None = None
         self._processo: subprocess.Popen[str] | None = None
         self._proximo_id = 1
@@ -236,6 +246,11 @@ class ServidorMCP:
                 errors="replace",
                 bufsize=1,
                 cwd=os.getcwd(),
+                # O ambiente do backend **mais** o deste servidor: sem o `os.environ` de base o
+                # processo nasceria sem `PATH` e nem o `node.exe` encontraria. As variáveis
+                # próprias ganham — é o que faz a credencial da Store valer sobre uma variável
+                # de mesmo nome que a máquina por acaso tenha.
+                env={**os.environ, **self.env} if self.env else None,
                 # `shell=False` de propósito: o comando é uma lista, e o servidor MCP é um
                 # processo — passar por shell abriria injeção de comando a partir do
                 # cadastro da tela.

@@ -10,6 +10,7 @@ import {
   Puzzle,
   Search,
   Settings,
+  ShoppingBag,
   User,
   X,
 } from 'lucide-react'
@@ -182,6 +183,7 @@ export function Header({
   onOpenConversation,
   onOpenSettings,
   onOpenPresente,
+  onOpenStore,
   onAbrirBarraCamera,
   onTogglePainel,
 }: {
@@ -208,6 +210,8 @@ export function Header({
   onOpenSettings: (section?: SettingsSection) => void
   /** Abre a página do presente (o ícone solto, ao lado da cápsula). */
   onOpenPresente: () => void
+  /** Abre a Store — a área nova, ainda em esqueleto (ver `components/Store.tsx`). */
+  onOpenStore: () => void
   /** Abre a segunda barra lateral (o botão da câmera). */
   onAbrirBarraCamera: () => void
   /** A barra lateral está aberta — o botão do painel fica aceso e alterna. */
@@ -388,6 +392,14 @@ export function Header({
       icon: <Cable className="h-4 w-4" strokeWidth={1.7} />,
       options: mcpsSubmenu,
     },
+    // Sem submenu: a Store é uma tela, não uma lista de alternâncias. Fica **depois** de Skills
+    // e MCPs porque é a porta do que ainda não está na máquina — quem abre o menu já está
+    // olhando para o que tem, e a vitrine vem na sequência.
+    {
+      value: 'store',
+      label: 'Store',
+      icon: <ShoppingBag className="h-4 w-4" strokeWidth={1.7} />,
+    },
   ]
 
   const handleSelect = (value: string) => {
@@ -397,6 +409,7 @@ export function Header({
     else if (value.startsWith('mcp:')) onToggleMcp(value.slice('mcp:'.length))
     else if (value === 'skills-ajustes') onOpenSettings('skills')
     else if (value === 'mcps-ajustes') onOpenSettings('mcps')
+    else if (value === 'store') onOpenStore()
     else if (value === 'nova-conversa') onNewChat()
     else if (value === 'pasta-existente' || value === 'pasta-nova') onOpenFolders()
     else if (value === 'sem-projeto') onProjectChange(null)

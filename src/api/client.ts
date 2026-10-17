@@ -765,6 +765,86 @@ export const toggleMcp = (name: string) =>
 export const createMcp = (mcp: NovoMcp) =>
   request<ApiMcp>('/api/mcps', { method: 'POST', body: JSON.stringify(mcp) })
 
+// ------------------------------------------------------------------ store (MCPs)
+
+/** Um conector publicado no catálogo, com o **estado dele nesta máquina**. */
+export type ApiConector = {
+  slug: string
+  nome: string
+  descricao: string
+  pacote: string
+  comando: string
+  params: string
+  login: string
+  doc: string
+  /** Já foi baixado? Entrou em `mcps.json`, desligado. */
+  instalado: boolean
+  /** Está ligado — é o que o faz aparecer na área MCP. */
+  ativo: boolean
+  conectado: boolean
+  erro: string | null
+  /** O catálogo publica um comando de login para este conector. */
+  precisa_login: boolean
+  /** O login já foi feito (existe credencial guardada). **Nunca** o valor. */
+  credencial: boolean
+}
+
+/** De onde veio o catálogo: o painel publicou (`nuvem`) ou caiu na lista da casa (`casa`). */
+export type ApiStoreMcp = { origem: 'nuvem' | 'casa'; conectores: ApiConector[] }
+
+export const listStoreMcps = () => request<ApiStoreMcp>('/api/store/mcps')
+
+/** Baixa: registra desligado e começa o download do pacote em segundo plano. */
+export const baixarConector = (slug: string) =>
+  request<ApiTarefa>(`/api/store/mcps/${encodeURIComponent(slug)}/baixar`, { method: 'POST' })
+
+/** O estado do download em curso — `nenhum` quando não há download para este conector. */
+export const estadoDaBaixa = (slug: string) =>
+  request<ApiTarefa>(`/api/store/mcps/${encodeURIComponent(slug)}/baixar`)
+
+/** Começa o login do provedor: devolve a URL que a pessoa precisa abrir. */
+export const entrarNoConector = (slug: string) =>
+  request<ApiLogin>(`/api/store/mcps/${encodeURIComponent(slug)}/entrar`, { method: 'POST' })
+
+/** O estado do login em curso, com as últimas linhas que o CLI escreveu. */
+export const estadoDoLogin = (slug: string) =>
+  request<ApiLogin>(`/api/store/mcps/${encodeURIComponent(slug)}/entrar`)
+
+/** Ativa: liga o servidor, e aí ele aparece em Ajustes → MCPs e no submenu do cabeçalho. */
+export const ativarConector = (slug: string) =>
+  request<ApiAtivacao>(`/api/store/mcps/${encodeURIComponent(slug)}/ativar`, { method: 'POST' })
+
+/** Uma tarefa de segundo plano (baixar). */
+export type ApiTarefa = {
+  status: 'nenhum' | 'baixando' | 'pronto' | 'erro'
+  instalado: boolean
+  ativo: boolean
+  motivo: string | null
+}
+
+/** O login do provedor, do jeito que a tela acompanha. */
+export type ApiLogin = {
+  status: 'nenhum' | 'rodando' | 'pronto' | 'erro'
+  /** A URL que o CLI mandou abrir. Some quando o login já terminou. */
+  url: string | null
+  /**
+   * O código que a página do navegador vai **pedir** (o device flow do GitHub é assim).
+   * `null` quando o login não usa código.
+   */
+  codigo: string | null
+  /** As últimas linhas da saída — é o que explica um login que deu errado. */
+  saida: string[]
+  motivo: string | null
+}
+
+export type ApiAtivacao = {
+  ok: boolean
+  ativo: boolean
+  conectado: boolean
+  erro: string | null
+  ferramentas: number
+}
+
 export const patchAccount = (patch: { phone?: string | null; google?: boolean }) =>
   request<ApiAccount>('/api/account', { method: 'PATCH', body: JSON.stringify(patch) })
 
