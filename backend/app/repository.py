@@ -352,9 +352,27 @@ def usage(
     as moedas da conta anterior — foi exatamente o que o dono viu.
 
     Sem conta (ninguém logado) a resposta é **zero**, e não a soma de tudo o que já passou
-    por esta máquina: cota sem dono é cota de ninguém. `IS ?` (e não `= ?`) é o que faz a
-    comparação funcionar com `NULL`.
+    por esta máquina: cota sem dono é cota de ninguém.
+
+    **O zero tem de ser dito, não confiado ao `IS ?`.** Em SQLite `NULL IS NULL` é
+    verdadeiro, então `conta IS ?` com `None` casava justamente com as linhas **sem dono** —
+    a soma caía na história inteira da máquina, que é o oposto do que esta função promete.
+    Era esse o defeito: um PC com uso antigo abria a versão nova mostrando `00:00:00` e
+    `0000` de moedas **antes** de a conta ser entregue ao backend, porque o `conta=None`
+    somava tudo. Com a conta entregue a soma zerava (as linhas antigas são de ninguém), e a
+    aba voltava ao cheio — as duas pontas erradas pela mesma causa.
     """
+
+    if conta is None:
+        vazio = lambda: UsageWindow(tempo_ms=0, tokens_por_modelo={})  # noqa: E731
+        return Usage(
+            daily=vazio(),
+            weekly=vazio(),
+            monthly=vazio(),
+            conversations=0,
+            messages=0,
+            dias={},
+        )
 
     def janela(kind: str) -> UsageWindow:
         inicio = _window_start_ms(now_ms, tz_offset_minutes, kind)
