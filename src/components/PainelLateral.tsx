@@ -309,6 +309,21 @@ function AbaLogs() {
  *
  * Navegar é **recriar**: a `key` da URL remonta o componente, o antigo fecha e um novo abre —
  * mesmo desenho do iframe, que também recarregava trocando a `key`.
+ *
+ * ## Fechar é esperar a criação
+ *
+ * O webview nasce **assíncrono** — `new Webview` dispara o `invoke` da criação e não espera;
+ * a confirmação é o evento `tauri://created`. Fechar antes disso é corrida perdida: o Rust
+ * ainda não registrou o rótulo, o `close` não acha nada e a exceção era engolida — e o
+ * webview então nascia sozinho, **janela nativa por cima de tudo**, entupindo a tela até o
+ * app ser reiniciado. Era o "às vezes o painel não fecha" que o dono viu: *às vezes* porque
+ * é corrida — depende de o X (ou o Esc, ou o clique fora, ou a troca de aba) chegar antes
+ * de o webview existir.
+ *
+ * Por isto o fechamento **espera a criação** (`tauri://created`/`tauri://error`, com teto de
+ * 8 s) e só então fecha — e uma varredura na montagem fecha os órfãos `painel-dev-*` que
+ * vazaram em sessões anteriores, sem depender de reinício. Rótulo `painel-dev-*` é só deste
+ * painel: o navegador da IA é a webview `main` do próprio app.
  */
 function NavegadorDoPainel({ url }: { url: string }) {
   const caixa = useRef<HTMLDivElement>(null)
@@ -317,6 +332,15 @@ function NavegadorDoPainel({ url }: { url: string }) {
   useEffect(() => {
     let vivo = true
     let navegador: Webview | null = null
+    /**
+     * O destino da criação — `criada` ou `morta`. Nasce **junto com o webview**, na
+     * montagem, e não dentro do fechamento: a criação pode terminar (ou morrer) muito
+     * antes de o painel fechar, e ouvinte registrado depois não ouve nada — o
+     * fechamento esperaria o teto de 8 s à toa.
+     */
+    let destinoDaCriacao: Promise<'criada' | 'morta'> | null = null
+    /** O fechamento em andamento. Um por mountagem — fechar duas vezes não faz sentido. */
+    let fechamento: Promise<void> | null = null
     const rotulo = `painel-dev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
     const medir = () => {
@@ -342,6 +366,62 @@ function NavegadorDoPainel({ url }: { url: string }) {
       }
     }
 
+    /**
+     * Fecha o webview **enfrentando a corrida da criação** (ver o comentário do componente).
+     *
+     * A criação é assíncrona: fechar antes de `tauri://created` não acha o rótulo e falha em
+     * silêncio — o webview nasce depois e fica na tela. Daí a espera; daí também o teto, para
+     * criação enroscada não segurar o fechamento para sempre.
+     */
+    const fechar = async (criado: Webview) => {
+      const saida = await Promise.race([
+        // A criação já acabou (ou morreu)? A decisão já está tomada — não espera.
+        destinoDaCriacao ?? Promise.resolve<'criada'>('criada'),
+        // Teto da espera: criação enroscada não segura o fechamento para sempre.
+        new Promise<'criada'>((pronta) => {
+          window.setTimeout(() => pronta('criada'), 8_000)
+        }),
+      ])
+      // Morreu na criação (endereço recusado, permissão): não há webview para fechar.
+      if (saida === 'morta') return
+      // Criada — ou teimosamente enroscada: fecha, com tentativas curtas para o caso de o
+      // Rust ainda estar acabando de registrar o rótulo.
+      for (let tentativa = 0; tentativa < 5; tentativa += 1) {
+        try {
+          await criado.close()
+          return
+        } catch {
+          await new Promise((rente) => {
+            window.setTimeout(rente, 100)
+          })
+        }
+      }
+    }
+
+    const fecharAtual = () => {
+      const alvo = navegador
+      if (alvo && !fechamento) fechamento = fechar(alvo)
+    }
+
+    /**
+     * Órfãos de mountagens anteriores — o vazamento que este conserto cura daqui pra frente.
+     * Quem já conviveu com ele pode ter webviews `painel-dev-*` na tela desde a sessão
+     * passada; sem esta varredura eles só sairiam reiniciando o app. Só mexe em rótulo
+     * `painel-dev-*`, que é apenas deste painel — o navegador da IA é a webview `main`.
+     */
+    const varrerOrfaos = async (meuRotulo: string) => {
+      try {
+        const todos = await Webview.getAll()
+        for (const outro of todos) {
+          if (outro.label === meuRotulo) continue
+          if (!outro.label.startsWith('painel-dev-')) continue
+          void outro.close().catch(() => undefined)
+        }
+      } catch {
+        // Fora do Tauri (dev no navegador) ou permissão faltando: segue sem varrer.
+      }
+    }
+
     const montar = () => {
       const area = medir()
       if (!area || area.width < 2 || area.height < 2) return
@@ -353,11 +433,14 @@ function NavegadorDoPainel({ url }: { url: string }) {
         console.error('[painel] o navegador embutido não subiu:', evento.payload)
         setFalhou(true)
       })
-      if (!vivo) {
-        void criado.close().catch(() => undefined)
-        return
-      }
       navegador = criado
+      // A certeza do destino nasce aqui, colada no webview — o fechamento, que pode
+      // vir antes ou muito depois, espera por esta promessa.
+      destinoDaCriacao = new Promise<'criada' | 'morta'>((pronta) => {
+        void criado.once('tauri://created', () => pronta('criada'))
+        void criado.once('tauri://error', () => pronta('morta'))
+      })
+      void varrerOrfaos(rotulo)
     }
 
     montar()
@@ -370,8 +453,9 @@ function NavegadorDoPainel({ url }: { url: string }) {
       vivo = false
       observador.disconnect()
       window.removeEventListener('resize', ajustar)
-      if (navegador) void navegador.close().catch(() => undefined)
-      navegador = null
+      // Fecha sempre — a criação pode ainda estar no ar quando desmonta (X, Esc, clique
+      // fora, troca de aba, navegação). O `fechar` espera ela terminar antes de fechar.
+      fecharAtual()
     }
   }, [url])
 
