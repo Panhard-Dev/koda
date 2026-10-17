@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChangeEvent, ClipboardEvent, ReactNode } from 'react'
+import type { ChangeEvent, ClipboardEvent, DragEvent, ReactNode } from 'react'
 import {
   ALargeSmall,
   ArrowLeft,
@@ -21,6 +21,7 @@ import {
   ListTree,
   Loader2,
   MessageSquareText,
+  Sparkles,
   Unlock,
   Mic,
   Paperclip,
@@ -28,7 +29,6 @@ import {
   Plus,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   Square,
   X,
 } from 'lucide-react'
@@ -36,6 +36,7 @@ import Menu from './Menu'
 import type { MenuOption } from './Menu'
 import FolhaTesouro from './FolhaTesouro'
 import ApprovalCard from './ApprovalCard'
+import AvisoDeArraste from './AvisoDeArraste'
 import MoedaKoda from './MoedaKoda'
 import { tempoEmTexto, useSegundosDoDia } from '../tempo'
 import { PLANO_FREE, moedasEmTexto } from '../plano'
@@ -158,7 +159,6 @@ export type SendPayload = {
   project_path: string | null
 }
 
-
 /**
  * Uma mensagem esperando a vez: o que a pessoa escreveu enquanto o Koda trabalhava.
  *
@@ -254,6 +254,26 @@ type TogglePillProps = {
   onClick: () => void
   children: ReactNode
 }
+
+/**
+ * O arraste traz **arquivo** (e não texto, um link ou uma aba)?
+ *
+ * Sem esta checagem o aviso aparece para qualquer arraste — inclusive o de um trecho de
+ * texto selecionado, que não é anexo e cairia no `subirArquivos` como lista vazia. O
+ * `types` é a única coisa legível durante o arraste (o `files` só existe no `drop`, por
+ * segurança): `Files` é o que o sistema operacional põe quando se arrasta do Explorer ou
+ * do Finder.
+ */
+function temArquivo(evento: DragEvent<HTMLElement>): boolean {
+  return Array.from(evento.dataTransfer?.types ?? []).includes('Files')
+}
+
+/**
+ * O teto de **um** anexo, em MB — a mesma régua do backend (`MAX_BYTES` em
+ * `app/anexos.py`). Está escrito aqui só para o aviso poder dizê-lo antes de a pessoa
+ * tentar e levar o erro; quem recusa de verdade continua sendo o backend.
+ */
+const LIMITE_DE_ANEXO_MB = 32
 
 const PILL_BASE =
   'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium ring-1 transition-colors duration-150 focus-visible:ring-koda-accent focus-visible:outline-none'
@@ -384,6 +404,16 @@ export function Composer({
   const [subindoAnexo, setSubindoAnexo] = useState(false)
   /** O motivo pelo qual um anexo foi recusado (tipo, tamanho, backend fora do ar). */
   const [erroAnexo, setErroAnexo] = useState<string | null>(null)
+  /**
+   * Um arquivo está sendo arrastado **por cima da caixa** — e o aviso está na tela.
+   *
+   * É um contador, e não um booleano, por um motivo que aparece na prática: `dragenter` e
+   * `dragleave` disparam também ao passar **por dentro** da caixa, de um filho para outro
+   * (o `textarea`, a lista de anexos, um botão). Com booleano, o aviso piscava — saía e
+   * voltava a cada fronteira interna. Contando entradas e saídas, ele só sai quando o
+   * ponteiro deixa a caixa de verdade.
+   */
+  const [arrastando, setArrastando] = useState(0)
   const [listening, setListening] = useState(false)
   /** Qual item do menu do "/" está sob o cursor do teclado. */
   const [comandoAtivo, setComandoAtivo] = useState(0)
@@ -724,6 +754,51 @@ export function Composer({
     })
   }
 
+  /**
+   * Arrastar e soltar arquivos **na caixa** — o mesmo caminho do «+» e do Ctrl+V.
+   *
+   * ## Os dois eventos não fazem a mesma coisa
+   *
+   * `dragenter` **entra** no alvo (uma vez por elemento cruzado); `dragover` dispara
+   * **continuamente** enquanto o ponteiro está parado por cima — dezenas de vezes por
+   * segundo. Somar os dois no mesmo contador foi um defeito real: 1 `dragenter` + 40
+   * `dragover` contra 1 `dragleave` davam saldo +40, e o aviso **ficava preso na tela**
+   * depois de a pessoa desistir do arraste. Por isso só o `dragenter` conta, e o
+   * `dragover` tem um papel só: liberar o `drop`.
+   *
+   * O `preventDefault` no `dragover` não é opcional: sem ele o navegador recusa o `drop`
+   * (o padrão dele é abrir o arquivo numa aba nova) e o arquivo nunca cai aqui.
+   *
+   * O contador nunca desce abaixo de zero e o `drop` o zera: os dois cobrem os caminhos em
+   * que a contagem fica desalinhada — sair pela borda sem `dragleave`, ou soltar sem
+   * passar pelo enter.
+   */
+  const entrouArraste = (evento: DragEvent<HTMLDivElement>) => {
+    if (!temArquivo(evento)) return
+    evento.preventDefault()
+    setArrastando((atual) => atual + 1)
+  }
+
+  const sobreArraste = (evento: DragEvent<HTMLDivElement>) => {
+    if (!temArquivo(evento)) return
+    // Só libera a entrega — **não** mexe no contador (ver o comentário acima).
+    evento.preventDefault()
+    evento.dataTransfer.dropEffect = 'copy'
+  }
+
+  const saiuArraste = (evento: DragEvent<HTMLDivElement>) => {
+    if (!temArquivo(evento)) return
+    evento.preventDefault()
+    setArrastando((atual) => Math.max(0, atual - 1))
+  }
+
+  const soltouArquivos = (evento: DragEvent<HTMLDivElement>) => {
+    if (!temArquivo(evento)) return
+    evento.preventDefault()
+    setArrastando(0)
+    void subirArquivos(Array.from(evento.dataTransfer.files))
+  }
+
   const projectTriggerClass = [
     'flex w-full items-center gap-2 rounded-lg py-1 text-[13px]',
     projectId === null ? 'text-koda-fg/45 hover:text-koda-fg/75' : 'text-koda-accent',
@@ -778,6 +853,34 @@ export function Composer({
     return () => observador.disconnect()
   }, [])
 
+  /**
+   * Rede de segurança do aviso de arraste: soltar **fora** da janela (ou apertar Esc)
+   * não dispara `dragleave` na caixa, e sem isto o aviso ficaria preso na tela.
+   *
+   * O `drop` no `document` cobre o arquivo solto em qualquer canto da página — inclusive
+   * fora da caixa, onde o navegador abriria o arquivo numa aba nova; aqui ele é ignorado
+   * em silêncio e o aviso sai. O `dragend` cobre o arraste cancelado (Esc, ou solto de
+   * volta no Explorer).
+   */
+  useEffect(() => {
+    if (arrastando === 0) return
+    const limpar = () => setArrastando(0)
+    const solto = (evento: Event) => {
+      // Só age quando o arraste traz arquivo: um arraste de texto não é anexo.
+      const tipos = (evento as unknown as DragEvent).dataTransfer?.types
+      if (tipos && !Array.from(tipos).includes('Files')) return
+      limpar()
+    }
+    document.addEventListener('drop', solto)
+    document.addEventListener('dragend', limpar)
+    window.addEventListener('blur', limpar)
+    return () => {
+      document.removeEventListener('drop', solto)
+      document.removeEventListener('dragend', limpar)
+      window.removeEventListener('blur', limpar)
+    }
+  }, [arrastando])
+
   return (
     <div className="w-full max-w-3xl">
       {/* O agente está parado esperando permissão: o cartão fica logo acima da caixa. */}
@@ -791,8 +894,19 @@ export function Composer({
       ) : null}
 
       {/* A caixa: aba, rampa e corpo desenhados num **path só** (ver o `useEffect` acima). O
-          «Koda» é um texto posicionado por cima da parte de cima da silhueta. */}
-      <div ref={formaRef} className="group relative isolate w-full pt-[40px]">
+          «Koda» é um texto posicionado por cima da parte de cima da silhueta.
+
+          A caixa inteira é a área de soltar arquivo: o arraste entra por aqui e o anexo
+          segue pelo mesmo `subirArquivos` do «+» e do Ctrl+V. O `onDragOver` é o que
+          autoriza o navegador a entregar o `drop` — sem ele o arquivo abre numa aba nova. */}
+      <div
+        ref={formaRef}
+        className="group relative isolate w-full pt-[40px]"
+        onDragEnter={entrouArraste}
+        onDragOver={sobreArraste}
+        onDragLeave={saiuArraste}
+        onDrop={soltouArquivos}
+      >
         <svg
           className="pointer-events-none absolute inset-0 -z-10 h-full w-full overflow-visible"
           style={{ filter: 'drop-shadow(0 30px 60px var(--koda-shadow))' }}
@@ -810,9 +924,16 @@ export function Composer({
           />
         </svg>
 
-        {/* A aba: a moeda do Koda e, ao lado, o tempo da conversa. */}
+        {/* O aviso de arraste — por cima da caixa inteira, e não da tela: é aqui que o
+            arquivo cai. Ele nasce **depois** do `svg` justamente para ficar na frente da
+            silhueta, e o `rounded-[22px]` acompanha o raio do corpo da caixa. */}
+        {arrastando > 0 ? <AvisoDeArraste limiteMb={LIMITE_DE_ANEXO_MB} /> : null}
+
+        {/* A aba: a moeda do Koda e, ao lado, o tempo da conversa. O `data-aba` é o que
+            deixa o aviso de arraste medir a largura dela e desenhar a mesma silhueta. */}
         <div
           ref={abaRef}
+          data-aba
           // O `pr-3` não é enfeite: a aba termina numa **rampa** (o path desce 16px na
           // diagonal), e o cronômetro encostava nela — o último dígito ficava por baixo do
           // traço. A largura da aba sai do próprio conteúdo, então é o padding que a alarga.
