@@ -743,6 +743,41 @@ export const fetchAccount = () => request<ApiAccount>('/api/account')
  */
 export const listModels = () => request<ApiModel[]>('/api/models/testados')
 
+/** Como a folha melhora o prompt (o dono pediu cada modo por um motivo). */
+export type ModoDoPrompt = 'criar' | 'base' | 'fala' | 'estrutura' | 'grafia'
+
+/** O que existe na máquina e a validação do prompt melhorado pode citar. */
+export type RecursosDoPrompt = {
+  mcps: string[]
+  skills: string[]
+  subs: string[]
+}
+
+/**
+ * Melhora o rascunho do prompt — o botão da folha no composer.
+ *
+ * Manda o texto digitado, o modelo selecionado, o modo de melhoria e os recursos
+ * ativos da máquina; recebe de volta o prompt reescrito. Caminho de texto puro no
+ * backend: sem ferramentas e sem gravar conversa.
+ */
+export const melhorarPrompt = (
+  text: string,
+  model: string,
+  modo: ModoDoPrompt = 'base',
+  recursos: RecursosDoPrompt = { mcps: [], skills: [], subs: [] },
+) =>
+  request<{ prompt: string }>('/api/prompt/melhorar', {
+    method: 'POST',
+    body: JSON.stringify({
+      text,
+      model,
+      modo,
+      mcps: recursos.mcps,
+      skills: recursos.skills,
+      subs: recursos.subs,
+    }),
+  })
+
 /** Skills instaladas (do projeto e da máquina) para a seção Skills. */
 export const listSkills = () => request<ApiSkill[]>('/api/skills')
 

@@ -581,6 +581,27 @@ class HostSessaoEstado(BaseModel):
     tools_ready: bool
 
 
+class MelhorarPromptRequest(BaseModel):
+    """O que a folha do composer manda: o rascunho, o modo e o que existe na máquina."""
+
+    text: str = Field(default="", max_length=MAX_TEXTO)
+    model: str = "liz-4"
+    #: Como melhorar: `criar` (do zero), `base` (mantendo), `fala` (só a escrita),
+    #: `estrutura` (separar em tarefas) ou `grafia` (acentos e pontuação).
+    modo: Literal["criar", "base", "fala", "estrutura", "grafia"] = "base"
+    #: Nomes dos recursos que a validação pode citar (só os ativos). Vazio = a
+    #: receita não fala de recurso nenhum.
+    mcps: list[str] = Field(default_factory=list, max_length=30)
+    skills: list[str] = Field(default_factory=list, max_length=60)
+    subs: list[str] = Field(default_factory=list, max_length=30)
+
+
+class MelhorarPromptResponse(BaseModel):
+    """O prompt reescrito, pronto para voltar para a caixa de texto."""
+
+    prompt: str
+
+
 def sse(event: str, data: dict[str, Any]) -> str:
     """Formata um evento no protocolo SSE (`event:` + `data:` + linha em branco)."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

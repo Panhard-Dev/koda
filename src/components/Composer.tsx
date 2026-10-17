@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, ClipboardEvent, ReactNode } from 'react'
 import {
+  ALargeSmall,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
   BrainCircuit,
   ChevronDown,
   CircleDot,
+  FilePlus2,
   ClipboardList,
   FolderKanban,
   FolderOpen,
@@ -15,18 +17,22 @@ import {
   Globe,
   Hand,
   Image as ImageIcon,
+  ListTree,
   Loader2,
+  MessageSquareText,
   Unlock,
   Mic,
   Paperclip,
   Plus,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Square,
   X,
 } from 'lucide-react'
 import Menu from './Menu'
 import type { MenuOption } from './Menu'
+import FolhaTesouro from './FolhaTesouro'
 import ApprovalCard from './ApprovalCard'
 import MoedaKoda from './MoedaKoda'
 import { tempoEmTexto, useSegundosDoDia } from '../tempo'
@@ -66,7 +72,8 @@ const COR_DO_MODO: Record<ModoPermissao, string> = {
   auto: 'text-red-400',
   livre: 'text-red-500',
 }
-import { fraseDeFalha, removerAnexo, subirAnexo } from '../api/client'
+import { fraseDeFalha, melhorarPrompt, removerAnexo, subirAnexo } from '../api/client'
+import type { ModoDoPrompt } from '../api/client'
 import { filtrarComandos, textoDoComando, tokenDigitado } from '../comandos'
 import {
   COR_DO_TIPO,
@@ -89,6 +96,47 @@ import type {
   ModoPermissao,
   PedidoPermissao,
 } from '../api/client'
+
+/**
+ * Os modos da folha — cada um por um motivo, do jeito que o dono pediu.
+ *
+ * A ordem é de uso: «com base» é o de todo dia (a base tá boa, sobe pro cima). Os
+ * outros cobrem os casos que ele descreveu: ideia solta → criar do zero; ideia boa
+ * mas sem separação → estrutura; só a escrita ruim → fala; só falta acento → grafia.
+ * O `hint` de cada um diz quando serve — é a dúvida de quem abre o menu.
+ */
+const MODOS_DO_PROMPT: MenuOption[] = [
+  {
+    value: 'base',
+    label: 'Melhorar com base',
+    hint: 'mantém o que você escreveu e acrescenta o que falta',
+    icon: <Sparkles className="h-3.5 w-3.5" strokeWidth={1.7} />,
+  },
+  {
+    value: 'criar',
+    label: 'Criar do zero',
+    hint: 'escreve o prompt inteiro a partir da ideia solta',
+    icon: <FilePlus2 className="h-3.5 w-3.5" strokeWidth={1.7} />,
+  },
+  {
+    value: 'estrutura',
+    label: 'Estrutura',
+    hint: 'separa as tarefas e organiza, sem reescrever tudo',
+    icon: <ListTree className="h-3.5 w-3.5" strokeWidth={1.7} />,
+  },
+  {
+    value: 'fala',
+    label: 'Melhorar a fala',
+    hint: 'deixa o texto mais claro e direto, sem mudar o pedido',
+    icon: <MessageSquareText className="h-3.5 w-3.5" strokeWidth={1.7} />,
+  },
+  {
+    value: 'grafia',
+    label: 'Acentuar e pontuar',
+    hint: 'só corrige acentos e pontuação, nada mais',
+    icon: <ALargeSmall className="h-3.5 w-3.5" strokeWidth={1.7} />,
+  },
+]
 
 export type SendPayload = {
   text: string
@@ -289,6 +337,10 @@ export function Composer({
   mcps?: ApiMcp[]
 }) {
   const [message, setMessage] = useState('')
+  /** A folha está reescrevendo o prompt agora? Enquanto isso ela dá lugar a um girador. */
+  const [melhorando, setMelhorando] = useState(false)
+  /** Por que a reescrita falhou, quando falha. Some na próxima tentativa. */
+  const [erroDaMelhoria, setErroDaMelhoria] = useState<string | null>(null)
   const [reasoning, setReasoning] = useState(true)
   const [web, setWeb] = useState(false)
   const [efforts, setEfforts] = useState<Record<string, Effort>>({})
@@ -503,6 +555,44 @@ export function Composer({
     setMessage('')
     setAttachments([])
     textareaRef.current?.focus()
+  }
+
+  /**
+   * A folha: reescreve o rascunho no modo que a pessoa escolheu no menu.
+   *
+   * Quem responde é o modelo que estiver selecionado — a pessoa não escolhe provedor
+   * aqui. O texto melhorado **substitui** o rascunho na caixa: a ideia é chegar no
+   * prompt final, não empilhar versões. Sem ferramentas e sem tocar na conversa: é
+   * chamada de texto puro, feita no backend pelo `/api/prompt/melhorar`.
+   *
+   * Vão junto os recursos **ativos** da máquina (MCPs, skills e subs) — a validação
+   * do prompt pode citá-los quando fizer sentido, e só esses.
+   */
+  const melhorar = async (modo: ModoDoPrompt) => {
+    if (melhorando || !message.trim()) return
+    setMelhorando(true)
+    setErroDaMelhoria(null)
+    try {
+      const { prompt } = await melhorarPrompt(message, model, modo, {
+        mcps: mcps.filter((item) => item.enabled).map((item) => item.name),
+        skills: skills.filter((item) => item.enabled).map((item) => item.name),
+        subs: agentes.map((item) => item.nome),
+      })
+      if (prompt.trim()) {
+        setMessage(prompt)
+        textareaRef.current?.focus()
+      } else {
+        setErroDaMelhoria('o modelo devolveu vazio — tenta de novo')
+      }
+    } catch (erro) {
+      setErroDaMelhoria(
+        erro instanceof Error && erro.message
+          ? erro.message
+          : 'não consegui falar com o backend para melhorar o prompt',
+      )
+    } finally {
+      setMelhorando(false)
+    }
   }
 
   const toggleMic = () => {
@@ -1094,6 +1184,32 @@ export function Composer({
           </div>
 
           <div className="flex items-center gap-1">
+            {/* A folha do mapa do tesouro virou menu: cada modo melhora o rascunho de
+                um jeito (com base, do zero, estrutura, fala, grafia), sempre com o
+                modelo que estiver selecionado. Solta, à esquerda da coroa — não é
+                parte do gatilho do modelo. Caixa vazia ou já melhorando: o gatilho
+                apaga e para de responder (o `Menu` não tem `disabled` próprio). */}
+            <Menu
+              options={MODOS_DO_PROMPT}
+              onSelect={(value) => void melhorar(value as ModoDoPrompt)}
+              align="end"
+              direction="up"
+              label="Melhorar o prompt"
+              panelClassName="w-72"
+              triggerClassName={[
+                'mr-1.5 flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-150',
+                'focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none',
+                !message.trim() || melhorando
+                  ? 'pointer-events-none text-amber-200/55 opacity-40'
+                  : 'text-amber-200/55 hover:bg-koda-fg/8 hover:text-amber-200/80',
+              ].join(' ')}
+            >
+              {melhorando ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <FolhaTesouro className="h-4 w-4 -rotate-12" />
+              )}
+            </Menu>
             <Menu
               options={comMedidor(modelMenu(remoteModels, modelosBloqueados))}
               value={model}
@@ -1210,6 +1326,11 @@ export function Composer({
               </button>
             )}
           </div>
+
+          {/* A folha não conseguiu melhorar o prompt: o motivo aparece aqui, discreto. */}
+          {erroDaMelhoria ? (
+            <p className="mt-1 px-1 text-[11.5px] text-red-400/80">{erroDaMelhoria}</p>
+          ) : null}
         </div>
         </div>
 
