@@ -130,6 +130,21 @@ function arquivoLocal(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), arquivoLocal()],
+  build: {
+    // As páginas de teste entram no build junto com o app. Sem declarar o `input`, o Vite
+    // só compila o `index.html` — e `blocos.html` existiria no dev e sumiria no `dist`,
+    // que é o jeito mais fácil de uma página de conferência morrer sem ninguém perceber.
+    // Ela é pequena e não custa nada ao pacote.
+    rollupOptions: {
+      input: {
+        // Caminhos relativos: o `package.json` é `type: module`, e ali `__dirname` não
+        // existe — o Vite resolve relativo à raiz do projeto, que é onde estes arquivos
+        // moram.
+        principal: 'index.html',
+        blocos: 'blocos.html',
+      },
+    },
+  },
   server: {
     // **`127.0.0.1`, e não o padrão.** Sem isto o Vite escuta só em `[::1]` nesta máquina, e
     // `http://127.0.0.1:5173` — o endereço que a mão digita — dá conexão recusada. O sintoma

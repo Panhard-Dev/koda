@@ -1,6 +1,9 @@
 import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
+import { desenhar, ehBlocoVisual } from './BlocosVisuais'
+import { DesenhoUi } from './UiGenerativa'
+
 /**
  * Markdown mínimo para as respostas do modelo: negrito, itálico, `código`, blocos de
  * código, títulos, listas, citação, régua e tabelas. Sem dependência nova e sem
@@ -524,13 +527,66 @@ function RichText({ text, className = '' }: { text: string; className?: string }
         const linhas = parte.split('\n')
         const primeira = linhas[0].trim()
         const temLinguagem = primeira !== '' && !primeira.includes(' ')
+        const idioma = temLinguagem && primeira.length <= 16 ? primeira : ''
         const codigo = (temLinguagem ? linhas.slice(1) : linhas).join('\n').replace(/\n+$/, '')
+        // UI generativa (`koda-ui`): a IA **descreve** uma interface com componentes
+        // (`<box>`, `<button>`, `<slider>`, `<grid>`, `<chart>`) e estado (`useState`), e o
+        // Koda desenha — sem tipo fixo, sem `eval`. Vem antes do `Codigo` e ao lado dos
+        // blocos visuais: é a porta pra simuladores, contadores e telas que os 21 formatos
+        // fixos não cobrem. Ver `components/UiGenerativa/`.
+        if (idioma === 'koda-ui') {
+          montado.push(
+            <div key={`ui-${indice}`} className="min-w-0">
+              <DesenhoUi fonte={codigo} />
+            </div>,
+          )
+          return
+        }
+        // Bloco visual (`koda-grafico`, `koda-mapa`…): a IA mandou DADOS, e quem desenha é
+        // o Koda. Vem antes do `Codigo` de propósito — é o que faz um gráfico aparecer em
+        // vez do JSON cru na tela.
+        //
+        // **Só desenha quando o JSON fechou.** O stream chega em pedaços: um
+        // ```koda-visual``` aberto com o JSON pela metade é bloco em construção, e o
+        // parser o julgaria como "não é um JSON válido" — o cartão amarelo aparecia
+        // no meio da resposta e sumia sozinho quando o modelo terminava (visto em
+        // 16/10/2026). Durante a construção o bloco fica como cru; quando o JSON
+        // fecha (e o tipo é conhecido) vira o desenho de verdade.
+        if (ehBlocoVisual(idioma)) {
+          const fechado = codigo.trim().endsWith('}')
+          if (fechado) {
+            let pronto = false
+            try {
+              const dados = JSON.parse(codigo.trim()) as unknown
+              pronto = typeof dados === 'object' && dados !== null && !Array.isArray(dados)
+            } catch {
+              pronto = false
+            }
+            if (pronto) {
+              montado.push(
+                <div key={`visual-${indice}`} className="min-w-0">
+                  {desenhar(idioma, codigo)}
+                </div>,
+              )
+              return
+            }
+          }
+          montado.push(
+            <Codigo
+              key={`code-${indice}`}
+              chave={`code-${indice}`}
+              codigo={codigo}
+              idioma={idioma}
+            />,
+          )
+          return
+        }
         montado.push(
           <Codigo
             key={`code-${indice}`}
             chave={`code-${indice}`}
             codigo={codigo}
-            idioma={temLinguagem && primeira.length <= 16 ? primeira : ''}
+            idioma={idioma}
           />,
         )
         return
