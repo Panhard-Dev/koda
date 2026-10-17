@@ -34,6 +34,7 @@ import {
 import type { SettingsSection } from './components/SettingsScreen'
 import ProjectPicker from './components/ProjectPicker'
 import PainelLateral from './components/PainelLateral'
+import BarraLateralCamera from './components/BarraLateralCamera'
 import { findModel, MODELO_PADRAO } from './models'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
@@ -851,6 +852,8 @@ function App() {
   const [pastasAberto, setPastasAberto] = useState(false)
   /** Barra lateral do histórico. Sobreposição: cobre a conversa e fica acima de tudo. */
   const [painelAberto, setPainelAberto] = useState(false)
+  /** A segunda barra lateral — a que o botão da câmera abre. */
+  const [barraCameraAberta, setBarraCameraAberta] = useState(false)
   const [ocupadoPastas, setOcupadoPastas] = useState(false)
   const [erroPastas, setErroPastas] = useState<string | null>(null)
   /** Quanto o agente pode fazer sozinho (`manual` pergunta tudo que mexe na máquina). */
@@ -2675,6 +2678,7 @@ function App() {
           }}
           painelAberto={painelAberto}
           onTogglePainel={() => setPainelAberto((aberto) => !aberto)}
+          onAbrirBarraCamera={() => setBarraCameraAberta(true)}
         />
       ) : null}
 
@@ -2694,6 +2698,19 @@ function App() {
           // As sessões de sub-agente vivas: a área Subs abre uma aba por uma delas. Vêm
           // daqui porque quem as alimenta é o stream da conversa, que é deste lado.
           subs={subs}
+        />
+      ) : null}
+
+      {/*
+       * A segunda barra lateral, irmã da primeira: a que o botão da câmera abre. Abre
+       * **do mesmo lado** (`left-0`), ocupando a metade esquerda onde a PainelLateral
+       * também abre; com as duas abertas, esta fica por cima (última da pilha). Mesmo
+       * `z-[60]`, mesma casca.
+       */}
+      {view === 'chat' ? (
+        <BarraLateralCamera
+          aberto={barraCameraAberta}
+          onFechar={() => setBarraCameraAberta(false)}
         />
       ) : null}
 

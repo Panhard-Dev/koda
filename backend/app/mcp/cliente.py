@@ -711,6 +711,18 @@ def _ferramentas_de(itens: Any) -> list[FerramentaMCP]:
     return ferramentas
 
 
+#: Prefixo com que um MCP entrega uma imagem **de verdade** ao modelo.
+#:
+#: Uma linha do resultado começando com isto carrega um JPEG em base64, e o cliente troca
+#: a linha por uma parte `image_url` no pedido do modelo. É o que faz a IA **ver** um quadro
+#: em vez de receber o caminho de um arquivo que ela não consegue abrir — o MCP de vídeo
+#: usava caminho, e o modelo ficava descrevendo um JPG que nunca viu.
+#:
+#: O `image` nativo do MCP não serve para isto em toda versão: muitos servidores devolvem
+#: por `resource`/`blob`, e o Koda precisa do mesmo caminho para os dois.
+MARCA_DE_IMAGEM = "KODA_QUADRO:"
+
+
 def _conteudo_para_texto(conteudo: Any) -> str:
     """O `content` do `tools/call` -> texto para o modelo.
 
@@ -718,6 +730,10 @@ def _conteudo_para_texto(conteudo: Any) -> str:
     texto na conversa, então o que é texto entra inteiro e o resto é **anunciado** — nunca
     silenciado: um resultado que era só imagem e some sem dizer nada faria o modelo achar
     que a ferramenta não devolveu nada.
+
+    A exceção é a imagem com `data:` no `image_url` (ou o marcador `MARCA_DE_IMAGEM` no
+    texto): essa **atravessa** como marcador, porque quem a transforma em imagem de verdade
+    no pedido do modelo é `separar_imagens`, no laço do agente.
     """
     if conteudo is None:
         return ""
@@ -736,14 +752,80 @@ def _conteudo_para_texto(conteudo: Any) -> str:
         if tipo == "text":
             partes.append(str(item.get("text", "")))
         elif tipo == "image":
-            partes.append(f"[imagem: {item.get('mimeType', 'desconhecido')}]")
+            url = _url_de_imagem(item)
+            if url:
+                partes.append(f"{MARCA_DE_IMAGEM}{url}")
+            else:
+                partes.append(f"[imagem: {item.get('mimeType', 'desconhecido')}]")
         elif tipo == "resource":
+            url = _url_de_imagem(item)
+            if url:
+                partes.append(f"{MARCA_DE_IMAGEM}{url}")
+                continue
             recurso = item.get("resource")
             uri = recurso.get("uri") if isinstance(recurso, dict) else "?"
             partes.append(f"[recurso: {uri}]")
         else:
             partes.append(json.dumps(item, ensure_ascii=False))
     return "\n".join(parte for parte in partes if parte)
+
+
+def _url_de_imagem(item: dict[str, Any]) -> str:
+    """A imagem deste item como `data:` URL, ou `""` quando não é imagem aproveitável.
+
+    Três formatos aparecem na prática: o `image` com `data` (base64 cru + `mimeType`), o
+    `image` com `url` já pronta, e o `resource` com `blob`. Os três viram a mesma `data:`
+    URL — que é o formato que o provedor do modelo aceita.
+    """
+    mime = str(item.get("mimeType") or "").strip()
+    url = str(item.get("url") or "").strip()
+    if url.startswith("data:"):
+        return url
+
+    dados: Any = None
+    recurso = item.get("resource")
+    if isinstance(recurso, dict):
+        dados = recurso.get("blob")
+        if not mime:
+            mime = str(recurso.get("mimeType") or "").strip()
+        if dados is None:
+            candidata = str(recurso.get("uri") or "")
+            if candidata.startswith("data:"):
+                return candidata
+    if dados is None:
+        dados = item.get("data")
+    if not isinstance(dados, str) or not dados:
+        return ""
+    if not mime.startswith("image/"):
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{dados.strip()}"
+
+
+def separar_imagens(texto: str) -> tuple[str, list[str]]:
+    """Tira do texto as imagens de MCP e devolve `(texto_limpo, [data URL, …])`.
+
+    O modelo lê o texto com a legenda de cada quadro (`12s — fala: "…"`) e **vê** a imagem
+    logo depois dela, como parte `image_url` do mesmo resultado de ferramenta. Sem isto a
+    visão do vídeo ficava presa ao caminho de um arquivo em disco.
+    """
+    if MARCA_DE_IMAGEM not in texto:
+        return texto, []
+    linhas: list[str] = []
+    imagens: list[str] = []
+    for linha in texto.splitlines():
+        if linha.startswith(MARCA_DE_IMAGEM):
+            url = linha[len(MARCA_DE_IMAGEM) :].strip()
+            if url.startswith("data:"):
+                imagens.append(url)
+            elif url:
+                # Base64 cru, sem o `data:` URL: um MCP pode mandar assim. Montar aqui, em
+                # vez de descartar, é o que evita a pior falha possível — a imagem sumir em
+                # silêncio e o modelo ficar com um bloco de base64 que ele não abre (e sair
+                # tentando Pillow, ffmpeg, gravar arquivo na pasta de trabalho).
+                imagens.append(f"data:image/jpeg;base64,{url}")
+            continue
+        linhas.append(linha)
+    return "\n".join(linhas), imagens
 
 
 def nome_seguro(nome: str) -> str:

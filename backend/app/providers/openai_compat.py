@@ -126,6 +126,19 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
     campos o modelo aprende com o próprio histórico a **narrar em vez de chamar**.
     """
     if turno.role == "tool":
+        # Um resultado de ferramenta pode trazer imagem (o MCP de vídeo entrega cada quadro
+        # do vídeo analisado). Sem isto o `content` era forçado a string e os quadros sumiam
+        # — o modelo recebia a legenda do quadro e nunca a imagem.
+        if turno.imagens:
+            conteudo_tool: Any = [{"type": "text", "text": turno.text}]
+            conteudo_tool += [
+                {"type": "image_url", "image_url": {"url": url}} for url in turno.imagens
+            ]
+            return {
+                "role": "tool",
+                "tool_call_id": turno.chamada_id or "",
+                "content": conteudo_tool,
+            }
         return {
             "role": "tool",
             "tool_call_id": turno.chamada_id or "",

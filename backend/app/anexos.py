@@ -79,6 +79,13 @@ TIPOS: dict[str, str] = {
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
+    # Vídeo entra pelo anexo da conversa. Quem entrega à IA os elementos (quadros como
+    # imagem, transcrição como texto) é o turno — ver `app/video.py` e `_turns`.
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".ogv": "video/ogg",
 }
 
 #: Mimes que **não** começam com `text/` mas ainda são texto puro — dá para ler como string.
@@ -157,6 +164,11 @@ def validar(nome: str, dados: bytes) -> tuple[str, str]:
             raise AnexoError("conteúdo não reconhecido como imagem png, jpeg, gif ou webp")
         if detectado != mime:
             raise AnexoError(f"extensão .{ext.lstrip('.')} não corresponde ao conteúdo {detectado}")
+    if mime.startswith("video/"):
+        from .video import assinatura_de_video
+
+        if assinatura_de_video(dados) is None:
+            raise AnexoError("conteúdo não reconhecido como vídeo mp4/mov/webm")
     return mime, ext
 
 

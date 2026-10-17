@@ -9,6 +9,7 @@ Dois caminhos, escolhidos por `tools` no corpo:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 import time
@@ -19,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pathlib import Path
 
-from .. import anexos, host_auth, projects
+from .. import anexos, host_auth, mcp, projects, video
 from ..agent import contexto
 from ..policy import approvals
 from ..config import Settings
@@ -832,13 +833,20 @@ def _visao_ativa(settings: Settings, model: str, do_pedido: list[anexos.Anexo]) 
     modelo que não enxerga o pedido com `image_url` no corpo é recusado inteiro. Fora deste
     caso, o anexo segue pelos metadados, como sempre foi.
 
+    **Vídeo conta como imagem.** Ele não é `image/`, mas os quadros dele vão no corpo do
+    pedido do mesmo jeito (`_imagens_do_turno`). Testar só `anexo.imagem` deixava a visão
+    desligada para todo vídeo — e o modelo recebia a transcrição e a promessa de quadros
+    que nunca chegavam, respondendo "não consigo ver o vídeo". Era esse o defeito.
+
     Quem decide é a **lista curada** do `Settings`, e **não** o `images` do catálogo do
     host: a lista é medida contra o upstream, e mandar imagem para quem não enxerga derruba
     o pedido inteiro. Ela já esteve errada nos dois sentidos — medição de 10/10/2026 mostrou
     que o `liz-nano` e o `nable-4` enxergam, e o comentário que os excluía citava um id
     (`mai-experimental`) que o host não usa mais.
     """
-    return settings.aceita_imagem(model) and any(item.imagem for item in do_pedido)
+    if not settings.aceita_imagem(model):
+        return False
+    return any(item.imagem or item.mime.startswith("video/") for item in do_pedido)
 
 
 def _effort(payload: ChatRequest) -> str | None:
@@ -935,7 +943,32 @@ def _prepare(
     return conversation_id, turns, origens, resumo, cobertas
 
 
-def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo], visao: bool = False) -> str:
+def _elementos_do_video(
+    anexo_id: str, store: anexos.AnexoStore | None, pasta_do_cache: Path | None
+) -> dict[str, Any] | None:
+    """Os elementos de um anexo de vídeo, ou `None` quando não dá.
+
+    Falha aqui **não pode derrubar o turno**: ffmpeg ausente (app empacotado), arquivo
+    sumido do store, vídeo que o ffprobe não lê — em todos os casos o bloco de metadados
+    já diz o que o anexo é, e a conversa segue.
+    """
+    if not anexo_id or store is None or pasta_do_cache is None:
+        return None
+    anexo = store.buscar(anexo_id)
+    if anexo is None:
+        return None
+    try:
+        return video.elementos(str(anexo.caminho), pasta_do_cache)
+    except Exception:
+        return None
+
+
+def _bloco_de_anexos(
+    anexos_da_mensagem: list[AttachmentInfo],
+    visao: bool = False,
+    store: anexos.AnexoStore | None = None,
+    pasta_do_cache: Path | None = None,
+) -> str:
     """Os metadados dos anexos desta mensagem, como o modelo precisa vê-los.
 
     Vai junto do turno do usuário (e não no prompt de sistema) porque anexo é **desta
@@ -953,30 +986,99 @@ def _bloco_de_anexos(anexos_da_mensagem: list[AttachmentInfo], visao: bool = Fal
         if not item.id:
             linhas.append(f"- {item.nome} (anexo antigo, sem conteúdo guardado)")
             continue
+        # Vídeo também é "anexado ao contexto": os quadros dele vão como imagem no corpo do
+        # pedido (`_imagens_do_turno`). Sem esta marca o modelo lia "use `read_attachment`"
+        # para um vídeo cujos quadros estavam na frente dele — e respondia que não conseguia
+        # ver, ou que faltava a ferramenta de anexo. Era esse o defeito.
+        eh_video = item.tipo.startswith("video/")
         marca = (
             " · imagem anexada ao seu contexto: você a enxerga"
-            if visao and anexos.cabe_inline(item.tipo, item.tamanho)
+            if visao and (eh_video or anexos.cabe_inline(item.tipo, item.tamanho))
             else ""
         )
         linhas.append(
             f"- {item.nome} ({item.tipo}, {item.tamanho} bytes) · id: {item.id}{marca}"
         )
+        # Vídeo entra pelos **elementos**: a transcrição como texto (barato de ler) e os
+        # quadros como imagem, em `_imagens_do_turno`. Sem isto a IA não via nada útil —
+        # e o jeito era tirar print, gastando token e tempo.
+        if eh_video:
+            elementos = _elementos_do_video(item.id, store, pasta_do_cache)
+            if elementos:
+                linhas.append(
+                    f"  vídeo de {elementos['duracao_s']}s "
+                    f"({elementos['largura']}x{elementos['altura']})"
+                )
+                # Diz **quantos** quadros vieram e em que segundos: o modelo precisa saber
+                # que está vendo o vídeo por amostragem, e não o vídeo inteiro quadro a
+                # quadro — senão ele promete descrever um instante que ninguém amostrou.
+                quantos = len(elementos.get("quadros") or [])
+                if visao and quantos:
+                    duracao = float(elementos.get("duracao_s") or 0)
+                    marcos = [
+                        f"{((i + 0.5) * duracao / quantos):.1f}s" for i in range(quantos)
+                    ]
+                    linhas.append(
+                        f"  {quantos} quadros deste vídeo estão no seu contexto como imagem, "
+                        f"um a cada {duracao / max(quantos, 1):.1f}s — nos segundos "
+                        f"{', '.join(marcos)}. Descreva o que você VÊ em cada um."
+                    )
+                elif not visao:
+                    linhas.append(
+                        "  (este modelo não enxerga imagem: use a transcrição acima, ou "
+                        "`analisar_video` para os quadros)"
+                    )
+                trechos = elementos.get("transcricao") or []
+                if trechos:
+                    linhas.append("  Transcrição do que é falado:")
+                    for trecho in trechos:
+                        linhas.append(
+                            f"  {trecho['inicio']:.0f}s - {trecho['fim']:.0f}s: {trecho['texto']}"
+                        )
+                else:
+                    linhas.append("  (nenhuma fala reconhecida no áudio deste vídeo)")
     linhas.append(
         "Para ler o conteúdo de texto, código ou pdf, use `read_attachment` com o id acima. "
-        "Imagem marcada como anexada não precisa de ferramenta — descreva o que você vê. "
+        "Imagem ou vídeo marcados como anexados ao contexto não precisam de ferramenta — "
+        "descreva o que você vê, sem dizer que não consegue. "
         "Não use `read_file` com o nome do anexo: ele não está no workspace."
     )
     return "\n".join(linhas)
 
 
+def _turno_de_ferramenta(saida: str, chamada_id: str, visao: bool) -> ChatTurn:
+    """O turno `tool` de uma conversa reaberta, com as imagens que a ferramenta deixou.
+
+    A saída fica gravada **como veio**, com os marcadores de imagem no texto. Aqui eles
+    voltam a ser imagem: sem isto o modelo reencontrava a conversa com a legenda de cada
+    quadro e sem nenhum quadro — e a análise de vídeo que ele já tinha feito sumia do
+    contexto ao reabrir.
+
+    `visao` desligado (modelo que não enxerga) devolve só o texto, sem as imagens: mandar
+    `image_url` para quem não aceita derruba o pedido inteiro.
+    """
+    texto, imagens = mcp.separar_imagens(saida)
+    return ChatTurn(
+        role="tool",
+        text=texto,
+        chamada_id=chamada_id,
+        imagens=imagens if visao else [],
+    )
+
+
 def _imagens_do_turno(
-    anexos_da_mensagem: list[AttachmentInfo], store: anexos.AnexoStore
+    anexos_da_mensagem: list[AttachmentInfo],
+    store: anexos.AnexoStore,
+    pasta_do_cache: Path | None = None,
 ) -> list[str]:
     """As imagens desta mensagem como `data:` URLs, na ordem em que foram anexadas.
 
     Lê do store pelo id — o mesmo caminho do `read_attachment`, e o único que alcança o
     conteúdo. O que não é imagem, ou passa do teto inline, simplesmente não entra: o bloco
     de metadados já diz o que é, e o pedido não engorda à toa.
+
+    **Vídeo entra pelos quadros.** Cada quadro gerado (`app/video.py`) é uma imagem do
+    contexto — a IA vê o vídeo elemento por elemento, sem print.
     """
     urls: list[str] = []
     for info in anexos_da_mensagem:
@@ -984,6 +1086,16 @@ def _imagens_do_turno(
             continue
         anexo = store.buscar(info.id)
         if anexo is None:
+            continue
+        if anexo.mime.startswith("video/"):
+            elementos = _elementos_do_video(info.id, store, pasta_do_cache)
+            # Os quadros já vêm como **bytes de JPEG em memória** — nenhum arquivo no PC.
+            for quadro in (elementos or {}).get("quadros", []):
+                if isinstance(quadro, (bytes, bytearray)):
+                    dados = bytes(quadro)
+                else:  # cache antigo, de quando o motor gravava f01.jpg no workspace
+                    dados = Path(str(quadro)).read_bytes()
+                urls.append(f"data:image/jpeg;base64,{base64.b64encode(dados).decode('ascii')}")
             continue
         url = anexos.data_url(anexo)
         if url:
@@ -1016,11 +1128,24 @@ def _turns(
     resumo precisa dessa correspondência: contar turnos como se fossem mensagens corta a
     conversa no lugar errado.
     """
+    # Onde os elementos de vídeo ficam em cache. Store sem settings à mão (teste) não
+    # tem workspace: aí o vídeo entra só pelos metadados, sem quadros nem transcrição.
+    pasta_do_cache: Path | None = None
+    if store is not None:
+        try:
+            pasta_do_cache = Path(store.settings.workspace_path) / ".koda-video"
+        except Exception:
+            pasta_do_cache = None
+
     turns: list[ChatTurn] = []
     origens: list[int] = []
     for posicao, item in enumerate(mensagens):
         texto = remover_intro(item.text) if item.role == "assistant" else item.text
-        bloco = _bloco_de_anexos(item.attachments, visao) if item.role == "user" else ""
+        bloco = (
+            _bloco_de_anexos(item.attachments, visao, store, pasta_do_cache)
+            if item.role == "user"
+            else ""
+        )
         corpo = texto.strip()
         if bloco:
             corpo = f"{corpo}\n\n{bloco}" if corpo else bloco
@@ -1053,13 +1178,13 @@ def _turns(
             turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas))
             origens.append(posicao)
             turns += [
-                ChatTurn(role="tool", text=passo.output or "", chamada_id=chamadas[indice]["id"])
+                _turno_de_ferramenta(passo.output or "", chamadas[indice]["id"], visao)
                 for indice, passo in enumerate(item.steps)
             ]
             origens += [posicao] * len(item.steps)
             continue
         imagens = (
-            _imagens_do_turno(item.attachments, store)
+            _imagens_do_turno(item.attachments, store, pasta_do_cache)
             if visao and store is not None and item.role == "user"
             else []
         )

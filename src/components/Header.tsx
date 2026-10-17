@@ -81,6 +81,32 @@ function IconePainel({ className = 'h-[18px] w-[18px]' }: { className?: string }
   )
 }
 
+/**
+ * Ícone de câmera de vídeo: alça em cima, corpo alongado e a lente apontada para o lado
+ * — a filmadora de perfil, não a máquina fotográfica de frente. Mesmo traço do resto da
+ * interface
+ * (24×24, `currentColor`, 1.7) e SVG inline, como a coroa da marca — nenhuma imagem de
+ * fora e nenhuma dependência nova.
+ */
+function IconeCamera({ className = 'h-[18px] w-[18px]' }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M9 7.8V5.8a1.4 1.4 0 0 1 1.4-1.4h3.2a1.4 1.4 0 0 1 1.4 1.4v2" />
+      <rect x="2.4" y="7.8" width="12.8" height="8.4" rx="2.4" />
+      <path d="M15.2 10.6 20.6 7.9v8.2l-5.4-2.7z" />
+    </svg>
+  )
+}
+
 function Interruptor({ on }: { on: boolean }) {
   /**
    * Interruptor de status: a bolinha desliza para a direita quando está ligado.
@@ -156,6 +182,7 @@ export function Header({
   onOpenConversation,
   onOpenSettings,
   onOpenPresente,
+  onAbrirBarraCamera,
   onTogglePainel,
 }: {
   searchOpen: boolean
@@ -181,6 +208,8 @@ export function Header({
   onOpenSettings: (section?: SettingsSection) => void
   /** Abre a página do presente (o ícone solto, ao lado da cápsula). */
   onOpenPresente: () => void
+  /** Abre a segunda barra lateral (o botão da câmera). */
+  onAbrirBarraCamera: () => void
   /** A barra lateral está aberta — o botão do painel fica aceso e alterna. */
   painelAberto: boolean
   onTogglePainel: () => void
@@ -386,14 +415,15 @@ export function Header({
        * Marca e painel lateral empilhados na ponta esquerda: a coroa em cima, o botão do
        * painel logo abaixo dela.
        *
-       * O `-mb-10` desconta a altura do botão de baixo, e é o que mantém a coroa no lugar:
-       * sem ele a coluna fica mais alta que a pílula, o `items-center` do cabeçalho
-       * recentraliza a linha e a coroa **sobe** — que foi exatamente o defeito da primeira
-       * versão. Com o desconto, a coluna mede o mesmo que a coroa (32px), a linha continua
-       * com a altura da pílula (44px) e os dois seguem alinhados como antes. O ícone passa a
-       * sobrar para baixo, e o `pb-11` do cabeçalho é quem abre o espaço para ele.
+       * O `-mb-12` desconta o `gap-3` e o botão de baixo (48px), e é o que mantém a coroa
+       * no lugar: sem ele a coluna fica mais alta que a pílula, o `items-center` do
+       * cabeçalho recentraliza a linha e a coroa **sobe** — que foi exatamente o defeito da
+       * primeira versão. Com o desconto, a coluna mede o mesmo que a coroa (32px), a linha
+       * continua com a altura da pílula (44px) e os dois seguem alinhados como antes. Os
+       * ícones passam a sobrar para baixo, e o `pb-11` do cabeçalho é quem abre o espaço
+       * para eles.
        */}
-      <div className="flex shrink-0 flex-col items-center gap-1 -mb-10">
+      <div className="relative flex shrink-0 flex-col items-center gap-3 -mb-12">
         <button
           type="button"
           onClick={onNewChat}
@@ -410,6 +440,23 @@ export function Header({
         >
           <IconePainel className="h-[18px] w-[18px]" />
         </IconButton>
+
+        {/*
+         * A câmera vive NO VÃO entre a coluna e a cápsula — absoluta, fora do fluxo: a
+         * coluna não alarga e a cápsula não se move. Os 18px são a medida exata do vão
+         * (12px do `gap-3` do cabeçalho + 6px do `px-1.5` da cápsula), então ela encosta
+         * no fundo da cápsula sem cobrir ícone nenhum. `top-[53px]` a centra na linha
+         * de baixo (32px da coroa + 12px do `gap-3` + metade do quadradinho).
+         */}
+        <button
+          type="button"
+          aria-label="Abrir barra lateral"
+          title="Abrir barra lateral"
+          onClick={onAbrirBarraCamera}
+          className="absolute top-[53px] left-full z-10 flex h-[18px] w-[18px] items-center justify-center rounded-lg text-koda-fg/85 transition-colors duration-150 hover:bg-koda-fg/10 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+        >
+          <IconeCamera className="h-[18px] w-[18px]" />
+        </button>
       </div>
 
       <div className="flex items-center gap-0.5 rounded-full bg-koda-surface px-1.5 py-1 shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]">

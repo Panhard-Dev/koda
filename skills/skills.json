@@ -13,5 +13,10 @@
     "pasta": "validar-front",
     "name": "validar-front",
     "description": "Valida um front-end de ponta a ponta pelo MCP navegador — abre a página, interage como uma pessoa (clique, teclado, hover, arrasto, upload, toque) e confere console, rede, armazenamento e árvore de acessibilidade. Use quando precisar provar que uma alteração de interface funciona, sem depender de print: \"validar a tela\", \"testar o front\", \"conferir se quebrou\", \"rodar a bateria de QA\", \"testar responsividade\", \"checar acessibilidade\", \"interagir com a página\"."
+  },
+  {
+    "pasta": "video-analizar",
+    "name": "video-analizar",
+    "description": "Analisa vídeo de verdade — o que é falado (transcrição com timestamps), o que aparece (quadros) e o que a pessoa quer com ele. A pessoa anexa o vídeo e você VÊ os quadros como imagem; o MCP `video-analizar` analisa vídeo do disco (metadados, transcrição, momentos segundo→quadro→fala); a rota `/api/video-analizar` é o mesmo motor. Use quando a pessoa mandar um vídeo e perguntar \"o que é falado\", \"resume\", \"o que aparece em\", \"o que ele fala sobre\", quando apontar um caminho de vídeo no disco, ou quando a resposta precisar do conteúdo de um vídeo — não de print."
   }
 ]
