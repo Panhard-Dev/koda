@@ -58,6 +58,7 @@ from .skills import indice_para_agente
 from ..skills import SkillStore
 from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas, registry
+from ..ui_generativa import filtrar_stream, rebaixar_koda_ui
 from ..agent.loop import (
     ALO_DE_RACIOCINIO,
     AVISO_DE_RACIOCINIO_EM_LOOP,
@@ -199,7 +200,7 @@ async def _texto(
             trecho: list[str] = []
             truncado = False
             repetiu = False
-            async for piece in engine.stream(turns, options):
+            async for piece in filtrar_stream(engine.stream(turns, options)):
                 # Rodapé do stream: traz os tokens, não é texto nem raciocínio.
                 if piece.usage is not None:
                     uso = piece.usage
@@ -241,6 +242,9 @@ async def _texto(
             turns.append(ChatTurn(role="user", text=CONTINUAR_TRUNCADA))
 
         text = "".join(pieces).strip()
+        # Garantia final: rebaixa koda-ui que não rola antes de gravar (o stream ao vivo
+        # já passou pelo `filtrar_stream`; aqui é o texto que fica no banco).
+        text, _ = rebaixar_koda_ui(text)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         # `tokens` é a **saída** da resposta e `contexto` é o `prompt_tokens` do pedido — os
         # dois saem do rodapé do stream. Antes, este caminho gravava sem os dois e a ficha
@@ -523,6 +527,12 @@ async def _agente(
 
         # O que fica gravado é exatamente o que a tela montou com os deltas.
         texto = "".join(pedacos).strip() or resultado.texto.strip()
+        # **Rebaixa os blocos koda-ui que o motor não aguenta** (função com bloco, laço,
+        # console.log, array grande com template string) pra ```` ```js ```` antes de
+        # gravar: reabrir a conversa mostra o código legível, não a tela quebrada. O
+        # stream ao vivo já passou pelo `filtrar_stream`/rebaixa nos deltas do caminho de
+        # texto; no agente os deltas saem do loop, então a garantia final é aqui.
+        texto, _ = rebaixar_koda_ui(texto)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         # O provedor é quem sabe com qual modelo está falando.
         modelo = engine.resolve_model(payload.model)
