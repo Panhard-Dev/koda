@@ -86,6 +86,28 @@ SSE_HEADERS = {
 #: cortar no meio): passado o teto, a resposta fecha e o processo já foi derrubado.
 CANCELAMENTO_MAX_S = 5.0
 
+#: De quanto em quanto tempo o stream manda um sinal de vida enquanto o agente trabalha
+#: calado (provedor pensando, ferramenta rodando). O cliente conta esse silêncio para
+#: decidir reconectar — 15 s de intervalo mantém a paciência dele (60 s) folgada.
+SINAL_DE_VIDA_S = 15.0
+
+#: Sentinela do sinal de vida na fila de eventos. Não é `None` (que é o fim) nem uma
+#: tupla `(evento, dados)`: quando ele aparece, o stream emite um comentário vazio.
+_SINAL_DE_VIDA = object()
+
+
+async def _ou_sinal_de_vida(fila: asyncio.Queue, segundos: float = SINAL_DE_VIDA_S):
+    """Espera o próximo evento da fila, devolvendo o sentinela se o silêncio passar
+    de `segundos`.
+
+    `wait_for` cancela o `get` no estouro — seguro numa fila (o waiter é removido) — e
+    a próxima chamada espera de novo, sem perder nenhum evento.
+    """
+    try:
+        return await asyncio.wait_for(fila.get(), timeout=segundos)
+    except asyncio.TimeoutError:
+        return _SINAL_DE_VIDA
+
 
 def now_ms() -> int:
     """Epoch em milissegundos — mesma unidade que o front usa para `at`."""
@@ -489,18 +511,26 @@ async def _agente(
         loop_task = asyncio.create_task(rodar())
 
         # O loop roda como tarefa e narra cada passo: a fila entrega na ordem, sem
-        # esperar a tarefa terminar para o próximo evento sair.
+        # esperar a tarefa terminar para o próximo evento sair. A espera tem prazo —
+        # no silêncio (provedor pensando, ferramenta longa rodando), sai um comentário
+        # de sinal de vida, que o cliente (e qualquer proxy no meio) usa para saber
+        # que a conexão está viva. Sem isso o cliente não tem como diferenciar
+        # silêncio legítimo de travamento, e a tela ficava pendurada sem explicação.
         while True:
-            item = await fim.get()
+            item = await _ou_sinal_de_vida(fim)
             if item is None:
                 break
+            if item is _SINAL_DE_VIDA:
+                # Comentário SSE (linha começando com `:`): não é evento, não passa
+                # pelo `dispatch` do cliente — só bytes na conexão, que é o objetivo.
+                yield ":sinal-de-vida\n\n"
+                continue
             evento, dados = item
             if evento == "delta":
                 pedacos.append(str(dados.get("text", "")))
             yield sse(evento, dados)
 
         resultado = await loop_task
-
         # Fechou sem terminar (orçamento de passos, tempo esgotado): o texto que o loop
         # monta nesse caso não passou por nenhum `delta`, então era gravado e a tela ficava
         # muda. Quem estava olhando via as ferramentas rodarem e depois nada — o agente

@@ -7,6 +7,13 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import {
+  ESPERA_DO_PRIMEIRO_BYTE_MS,
+  INATIVIDADE_MS,
+  ErroDoServico,
+  lerComSinalDeVida,
+} from '../reconectar'
+
 const rawBase = import.meta.env.VITE_API_URL as string | undefined
 
 /** Endereço de reserva: o do navegador, onde não existe launcher para dizer a porta. */
@@ -645,6 +652,9 @@ export function fraseDeFalha(erro: unknown): string {
     }
     return `O serviço local respondeu ${erro.status}.`
   }
+  // O backend respondeu dizendo que não deu: a mensagem dele é a explicação — é ela
+  // que a pessoa precisa ler (cota, provedor estourado), não uma frase genérica.
+  if (erro instanceof ErroDoServico) return erro.message
   return 'O serviço local do Koda não respondeu.'
 }
 
@@ -1158,10 +1168,14 @@ type StreamData = {
   /**
    * Estado da rodada, **transitório**: o app está esperando (o provedor falhou e vai tentar
    * de novo, ou respondeu vazio e o loop insiste). Não é fala do modelo, então não entra na
-   * conversa — aparece enquanto dura e some quando a rodada segue. Sem isto, uma espera longa
-   * era uma tela muda girando "trabalhando…" sem dizer por quê.
+   * conversa — acende a linha «Reconectando…» enquanto dura e some quando a rodada segue.
+   * Sem isto, uma espera longa era uma tela muda girando "trabalhando…" sem dizer por quê.
+   *
+   * `tentativa`/`total` são o contador de quem está insistindo (o loop do agente). Quando
+   * vêm, a linha mostra os números (`01/05`); o `text` não é mostrado em lugar nenhum —
+   * fica para quem lê o SSE cru.
    */
-  aviso: { text: string }
+  aviso: { text: string; tentativa?: number; total?: number }
   tool_call: {
     id: string
     name: string
@@ -1244,8 +1258,11 @@ export type StreamHandlers = {
   onDelta: (text: string) => void
   /** O modelo pensando, para a tela não ficar parada enquanto ele não escreve. */
   onReasoning?: (text: string) => void
-  /** A rodada está esperando — e diz por quê (transitório; ver `StreamData['aviso']`). */
-  onAviso?: (text: string) => void
+  /**
+   * A rodada está esperando e insistindo sozinha — acende a linha «Reconectando…» com o
+   * contador (transitório; ver `StreamData['aviso']`).
+   */
+  onAviso?: (data: StreamData['aviso']) => void
   /** O modelo pediu uma ferramenta (antes de ela rodar). */
   onToolCall?: (data: StreamData['tool_call']) => void
   /** A ferramenta terminou, com a saída que voltou para o modelo. */
@@ -1276,13 +1293,23 @@ export type StreamHandlers = {
  */
 export async function streamChat(payload: ChatPayload, handlers: StreamHandlers) {
   await prepararAcesso()
+  // O controle de aborto é **interno**: quem para é o Parar (o sinal de fora), e o
+  // sinal de vida é o silêncio (daqui). Abortar o sinal de dentro **não** pode ser
+  // confundido com o Parar — o laço da reconexão em `App.tsx` olha o sinal dele para
+  // saber se foi a pessoa quem parou a rodada.
+  const interno = new AbortController()
+  const encaminharParada = () => interno.abort()
+  if (handlers.signal) {
+    if (handlers.signal.aborted) interno.abort()
+    else handlers.signal.addEventListener('abort', encaminharParada, { once: true })
+  }
   const response = await fetch(`${apiUrl}/api/chat`, {
     method: 'POST',
     // O token vai também aqui: o stream é a rota mais importante, e ela é protegida como
     // todas as outras.
     headers: { 'content-type': 'application/json', ...cabecalhoDeAcesso() },
     body: JSON.stringify(payload),
-    signal: handlers.signal,
+    signal: interno.signal,
   })
 
   if (!response.ok || !response.body) {
@@ -1310,7 +1337,8 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
       if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
       else if (event === 'delta') handlers.onDelta(String(parsed.text ?? ''))
       else if (event === 'reasoning') handlers.onReasoning?.(String(parsed.text ?? ''))
-      else if (event === 'aviso') handlers.onAviso?.(String(parsed.text ?? ''))
+      else if (event === 'aviso')
+        handlers.onAviso?.(parsed as unknown as StreamData['aviso'])
       else if (event === 'tool_call')
         handlers.onToolCall?.(parsed as unknown as StreamData['tool_call'])
       else if (event === 'tool_result')
@@ -1338,14 +1366,31 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
   // (queda de rede, backend que morreu, provedor que estourou) também encerra — e a tela
   // precisa saber, senão fica presa no estado de "trabalhando".
   let viuTerminal = false
+  // O sinal de vida: a paciência é medida **por pedaço lido** — cada byte que chega
+  // (evento, delta, ou comentário de sinal de vida do backend) começa uma nova
+  // espera. Antes do primeiro byte a paciência é maior (o modelo pensando antes de
+  // escrever é legítimo); depois dela, silêncio longo é travamento.
+  let jaRecebeuAlgo = false
 
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const blocks = buffer.split('\n\n')
-    buffer = blocks.pop() ?? ''
-    blocks.forEach(dispatch)
+  try {
+    while (true) {
+      const { value, done } = await lerComSinalDeVida(
+        reader,
+        jaRecebeuAlgo ? INATIVIDADE_MS : ESPERA_DO_PRIMEIRO_BYTE_MS,
+      )
+      if (done) break
+      jaRecebeuAlgo = true
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split('\n\n')
+      buffer = blocks.pop() ?? ''
+      blocks.forEach(dispatch)
+    }
+  } catch (erro) {
+    // A tentativa morreu (silêncio estourado, rede, Parar): a conexão é abortada
+    // **aqui dentro** — senão o fluxo velho continua aberto no backend e a tentativa
+    // seguinte da reconexão duplicaria o trabalho.
+    interno.abort()
+    throw erro
   }
   if (buffer.trim()) dispatch(buffer)
   if (!viuTerminal) handlers.onClosed?.()
