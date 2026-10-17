@@ -1226,18 +1226,28 @@ function App() {
   }, [visiveis])
 
   /**
-   * O catálogo que o seletor pode mostrar: o do host, menos o que o painel tirou.
+   * O catálogo que o seletor pode mostrar: o do host, menos o que saiu de circulação.
    *
    * Este é o único ponto onde o painel entra na lista — daí em diante todo mundo (o menu do
    * prompt, o de Ajustes, o rótulo do modelo em uso) enxerga o mesmo recorte. Sem isso o
    * seletor continuaria oferecendo um modelo desativado, porque quem lista os modelos é o
    * host, e o host não sabe de painel: ele publica o catálogo dele e pronto.
+   *
+   * São **duas** portas de saída, pela mesma razão: o painel desativa um modelo, e o host
+   * recusa com 400 o que ele já não tem. As duas tiram o modelo do seletor na hora.
+   *
+   * O teste do backend entra aqui, e não só no menu: `modeloAtivo` escolhe o primeiro da
+   * lista, e um modelo que dá 400 como primeiro mandaria toda resposta nova para o erro.
+   * O filtro fica **neste** ponto para o resto do app ver o mesmo recorte do menu.
+   *
+   * Só o **400** tira o modelo: é o host dizendo que não tem mais aquele. 429, 401 e 500
+   * deixam o modelo na lista — ele existe, e a etiqueta ao lado do nome diz o que houve.
    */
   const modelosVisiveis = useMemo(
     () =>
-      modelosBloqueados.length === 0
-        ? remoteModels
-        : remoteModels.filter((item) => !modelosBloqueados.includes(item.value)),
+      remoteModels.filter(
+        (item) => !modelosBloqueados.includes(item.value) && item.status !== 400,
+      ),
     [remoteModels, modelosBloqueados],
   )
 
@@ -1699,9 +1709,16 @@ function App() {
    * modelo que foi usado naquela vez. Se o painel desativou esse modelo no meio, repetir o
    * pedido seria um jeito de continuar usando exatamente o que ele tirou, sem passar pelo
    * seletor. Aqui o modelo guardado só vale se ainda estiver de pé; se não, cai no ativo.
+   *
+   * Vale igual para o modelo que saiu do catálogo do host: repetir "Continuar" no `liz-4`
+   * depois do 400 seria reintroduzir à mão o modelo que acabou de sair da lista.
    */
   const modeloSeguro = (escolhido: string | null | undefined): string =>
-    escolhido && !modelosBloqueados.includes(escolhido) ? escolhido : modeloAtivo
+    escolhido &&
+    !modelosBloqueados.includes(escolhido) &&
+    modelosVisiveis.some((item) => item.value === escolhido)
+      ? escolhido
+      : modeloAtivo
 
   // Com a conta em pé, pergunta ao backend se ele está de pé. Se estiver, a sessão passa a
   // ser dele: histórico, cotas e conta vêm do SQLite.

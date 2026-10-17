@@ -284,6 +284,9 @@ export type ApiModel = {
   value: string
   label: string
   hint: string | null
+  /** O código HTTP que o modelo devolveu no teste do backend (`200`, `400`…). `null` = não
+   *  testado, ou o host não respondeu — e aí o seletor não escreve status nenhum. */
+  status?: number | null
 }
 
 export type ApiSkill = {
@@ -730,8 +733,15 @@ export const fetchUsage = () => request<ApiUsage>(`/api/usage?tz_offset_minutes=
 
 export const fetchAccount = () => request<ApiAccount>('/api/account')
 
-/** Modelos que o provedor atual aceita (o serviço devolve a lista dele). */
-export const listModels = () => request<ApiModel[]>('/api/models')
+/**
+ * Modelos que o provedor atual aceita, **cada um testado**: a resposta traz o código HTTP
+ * que aquele modelo devolveu de verdade (`200` ou `400`).
+ *
+ * A rota testada, e não o `/api/models` cru, porque o catálogo do host anuncia modelos que
+ * ele já não atende — o `liz-4` saiu do ar e continuava no seletor, onde só dava 400 até
+ * alguém recarregar o app.
+ */
+export const listModels = () => request<ApiModel[]>('/api/models/testados')
 
 /** Skills instaladas (do projeto e da máquina) para a seção Skills. */
 export const listSkills = () => request<ApiSkill[]>('/api/skills')

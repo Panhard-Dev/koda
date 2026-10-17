@@ -326,6 +326,18 @@ class ModelInfo(BaseModel):
     percentual bonito e falso.
     """
     janela: int | None = None
+    status: int | None = None
+    """
+    O código HTTP que o modelo **devolveu de verdade** quando o Koda o testou.
+
+    `200` = o modelo respondeu; `400` = o host disse que ele não está disponível. `None` =
+    não foi testado (ou o teste não conseguiu falar com o host), e aí o seletor não escreve
+    nem status nem mentira nenhuma ao lado do nome.
+
+    É o número cru, e não um booleano, porque o seletor mostra o código ao lado do modelo
+    («Liz 4 - 400»): quem olha a lista vê a prova do que aconteceu, e não um ícone genérico
+    que não diz se o problema foi o modelo, a chave ou o host.
+    """
 
 
 class AgenteInfo(BaseModel):

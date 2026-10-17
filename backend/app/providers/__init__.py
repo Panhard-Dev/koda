@@ -101,6 +101,17 @@ class ComTeto:
     def __getattr__(self, nome: str) -> Any:
         return getattr(self._provider, nome)
 
+    def desembrulhar(self) -> Provider:
+        """O provedor de dentro, sem o teto na frente.
+
+        Quem precisa saber **que tipo** de provedor está no ar usa isto, e não uma
+        checagem de tipo no invólucro: `isinstance` não passa pelo `__getattr__`, então
+        perguntar `isinstance(engine, HostProvider)` a um `ComTeto` responderia sempre
+        «não» mesmo com o host no ar — foi assim que o `GET /api/models` devolvia lista
+        vazia e o seletor caía na lista da casa.
+        """
+        return self._provider
+
     async def _esperar_vez(self) -> None:
         """Pede a vaga no teto do app, traduzindo «cheio» na mensagem que a pessoa lê.
 
