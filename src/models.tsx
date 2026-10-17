@@ -15,6 +15,14 @@ export type RemoteModel = {
   label: string
   hint?: string | null
   /**
+   * O código HTTP que este modelo devolveu quando o backend o testou.
+   *
+   * `200` = respondeu. Qualquer outro = não atende, e o item **sai do seletor** (ver
+   * `modelMenu`). `null`/ausente = não testado, ou o host não respondeu — aí o modelo fica,
+   * porque um host calado não prova que o modelo sumiu.
+   */
+  status?: number | null
+  /**
    * Teto de contexto do modelo, em tokens — o denominador do medidor de contexto.
    *
    * Vem do backend, que usa o teto que ele mesmo aplica à conversa: o host não publica a
@@ -110,6 +118,23 @@ const GRUPOS: { chave: string; label: string; aviso?: string }[] = [
 ]
 
 /**
+ * O código HTTP ao lado do nome do modelo: «Liz 4 - 200».
+ *
+ * É a prova do que o backend testou, à vista na própria lista. O verde marca o que
+ * respondeu 200; o âmbar, o que respondeu outra coisa sem ter saído do catálogo (cota,
+ * credencial, host engasgado). O 400 não chega aqui: ele sai do seletor em `modelMenu`.
+ */
+function Codigo({ status }: { status: number }) {
+  const bom = status === 200
+  return (
+    <span className="ml-1.5 font-mono text-[11px] tabular-nums">
+      <span className="text-koda-fg/45">-</span>{' '}
+      <span className={bom ? 'text-emerald-400/80' : 'text-amber-300/80'}>{status}</span>
+    </span>
+  )
+}
+
+/**
  * Seletor de modelo: as categorias do host, montadas a partir do que o backend devolveu.
  *
  * O agrupamento é por prefixo do id em vez de uma lista fixa aqui — assim um modelo novo
@@ -121,6 +146,13 @@ const GRUPOS: { chave: string; label: string; aviso?: string }[] = [
  * desativado, ou exceção individual desligada). Vale para as **duas** listas de propósito —
  * a viva e a de emergência. Um modelo desativado que reaparecesse sempre que o host ficasse
  * calado seria o mesmo defeito de antes, só mais difícil de flagrar.
+ *
+ * O `status` de cada modelo é o código que o backend **testou**: ele sai ao lado do nome
+ * («Liz 4 - 200»). Um modelo com **400** não entra na lista — é o host dizendo que não tem
+ * mais aquele (`liz-4` saiu do catálogo), e é isso que tira o modelo do seletor sem a
+ * pessoa precisar recarregar o app. Os outros códigos (429, 401, 500) mantêm o modelo na
+ * lista com o número à vista: ele existe, e o número diz o que aconteceu.
+ * `status` ausente não exclui ninguém: host calado não prova que o modelo sumiu.
  */
 export function modelMenu(items: RemoteModel[] = [], bloqueados: readonly string[] = []): MenuOption[] {
   const liberado = (value: string) => !bloqueados.includes(value)
@@ -135,12 +167,25 @@ export function modelMenu(items: RemoteModel[] = [], bloqueados: readonly string
 
   const opcao = (item: RemoteModel): MenuOption => ({
     value: item.value,
-    label: item.label,
+    label:
+      typeof item.status === 'number' ? (
+        <>
+          {item.label}
+          <Codigo status={item.status} />
+        </>
+      ) : (
+        item.label
+      ),
     hint: item.hint ?? undefined,
     icon: MODEL_ICON,
   })
 
-  const visiveis = items.filter((item) => liberado(item.value))
+  // Sai da lista só o que o host **recusou por não ter mais** (400). Um 429 é cota, um 401
+  // é credencial e um 500 é o host engasgado: nesses o modelo existe, e sumir com ele
+  // esconderia o modelo justamente na hora em que a pessoa precisa saber que ele está lá.
+  const visiveis = items.filter(
+    (item) => liberado(item.value) && item.status !== 400,
+  )
   const grupos: MenuOption[] = []
   const usados = new Set<string>()
   for (const grupo of GRUPOS) {
