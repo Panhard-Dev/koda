@@ -56,6 +56,10 @@ class StepResult:
     #: O laço usa isto para **dar um alô** ao modelo em vez de encerrar a rodada — matar o
     #: pensamento à força tira dele a chance de responder o que já tinha.
     repetiu: bool = False
+    #: Echo for providers that require their reasoning on the next tool step.
+    #: Kept only in the in-memory loop; never substitute the visible response for it.
+    #: None means absent, whereas an explicitly empty string remains a real field.
+    reasoning_content: str | None = None
 @dataclass(slots=True)
 class ToolStep:
     """Passo de ferramenta, o que fica gravado junto da mensagem."""

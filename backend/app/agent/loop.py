@@ -3211,6 +3211,8 @@ def saida_ok(saida: str, ferramenta: str = "") -> bool:
 def _mensagem_assistente(resultado: StepResult) -> dict[str, Any]:
     mensagem: dict[str, Any] = {"role": "assistant"}
     mensagem["content"] = resultado.text or None
+    if resultado.reasoning_content is not None:
+        mensagem["reasoning_content"] = resultado.reasoning_content
     if resultado.calls:
         mensagem["tool_calls"] = [chamada.para_mensagem() for chamada in resultado.calls]
     return mensagem
