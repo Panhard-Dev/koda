@@ -144,6 +144,10 @@ def tokens_de_mensagem(mensagem: dict[str, Any]) -> int:
     """Custo de uma mensagem do histórico do modelo, já com o overhead do envelope."""
     conteudo = mensagem.get("content")
     total = estimar_tokens(texto_do_conteudo(conteudo))
+    # Reasoning echoed to the provider also consumes the request's context budget.
+    raciocinio = mensagem.get("reasoning_content")
+    if isinstance(raciocinio, str):
+        total += estimar_tokens(raciocinio)
     if isinstance(conteudo, list):
         total += TOKENS_POR_IMAGEM * sum(
             1

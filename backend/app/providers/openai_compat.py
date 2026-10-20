@@ -524,6 +524,7 @@ class OpenAICompatibleProvider:
             raise TransientProviderError("resposta sem choices")
 
         mensagem = choices[0].get("message") or {}
+        raciocinio_bruto = mensagem.get("reasoning_content")
         calls = [
             ToolCall(
                 id=str(item.get("id", "")),
@@ -544,6 +545,7 @@ class OpenAICompatibleProvider:
                 "total_tokens": int(uso.get("total_tokens", 0) or 0),
             },
             truncado=str(choices[0].get("finish_reason") or "") == "length",
+            reasoning_content=raciocinio_bruto if isinstance(raciocinio_bruto, str) else None,
         )
 
     async def step_streaming(
@@ -588,6 +590,7 @@ class OpenAICompatibleProvider:
         #: `index` -> os pedaços daquela chamada. `extra` guarda o envelope opaco que veio
         #: junto (ver `_extra_do_item`), que é dict e não string — daí o `Any`.
         parciais: dict[int, dict[str, Any]] = {}
+        raciocinio_bruto: list[str] = []
         uso: dict[str, Any] = {}
         motivo_de_fim = ""
         #: O stream anunciou o próprio fim? `[DONE]` é o marcador da OpenAI; `finish_reason` é
@@ -604,6 +607,7 @@ class OpenAICompatibleProvider:
             while True:
                 texto.clear()
                 parciais.clear()
+                raciocinio_bruto.clear()
                 uso.clear()
                 motivo_de_fim = ""
                 terminou = False
@@ -652,6 +656,8 @@ class OpenAICompatibleProvider:
                         delta = escolha.get("delta") or {}
 
                         razao = delta.get("reasoning_content")
+                        if isinstance(razao, str):
+                            raciocinio_bruto.append(razao)
                         if razao:
                             yield Piece(str(razao), reasoning=True)
                             if vigia.alimentar(str(razao)):
@@ -732,6 +738,7 @@ class OpenAICompatibleProvider:
             truncado=not laco_de_raciocinio
             and (motivo_de_fim == "length" or not (terminou or motivo_de_fim)),
             repetiu=laco_de_raciocinio,
+            reasoning_content="".join(raciocinio_bruto) if raciocinio_bruto else None,
         )
 
 
