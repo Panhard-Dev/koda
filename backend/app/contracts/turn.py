@@ -56,9 +56,13 @@ class StepResult:
     #: O laço usa isto para **dar um alô** ao modelo em vez de encerrar a rodada — matar o
     #: pensamento à força tira dele a chance de responder o que já tinha.
     repetiu: bool = False
-    #: Echo for providers that require their reasoning on the next tool step.
-    #: Kept only in the in-memory loop; never substitute the visible response for it.
-    #: None means absent, whereas an explicitly empty string remains a real field.
+    #: O raciocínio que o provedor devolveu e **cobra de volta** na continuação com
+    #: ferramentas. Sem ele, o segundo passo da rodada é recusado com HTTP 400 por quem
+    #: trata o campo como parte do contrato (visto em 20/10/2026, com `liz-4-5-super`).
+    #:
+    #: Fica só no histórico em memória da rodada: não substitui a resposta visível, não vai
+    #: para o banco, não entra em log, e ninguém resume o texto — é o que o provedor emitiu,
+    #: byte por byte. `None` é ausência; `""` é campo presente e vazio, e a diferença vale.
     reasoning_content: str | None = None
 @dataclass(slots=True)
 class ToolStep:

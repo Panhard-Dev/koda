@@ -524,6 +524,9 @@ class OpenAICompatibleProvider:
             raise TransientProviderError("resposta sem choices")
 
         mensagem = choices[0].get("message") or {}
+        # O raciocínio vem **fora** do `content`. Guardado aqui para o laço devolver o mesmo
+        # texto no próximo passo (ver `StepResult.reasoning_content`): é contrato de alguns
+        # provedores, não resposta — nada disto vai para a tela.
         raciocinio_bruto = mensagem.get("reasoning_content")
         calls = [
             ToolCall(
@@ -590,6 +593,9 @@ class OpenAICompatibleProvider:
         #: `index` -> os pedaços daquela chamada. `extra` guarda o envelope opaco que veio
         #: junto (ver `_extra_do_item`), que é dict e não string — daí o `Any`.
         parciais: dict[int, dict[str, Any]] = {}
+        #: Os pedaços de `reasoning_content` desta tentativa, na ordem em que chegaram. É
+        #: lista (e não string) para o `clear()` do bloco de nova tentativa zerar tudo: um
+        #: retry que somasse ao anterior mandaria o raciocínio duplicado ao provedor.
         raciocinio_bruto: list[str] = []
         uso: dict[str, Any] = {}
         motivo_de_fim = ""
@@ -656,6 +662,8 @@ class OpenAICompatibleProvider:
                         delta = escolha.get("delta") or {}
 
                         razao = delta.get("reasoning_content")
+                        # Só texto entra no eco. Campo nulo ou objeto (já visto em gateway
+                        # que normaliza o raciocínio) não é raciocínio para devolver.
                         if isinstance(razao, str):
                             raciocinio_bruto.append(razao)
                         if razao:
@@ -738,6 +746,9 @@ class OpenAICompatibleProvider:
             truncado=not laco_de_raciocinio
             and (motivo_de_fim == "length" or not (terminou or motivo_de_fim)),
             repetiu=laco_de_raciocinio,
+            # Lista vazia = o provedor não mandou raciocínio nenhum → ausência (`None`).
+            # Lista com `""` = ele mandou o campo vazio → devolve-se vazio, que é outra
+            # coisa para quem exige o campo na continuação.
             reasoning_content="".join(raciocinio_bruto) if raciocinio_bruto else None,
         )
 

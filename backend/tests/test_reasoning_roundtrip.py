@@ -1,11 +1,17 @@
-"""Offline regression: a strict upstream must accept the second tool step."""
+"""Regressão offline do HTTP 400 na continuação com ferramentas.
+
+O cliente recebia `reasoning_content` do provedor e o descartava ao montar o turno do
+assistente; o segundo passo da rodada voltava sem o campo e era recusado por quem exige o
+raciocínio original. Nada aqui fala com a rede: o transporte é simulado e nenhuma
+ferramenta de verdade é executada.
+"""
 import json
 import unittest
 
 import httpx
 
 from app.agent.loop import _mensagem_assistente
-from app.agent.contexto import tokens_de_mensagem
+from app.agent.contexto import compactar_historico, tokens_de_mensagem
 from app.config import Settings
 from app.contracts.turn import StepResult
 from app.providers.openai_compat import OpenAICompatibleProvider
@@ -94,6 +100,59 @@ class ReasoningRoundTrip(unittest.IsolatedAsyncioTestCase):
         plain = {"role": "assistant", "content": "ok"}
         with_reasoning = {**plain, "reasoning_content": "x" * 4000}
         self.assertGreater(tokens_de_mensagem(with_reasoning), tokens_de_mensagem(plain) + 500)
+
+    def test_compaction_keeps_reasoning_and_tool_pairing(self):
+        """Compactar não pode cortar o raciocínio nem separar chamada de resultado.
+
+        O raciocínio não é `content`, e a compactação só mexe em `content` — mas essa
+        garantia não estava sendo verificada por ninguém, e quebrá-la traria o mesmo 400 de
+        volta no meio de uma conversa longa, que é exatamente quando ninguém reproduz.
+        """
+        resultado_grande = "x" * 20_000
+        esperado = {f"call_{i}": f"raciocínio {i}" for i in range(6)}
+        # Dois orçamentos: um que só encolhe o conteúdo antigo e outro que já tira o miolo.
+        for orcamento in (30_000, 5_000):
+            with self.subTest(orcamento=orcamento):
+                historico: list[dict] = [
+                    {"role": "system", "content": "sistema"},
+                    {"role": "user", "content": "tarefa"},
+                ]
+                for i in range(6):
+                    historico.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": esperado[f"call_{i}"],
+                            "tool_calls": [
+                                {
+                                    "id": f"call_{i}",
+                                    "type": "function",
+                                    "function": {"name": "read_file", "arguments": "{}"},
+                                }
+                            ],
+                        }
+                    )
+                    historico.append(
+                        {"role": "tool", "tool_call_id": f"call_{i}", "content": resultado_grande}
+                    )
+                historico.append({"role": "assistant", "content": "pronto"})
+
+                antes, depois = compactar_historico(historico, orcamento)
+                self.assertLess(depois, antes, "o histórico não encolheu")
+
+                chamadas = {
+                    chamada["id"] for item in historico for chamada in (item.get("tool_calls") or [])
+                }
+                for mensagem in historico:
+                    if mensagem.get("role") == "tool":
+                        # Resultado órfão é 400 na certa: o host casa pelo `tool_call_id`.
+                        self.assertIn(mensagem["tool_call_id"], chamadas)
+                    for chamada in mensagem.get("tool_calls") or []:
+                        self.assertEqual(
+                            mensagem.get("reasoning_content"),
+                            esperado[chamada["id"]],
+                            "a compactação mexeu no raciocínio de uma chamada que sobreviveu",
+                        )
 
     async def test_nonstring_reasoning_is_not_replayed(self):
         def upstream(request):

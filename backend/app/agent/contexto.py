@@ -144,7 +144,10 @@ def tokens_de_mensagem(mensagem: dict[str, Any]) -> int:
     """Custo de uma mensagem do histórico do modelo, já com o overhead do envelope."""
     conteudo = mensagem.get("content")
     total = estimar_tokens(texto_do_conteudo(conteudo))
-    # Reasoning echoed to the provider also consumes the request's context budget.
+    # O raciocínio reenviado também ocupa o orçamento do pedido — e ele volta **a cada**
+    # passo da rodada, não uma vez só: numa rodada de nove ferramentas o mesmo texto entra
+    # nove vezes. Ignorá-lo aqui fazia a conta do contexto mentir para baixo, e a
+    # compactação só agia depois que o provedor já tinha recusado o pedido por tamanho.
     raciocinio = mensagem.get("reasoning_content")
     if isinstance(raciocinio, str):
         total += estimar_tokens(raciocinio)

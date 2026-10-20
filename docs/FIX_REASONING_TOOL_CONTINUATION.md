@@ -1,60 +1,75 @@
-# Correção do HTTP 400 na continuação com ferramentas
+# HTTP 400 na continuação com ferramentas
 
-Data: 20/10/2026. Escopo: preservar `reasoning_content` entre passos da mesma rodada. Esta alteração não inclui recuperação de senha.
+## O que acontecia
 
-## Problema e causa no cliente
+Um pedido começava bem, executava ferramentas e, no **segundo** passo, voltava `HTTP 400`
+com a mensagem genérica "A Liz AI Studio não aceitou este pedido".
 
-Um pedido podia iniciar normalmente, executar ferramentas e falhar no segundo passo com `HTTP 400` e a mensagem genérica “A Liz AI Studio não aceitou este pedido”. O problema foi reproduzido com `liz-4-5-super` em um pedido longo, tanto com imagem quanto sem imagem, e com ferramentas diferentes. Um teste curto com duas ferramentas passou na versão anterior; portanto, não era uma falha universal de qualquer chamada de ferramenta.
+Reproduzido com `liz-4-5-super` num pedido longo — com imagem e sem imagem, com
+ferramentas diferentes. Um pedido curto com duas ferramentas passava, então não era falha
+de qualquer chamada de ferramenta: era a **continuação** da cadeia.
 
-O cliente recebia `reasoning_content` do provedor, mas o descartava ao construir `StepResult`. O loop montava o próximo turno do assistente apenas com `content` e `tool_calls`. Isso perdia o campo exigido por provedores que precisam receber seu raciocínio original na continuação da cadeia de ferramentas. O caminho não-streaming também descartava o campo.
+## A causa (no cliente)
 
-Um upstream sintético que exige esse contrato reproduziu a rejeição com o código anterior. Após a correção local e reinício do aplicativo, o usuário confirmou a resolução; a conversa que falhava completou uma rodada com nove chamadas de ferramentas e sem o HTTP 400. Uma chamada de shell teve falha pontual durante essa rodada, mas o agente continuou e concluiu; isso não equivale a afirmar sucesso de todas as ferramentas ou aceite geral do aplicativo. A mensagem genérica do host não revelou o diagnóstico técnico upstream nem sua identidade real.
+O provedor devolve `reasoning_content` junto da resposta. O cliente aproveitava esse texto
+no streaming só para exibir e o descartava ao montar o `StepResult`; o laço montava o turno
+do assistente com `content` e `tool_calls`, e nada mais. Quem exige o próprio raciocínio de
+volta no passo seguinte recusava o pedido inteiro — e o 400 não dizia qual campo faltava.
 
-## Alteração
+O caminho não-streaming (`step()`) descartava o campo do mesmo jeito.
+
+## O que mudou
 
 | Arquivo | Mudança |
 |---|---|
-| `backend/app/contracts/turn.py` | Campo opcional `StepResult.reasoning_content`, acrescentado ao final para manter compatibilidade com construções anteriores. |
-| `backend/app/providers/openai_compat.py` | Preserva a string exata no modo não-streaming e concatena os fragmentos no streaming; limpa o acumulador entre tentativas já existentes. |
-| `backend/app/agent/loop.py` | Inclui o campo no próximo turno do assistente somente quando presente. |
-| `backend/app/agent/contexto.py` | Inclui o raciocínio reenviado na estimativa de contexto. |
+| `backend/app/contracts/turn.py` | Campo opcional `StepResult.reasoning_content`, no fim do dataclass para não deslocar construções posicionais. |
+| `backend/app/providers/openai_compat.py` | Guarda a string exata no `step()` e concatena os pedaços no `step_streaming()`; o acumulador é limpo entre tentativas. |
+| `backend/app/agent/loop.py` | O campo entra no próximo turno do assistente **só quando existe**. |
+| `backend/app/agent/contexto.py` | O raciocínio reenviado passa a contar no orçamento de contexto. |
 
-`None` significa ausência; `""` continua sendo um campo explicitamente vazio. Valores não textuais não são ecoados. IDs, ordem, argumentos brutos e metadados opacos das ferramentas são preservados. Não há nova tentativa de execução, mudança de permissões/credenciais nem gravação adicional do campo no banco ou nos logs. O raciocínio fica no histórico em memória e retorna ao mesmo provedor durante a rodada.
+`None` é ausência; `""` é campo presente e vazio — e a distinção é preservada, porque há
+provedor que exige o campo mesmo vazio. Valor não textual não é ecoado. IDs, ordem,
+argumentos brutos e `extra_content` das ferramentas seguem intactos.
 
-O patch de release contém apenas essa correção: diferenças locais preexistentes no comportamento de planejamento do aplicativo instalado não foram copiadas para esta branch.
+O raciocínio fica **só** no histórico em memória da rodada: não vai para o banco, não entra
+em log e não substitui a resposta visível em nenhum caminho.
 
 ## Validação
 
-Seis testes determinísticos cobrem:
-
-1. Duas etapas com duas ferramentas, reasoning fragmentado, pareamento dos IDs e preservação de `extra_content`; o upstream simulado devolve 400 se o campo original não voltar.
-2. Preservação no caminho não-streaming.
-3. Distinção entre string vazia e campo ausente no streaming.
-4. Compatibilidade com `StepResult` anterior sem reasoning.
-5. Rejeição de reasoning não textual no eco.
-6. Contagem do reasoning no orçamento de contexto.
-
-Executar a partir de `backend/`, com as dependências do backend disponíveis:
-
 ```powershell
+cd backend
 python -B -m unittest discover -s tests -v
 ```
 
-Os testes usam `httpx.MockTransport`: não fazem geração real, não usam conta/sessão, não executam ferramentas do usuário e não alteram o banco. Também passaram contra os módulos instalados, carregados por um interpretador novo. Isso foi separado da confirmação real após reiniciar o desktop; o processo já aberto mantinha os módulos antigos em memória até o reinício.
+Sete testes, sem rede (o transporte é `httpx.MockTransport`) e sem executar ferramenta de
+verdade:
 
-A revisão técnica foi limitada ao diff da correção e dividida por arquivos para evitar truncamento do material. As partes finais receberam GO para um teste controlado. Tratou-se de revisão degradada da mesma família de apoio, não aceite independente entre famílias. Apontamentos gerais preexistentes sobre o agente não foram tratados como corrigidos por este patch.
+1. duas etapas, duas ferramentas, raciocínio fragmentado, pareamento de IDs e
+   `extra_content` preservado — o upstream simulado devolve 400 se o campo não voltar;
+2. preservação no caminho não-streaming;
+3. string vazia ≠ campo ausente;
+4. `StepResult` antigo não inventa o campo;
+5. raciocínio não textual não é ecoado;
+6. o raciocínio conta no orçamento de contexto;
+7. a compactação não corta o raciocínio nem separa chamada de resultado.
 
-## Cuidados para a próxima versão
+Também rodados contra os módulos empacotados, com interpretador novo. No app reiniciado, a
+conversa que falhava completou uma rodada de nove ferramentas sem o 400 — o que vale para o
+caso relatado, e não é garantia para todo modelo.
 
-- Incluir os quatro arquivos no backend empacotado e executar os testes acima.
-- Verificar uma continuação real com reasoning e ferramentas depois de reiniciar o aplicativo instalado.
-- Não substituir `reasoning_content` por texto inventado, resumo ou resposta visível.
-- Preservar o campo sem adicioná-lo a logs, relatórios de suporte ou persistência desnecessária.
-- O campo adicional consome contexto. A compactação existente reduz `content` e pode remover mensagens inteiras, mas não deve cortar arbitrariamente os bytes de reasoning exigidos pelo provedor. Conversas extremas continuam sujeitas aos limites reais do serviço.
-- Uma atualização/reinstalação sem este patch pode substituir a correção local; este PR é o caminho para incluí-la no próximo pacote oficial.
+## Limites
 
-## Próxima etapa: “Esqueci a senha”
+- O campo extra **consome contexto e custo**: numa rodada de nove ferramentas o raciocínio
+  volta nove vezes. O orçamento conta; a fatura também sente.
+- A compactação pode remover a mensagem inteira do assistente (aí o raciocínio vai junto,
+  sem quebrar o pareamento), mas nunca corta o texto do raciocínio pela metade.
+- Conversas extremas continuam sujeitas ao limite real do serviço.
+- Reinstalar sem esta correção volta ao comportamento antigo: o pacote precisa do
+  `backend/` novo (`npm run app:runtime` antes de gerar o instalador).
 
-Solicitação registrada para uma alteração separada, após integrar esta correção. Antes de implementar, confirmar o contrato do serviço remoto que mantém as contas: o desktop usa a sessão da conta para autorizar o host, e alterar apenas o SQLite local não recupera a senha remota.
+## Fora de escopo
 
-A próxima etapa deverá definir o fluxo de solicitação e confirmação, canal de recuperação previamente verificado, token de uso único com validade curta, nova senha, limites de tentativas, mensagens que não exponham a existência de contas e política de invalidação de sessões. Nenhum endpoint, botão ou mecanismo de reset foi adicionado nesta correção.
+"Esqueci a senha" ficou para uma alteração separada, depois de confirmar o contrato do
+serviço remoto que mantém as contas — o desktop autoriza o host pela sessão da conta, e
+mexer só no SQLite local não recupera senha remota. Nenhum endpoint, botão ou mecanismo de
+reset foi adicionado aqui.
