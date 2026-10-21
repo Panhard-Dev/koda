@@ -36,6 +36,7 @@ from ..providers import (
     conteudo_do_turno,
     system_prompt,
 )
+from ..providers.openai_compat import HostProvider
 from ..repository import (
     append_message,
     ensure_conversation,
@@ -212,7 +213,9 @@ async def _texto(
     modelo = engine.resolve_model(payload.model) if hasattr(engine, "resolve_model") else options.model
 
     pieces: list[str] = []
+    raciocinio_guardado: list[str] = []
     stored = False
+    motivo_do_fim = PARADA_ABORTADA
     #: O `usage` do rodapé do stream (ver `Piece.usage`). Sem ferramentas não há
     #: `StepResult`, então é daqui que sai o contador da ficha.
     uso: dict[str, int] = {}
@@ -221,6 +224,7 @@ async def _texto(
         alos = 0
         while True:
             trecho: list[str] = []
+            raciocinio_trecho: list[str] = []
             truncado = False
             repetiu = False
             async for piece in filtrar_stream(engine.stream(turns, options)):
@@ -236,6 +240,8 @@ async def _texto(
                     repetiu = True
                     continue
                 if piece.reasoning:
+                    raciocinio_guardado.append(piece.text)
+                    raciocinio_trecho.append(piece.text)
                     # O raciocínio não é a resposta: vai para a tela para o usuário acompanhar o
                     # modelo pensando, mas não entra no texto gravado da mensagem.
                     yield sse("reasoning", {"text": piece.text})
@@ -254,14 +260,14 @@ async def _texto(
                     break
                 texto_parcial = "".join(trecho)
                 if texto_parcial:
-                    turns.append(ChatTurn(role="assistant", text=texto_parcial))
+                    turns.append(ChatTurn(role="assistant", text=texto_parcial, reasoning_content="".join(raciocinio_trecho) if raciocinio_trecho else None))
                 turns.append(ChatTurn(role="user", text=ALO_DE_RACIOCINIO))
                 continue
             if not truncado:
                 break
             texto_parcial = "".join(trecho)
             if texto_parcial:
-                turns.append(ChatTurn(role="assistant", text=texto_parcial))
+                turns.append(ChatTurn(role="assistant", text=texto_parcial, reasoning_content="".join(raciocinio_trecho) if raciocinio_trecho else None))
             turns.append(ChatTurn(role="user", text=CONTINUAR_TRUNCADA))
 
         text = "".join(pieces).strip()
@@ -285,6 +291,7 @@ async def _texto(
             int(uso.get("prompt_tokens", 0) or 0) or None,
             # O custo vai junto porque é dele que sai a conta das moedas na ficha.
             tokens_total=_custo_tokens(uso),
+            reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
         )
         stored = True
         yield sse(
@@ -300,6 +307,7 @@ async def _texto(
             },
         )
     except ProviderError as error:
+        motivo_do_fim = PARADA_PROVEDOR
         yield sse("error", {"message": str(error)})
         # Contrato de vivacidade (achado 9 do QA): erro **encerra a rodada**, e o cliente
         # precisa do evento terminal para sair de "Pensando"/"Trabalhando…". Antes, o `done`
@@ -324,10 +332,12 @@ async def _texto(
     finally:
         # Cliente fechou no meio (botão de parar): guarda o que já veio, para o
         # histórico do banco e o da tela ficarem iguais.
-        if pieces and not stored:
+        if (pieces or raciocinio_guardado) and not stored:
             text = "".join(pieces).strip()
-            if text:
-                _store(db, conversation_id, text, modelo, None, [])
+            if text or raciocinio_guardado:
+                _store(db, conversation_id, text, modelo, None, [],
+                       completou=False, motivo=motivo_do_fim,
+                       reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None)
 
 
 # --------------------------------------------------------------- modo agente
@@ -422,9 +432,10 @@ async def _agente(
     # `conteudo_do_turno` e não `turn.text`: é ele que transforma o turno com imagem no
     # `content` em partes (`text` + `image_url`) que o provedor entende como visão. O loop
     # do agente reenvia esta lista a cada passo sem tocar nela.
-    mensagens += [conteudo_do_turno(turn) for turn in turns]
+    mensagens += [conteudo_do_turno(turn, incluir_raciocinio=isinstance(engine, HostProvider)) for turn in turns]
 
     pedacos: list[str] = []
+    raciocinio_guardado: list[str] = []
     #: Última lista de tarefas que o agente registrou — vai gravada na mensagem.
     plano: list[dict[str, object]] = []
     passos: list[ToolStepOut] = []
@@ -441,6 +452,8 @@ async def _agente(
     cancelamento = threading.Event()
 
     async def emit(evento: str, dados: dict[str, object]) -> None:
+        if evento == "reasoning" and isinstance(dados.get("text"), str):
+            raciocinio_guardado.append(dados["text"])
         if evento == "tool_result":
             # O que fica gravado é o que aparece na tela: saída limitada.
             dados = {**dados, "output": str(dados.get("output", ""))[:limite]}
@@ -556,6 +569,7 @@ async def _agente(
                 # O endereço de origem do que veio de servidor MCP: é o que a tela mostra
                 # como "recurso acionado" (servidor + ferramenta reais).
                 mcp=passo.mcp,
+                extra=passo.extra,
             )
             for passo in resultado.passos
         ]
@@ -593,6 +607,7 @@ async def _agente(
             # Por nome e não por posição de propósito: quinze argumentos posicionais é onde um
             # dia alguém troca dois de lugar sem perceber.
             tokens_total=_custo_tokens(resultado.uso),
+            reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
         )
         stored = True
         yield sse(
@@ -690,6 +705,7 @@ async def _agente(
                     # respondido foi cobrado do mesmo jeito. Uma gravação sem ele viraria uso
                     # não contado.
                     tokens_total=_custo_tokens(resultado.uso),
+                    reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
                 )
 
 
@@ -1193,6 +1209,7 @@ def _turns(
         if item.role == "assistant" and item.steps:
             chamadas = [
                 {
+                    **{k:v for k,v in (passo.extra or {}).items() if k not in {"id", "type", "function", "index"}},
                     "id": passo.call_id or f"call_{indice}",
                     "type": "function",
                     "function": {
@@ -1205,7 +1222,7 @@ def _turns(
                 }
                 for indice, passo in enumerate(item.steps)
             ]
-            turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas))
+            turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas, reasoning_content=item.reasoning_content))
             origens.append(posicao)
             turns += [
                 _turno_de_ferramenta(passo.output or "", chamadas[indice]["id"], visao)
@@ -1218,7 +1235,7 @@ def _turns(
             if visao and store is not None and item.role == "user"
             else []
         )
-        turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens))
+        turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens, reasoning_content=item.reasoning_content if item.role == "assistant" else None))
         origens.append(posicao)
     return turns, origens
 
@@ -1268,6 +1285,7 @@ def _store(
     # No **fim** da assinatura de propósito: as chamadas existentes passam os primeiros por
     # posição, e um parâmetro novo no meio mudaria o significado delas em silêncio.
     tokens_total: int | None = None,
+    reasoning_content: str | None = None,
 ) -> Message:
     """Grava a resposta.
 
@@ -1283,6 +1301,7 @@ def _store(
         elapsed_ms=elapsed_ms,
         tokens=tokens,
         tokens_total=tokens_total,
+        reasoning_content=reasoning_content,
         contexto=contexto,
         at=now_ms(),
         steps=steps,

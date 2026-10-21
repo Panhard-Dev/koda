@@ -113,7 +113,7 @@ def _texto_do_usuario(turno: Any) -> str:
     return str(getattr(turno, "text", "") or "")
 
 
-def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
+def conteudo_do_turno(turno: ChatTurn, *, incluir_raciocinio: bool = False) -> dict[str, Any]:
     """O turno no formato do provedor: `content` string, ou lista de partes com imagem.
 
     Sem imagem o corpo é idêntico ao de antes (uma string) — o caminho de visão não pode
@@ -144,15 +144,18 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
             "tool_call_id": turno.chamada_id or "",
             "content": turno.text,
         }
+    razao = ({"reasoning_content": turno.reasoning_content}
+             if incluir_raciocinio and turno.role == "assistant" and turno.reasoning_content is not None else {})
     if turno.chamadas:
         # `content` vazio vira `None`: é o que o formato espera de um turno que só chamou.
         return {
             "role": turno.role,
             "content": turno.text or None,
             "tool_calls": turno.chamadas,
+            **razao,
         }
     if not turno.imagens:
-        return {"role": turno.role, "content": turno.text}
+        return {"role": turno.role, "content": turno.text, **razao}
     partes: list[dict[str, Any]] = []
     if turno.text:
         partes.append({"type": "text", "text": turno.text})
@@ -163,7 +166,7 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
         # Só chega aqui um turno sem texto e sem imagem que escapou do filtro: um `content`
         # vazio é recusado por parte dos provedores.
         partes.append({"type": "text", "text": " "})
-    return {"role": turno.role, "content": partes}
+    return {"role": turno.role, "content": partes, **razao}
 
 
 def _identidade_pedida(historico: Iterable[Any]) -> bool:
@@ -320,6 +323,9 @@ class OpenAICompatibleProvider:
             {"role": "system", "content": system_prompt(options)}
         ]
         messages += [conteudo_do_turno(turn) for turn in turns]
+        return messages
+
+    def _historico_para_pedido(self, messages, tools):
         return messages
 
     def _erro(self, status: int, detalhe: str) -> ProviderError:
@@ -488,7 +494,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
             "stream": False,
-            "messages": messages,
+            "messages": self._historico_para_pedido(messages, tools),
             # Teto **generoso** de tokens de saída, e explícito. Os modelos de raciocínio
             # (o `liz-4`, o `layze-2`) gastam o orçamento **pensando**: medido, o `liz-4`
             # devolveu texto vazio com `max_tokens` 80 e 400 e só falou a partir de ~1000.
@@ -573,7 +579,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": modelo,
             "stream": True,
-            "messages": messages,
+            "messages": self._historico_para_pedido(messages, tools),
             # O teto de tokens de saída **faltava** aqui — e este é o caminho que o agente
             # usa de verdade. O `step()` (não-streaming) mandava `MAX_TOKENS_SAIDA`, então a
             # proteção contra resposta gigante não valia para a execução real.
@@ -910,6 +916,19 @@ class HostProvider(OpenAICompatibleProvider):
         if not model or model in self.LEGADOS:
             return self.settings.host_model
         return model
+
+    def _historico_para_pedido(self, messages, tools):
+        # Old conversations never stored reasoning; an explicit empty field marks
+        # that absence. Preserve all available reasoning verbatim and do not mutate
+        # the in-memory history. This applies only to the official host with tools.
+        if not tools:
+            return messages
+        return [
+            {**m, "reasoning_content": ""}
+            if m.get("role") == "assistant" and m.get("reasoning_content") is None
+            else m
+            for m in messages
+        ]
 
     def _erro(self, status: int, detalhe: str) -> ProviderError:
         motivo = _motivo_do_host(detalhe)

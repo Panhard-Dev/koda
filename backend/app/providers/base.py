@@ -44,6 +44,7 @@ class ChatTurn:
     chamadas: list[dict[str, Any]] = field(default_factory=list)
     #: A qual chamada este turno responde (`tool`) — casa com `chamadas[i]["id"]`.
     chamada_id: str | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass(slots=True)

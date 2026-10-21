@@ -83,6 +83,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     ]
     return Message(
         id=row["id"],
+        reasoning_content=row["reasoning_content"] if "reasoning_content" in colunas else None,
         role=row["role"],
         text=row["text"],
         attachments=_carregar_anexos(row["attachments"]),
@@ -145,8 +146,8 @@ def append_message(
         INSERT INTO messages
           (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
            tokens_total, contexto, at, steps, todos, incompleto, motivo, pendentes, executou,
-           retomavel, conta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           retomavel, conta, reasoning_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -163,7 +164,7 @@ def append_message(
             message.contexto,
             message.at,
             json.dumps(
-                [passo.model_dump() for passo in message.steps], ensure_ascii=False
+                [{**passo.model_dump(), "extra": passo.extra} for passo in message.steps], ensure_ascii=False
             ),
             json.dumps(
                 [item.model_dump() for item in message.todos], ensure_ascii=False
@@ -174,6 +175,7 @@ def append_message(
             message.executou,
             1 if message.retomavel else 0,
             conta,
+            message.reasoning_content,
         ),
     )
     conn.execute(

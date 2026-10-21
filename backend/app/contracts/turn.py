@@ -81,6 +81,8 @@ class ToolStep:
     #: reaberta depois, e sem isto o nome normalizado (`eco_server`) seria tudo o que a tela
     #: teria para mostrar — um nome que não existe no `mcps.json`.
     mcp: dict[str, str] | None = None
+    #: Opaque provider state, internal only; deliberately absent from to_dict().
+    extra: dict[str, Any] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {

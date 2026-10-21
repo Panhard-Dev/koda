@@ -122,6 +122,7 @@ class ChatRequest(BaseModel):
 class ToolStepOut(BaseModel):
     """Uma ferramenta que o modelo chamou, com o que ela devolveu."""
 
+    extra: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     output: str = ""
@@ -155,6 +156,8 @@ class TodoItem(BaseModel):
 
 
 class Message(BaseModel):
+    # Provider state stays local; never include it in API/model_dump responses.
+    reasoning_content: str | None = Field(default=None, exclude=True, repr=False)
     id: str
     role: Role
     text: str

@@ -384,7 +384,10 @@ def compactar_turnos(
             texto = _cortar(texto, teto_por_turno)
             turno = _com_texto(turno, texto)
         custo = estimar_tokens(texto)
-        if len(mantidos) >= inteiros or usados + custo > orcamento:
+        raciocinio = getattr(turno, "reasoning_content", None)
+        if isinstance(raciocinio, str):
+            custo += estimar_tokens(raciocinio)
+        if not eh_o_pedido_atual and (len(mantidos) >= inteiros or usados + custo > orcamento):
             break
         usados += custo
         mantidos.append(turno)

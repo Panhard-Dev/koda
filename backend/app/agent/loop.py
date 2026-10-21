@@ -2644,6 +2644,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2678,6 +2679,7 @@ async def executar(
                         output=problema_de_json,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2713,6 +2715,7 @@ async def executar(
                         output=recusa,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2761,6 +2764,7 @@ async def executar(
                     output=saida,
                     duration_ms=0,
                     call_id=chamada.id,
+                    extra=chamada.extra,
                     ok=False,
                 )
                 passos.append(passo)
@@ -2795,6 +2799,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2854,6 +2859,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                     passos.append(passo)
@@ -3033,6 +3039,7 @@ async def executar(
                 output=saida,
                 duration_ms=duracao,
                 call_id=chamada.id,
+                extra=chamada.extra,
                 ok=ok,
             )
             passos.append(passo)
