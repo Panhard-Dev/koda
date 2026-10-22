@@ -1,8 +1,9 @@
 import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { desenhar, ehBlocoVisual } from './BlocosVisuais'
+import { DiagramaDeTexto, desenhar, ehBlocoVisual, primeiroObjeto } from './BlocosVisuais'
 import { DesenhoUi } from './UiGenerativa'
+import { pareceCodigoDeUi } from './UiGenerativa/deteccao'
 
 /**
  * Markdown mínimo para as respostas do modelo: negrito, itálico, `código`, blocos de
@@ -534,10 +535,22 @@ function RichText({ text, className = '' }: { text: string; className?: string }
         // Koda desenha — sem tipo fixo, sem `eval`. Vem antes do `Codigo` e ao lado dos
         // blocos visuais: é a porta pra simuladores, contadores e telas que os 21 formatos
         // fixos não cobrem. Ver `components/UiGenerativa/`.
-        if (idioma === 'koda-ui') {
+        if (idioma === 'koda-ui' || pareceCodigoDeUi(idioma, codigo)) {
           montado.push(
             <div key={`ui-${indice}`} className="min-w-0">
               <DesenhoUi fonte={codigo} />
+            </div>,
+          )
+          return
+        }
+        // Diagrama de traço (`koda-diagrama`): aqui **não** há JSON obrigatório. O modelo
+        // já desenha com `┌ ─ │ ▼`, e o Koda só redesenha isso com cor e tipografia de
+        // desenho — então este caminho vem antes do `ehBlocoVisual`, que exige JSON fechado
+        // e jogaria o diagrama de volta no bloco de código (visto em 20/10/2026).
+        if (idioma === 'koda-diagrama') {
+          montado.push(
+            <div key={`diagrama-${indice}`} className="min-w-0">
+              <DiagramaDeTexto fonte={codigo} />
             </div>,
           )
           return
@@ -552,24 +565,20 @@ function RichText({ text, className = '' }: { text: string; className?: string }
         // no meio da resposta e sumia sozinho quando o modelo terminava (visto em
         // 16/10/2026). Durante a construção o bloco fica como cru; quando o JSON
         // fecha (e o tipo é conhecido) vira o desenho de verdade.
+        //
+        // Quem decide "fechou" é `primeiroObjeto`, e não o `JSON.parse` inteiro: o
+        // modelo às vezes fecha o objeto e continua escrevendo depois dele (ver o
+        // comentário da função). Nesse caso o bloco é desenhável — só o excedente é
+        // ignorado — e antes ele caía aqui no `Codigo`, com o JSON cru na tela.
         if (ehBlocoVisual(idioma)) {
           const fechado = codigo.trim().endsWith('}')
-          if (fechado) {
-            let pronto = false
-            try {
-              const dados = JSON.parse(codigo.trim()) as unknown
-              pronto = typeof dados === 'object' && dados !== null && !Array.isArray(dados)
-            } catch {
-              pronto = false
-            }
-            if (pronto) {
-              montado.push(
-                <div key={`visual-${indice}`} className="min-w-0">
-                  {desenhar(idioma, codigo)}
-                </div>,
-              )
-              return
-            }
+          if (fechado && primeiroObjeto(codigo)) {
+            montado.push(
+              <div key={`visual-${indice}`} className="min-w-0">
+                {desenhar(idioma, codigo)}
+              </div>,
+            )
+            return
           }
           montado.push(
             <Codigo

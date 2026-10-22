@@ -45,6 +45,18 @@ const resultado = spawnSync(
     // depuração de um lançador de 20 KB, que não serve para nada e só suja a pasta.
     '-C',
     'debuginfo=0',
+    // **CRT estático, e não é detalhe.** Sem esta linha o rustc linka o runtime do MSVC
+    // (`VCRUNTIME140.dll`) dinamicamente, e o instalador **não abre** numa máquina sem o
+    // Visual C++ Redistributable: o Windows mostra "A execução de código não pode continuar
+    // porque VCRUNTIME140.dll não foi encontrado" com o nome do instalador na barra — antes
+    // de extrair um byte sequer. Foi o que aconteceu no PC novo do dono (17/10/2026), e
+    // derrubava a promessa de que não é preciso instalar mais nada.
+    //
+    // O `koda.exe` (Tauri) não tem essa dependência e o Python empacotado leva o
+    // `vcruntime140.dll` ao lado dele; o lançador era o único ponto que pedia o runtime do
+    // sistema. Com `+crt-static` ele não importa DLL de runtime nenhuma.
+    '-C',
+    'target-feature=+crt-static',
     '-o',
     instaladorNsis,
     fonte,

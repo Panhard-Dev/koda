@@ -1,8 +1,8 @@
 [package]
 name = "koda"
-version = "0.6.9"
+version = "0.7.6"
 description = "Koda — chat de código com agente local"
-authors = ["Koda"]
+authors = ["KodaStudio.org"]
 edition = "2021"
 
 [build-dependencies]

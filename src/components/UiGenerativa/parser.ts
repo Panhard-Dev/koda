@@ -55,7 +55,7 @@ type PropValor = { tipo: 'literal'; valor: string | number | boolean } | { tipo:
 export type Estado = Record<string, unknown>
 
 /** Uma lista de itens — o estado `useList([…])`, que alimenta o `<repeat>`. */
-export type ListaUI = Array<{ texto: string }>
+export type ListaUI = Valor[]
 
 /**
  * Uma função que a IA declarou no `{@body}` e usa na lógica das telas.
@@ -68,19 +68,23 @@ export type FuncaoUI = (estado: Estado) => Valor
 export type FuncoesUI = Record<string, FuncaoUI>
 
 /** O valor inicial de um `useState`: número, texto, booleano ou lista. */
-function valorInicial(cru: string): number | string | boolean | ListaUI {
+function valorInicial(cru: string, comoLista = false): Valor {
   const limpo = cru.trim()
   if (limpo === 'true') return true
   if (limpo === 'false') return false
   if (limpo.startsWith('[') && limpo.endsWith(']')) {
-    // `["a", "b"]` ou `[{...}]` → lista de itens com `texto`.
-    const dentro = limpo.slice(1, -1).trim()
-    if (!dentro) return []
-    return dentro
-      .split(',')
-      .map((parte) => parte.trim().replace(/^['"]|['"]$/g, ''))
-      .filter((t) => t !== '')
-      .map((texto) => ({ texto }))
+    // Avalia só o literal fechado pela mini-linguagem (nunca JavaScript). useList
+    // transforma valores simples em `{texto}` para o repeat antigo; objetos e arrays
+    // continuam com sua forma, para telas como tarefas com id/feito.
+    const lista = avaliar(limpo, {})
+    if (!Array.isArray(lista)) return []
+    return comoLista
+      ? lista.map((item) =>
+          item && typeof item === 'object' && !Array.isArray(item)
+            ? item
+            : { texto: item == null ? '' : String(item) },
+        )
+      : lista
   }
   if (/^-?\d+(\.\d+)?$/.test(limpo)) return Number(limpo)
   return limpo.replace(/^['"]|['"]$/g, '')
@@ -139,10 +143,10 @@ class Parser {
   private lerEstado(trecho: string): Estado {
     const estado: Estado = {}
     const reg =
-      /const\s*\[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*DIL\.(?:useState|useList)\(\s*(.+?)\s*\)/g
+      /const\s*\[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*DIL\.(useState|useList)\(\s*(.+?)\s*\)/g
     let m: RegExpExecArray | null
     while ((m = reg.exec(trecho)) !== null) {
-      estado[m[1]] = valorInicial(m[2] ?? '')
+      estado[m[1]] = valorInicial(m[3] ?? '', m[2] === 'useList')
     }
     return estado
   }

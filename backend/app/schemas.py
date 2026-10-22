@@ -137,6 +137,8 @@ class ToolStepOut(BaseModel):
     mostrar um nome que não existe no `mcps.json`.
     """
     mcp: dict[str, str] | None = None
+    #: Estado opaco usado apenas ao reconstruir a chamada; nunca exposto à interface.
+    extra: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class TodoItem(BaseModel):
@@ -158,6 +160,8 @@ class Message(BaseModel):
     id: str
     role: Role
     text: str
+    #: Dado interno do provedor, sem exposição pela API da conversa.
+    reasoning_content: str | None = Field(default=None, exclude=True)
     attachments: list[AttachmentInfo] = Field(default_factory=list)
     """Os anexos da mensagem, com os metadados que a tela mostra (nome, tipo, tamanho).
 

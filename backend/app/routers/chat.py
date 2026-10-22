@@ -36,11 +36,13 @@ from ..providers import (
     conteudo_do_turno,
     system_prompt,
 )
+from ..providers.openai_compat import HostProvider
 from ..repository import (
     append_message,
     ensure_conversation,
     get_conversation,
     mensagens_da_conversa,
+    mensagens_da_tarefa_atual,
     new_id,
     resumo_da_conversa,
     salvar_resumo,
@@ -59,7 +61,7 @@ from .skills import indice_para_agente
 from ..skills import SkillStore
 from ..agent.loop import PROMPT_FERRAMENTAS, executar as rodar_ferramentas
 from ..tools import ferramentas, registry
-from ..ui_generativa import filtrar_stream, rebaixar_koda_ui
+from ..ui_generativa import FiltroKodaUI, filtrar_stream, rebaixar_koda_ui
 from ..agent.loop import (
     ALO_DE_RACIOCINIO,
     AVISO_DE_RACIOCINIO_EM_LOOP,
@@ -94,6 +96,60 @@ SINAL_DE_VIDA_S = 15.0
 #: Sentinela do sinal de vida na fila de eventos. Não é `None` (que é o fim) nem uma
 #: tupla `(evento, dados)`: quando ele aparece, o stream emite um comentário vazio.
 _SINAL_DE_VIDA = object()
+
+
+def _registrar_passo_do_stream(
+    evento: str,
+    dados: dict[str, object],
+    passos: list[ToolStepOut],
+    chamadas: dict[str, dict[str, object]],
+    limite: int,
+) -> dict[str, object]:
+    """Mantém na memória os passos concluídos mesmo se o cliente fechar o stream.
+
+    O resultado final normalmente traz `resultado.passos`, mas quando o navegador cancela
+    a rodada o `await loop_task` é cancelado antes de copiá-los. Sem este registro
+    incremental, o cartão dizia que a tarefa parou, mas a mensagem não guardava nenhuma
+    leitura executada — a retomada reiniciava na primeira linha. Os metadados opacos são
+    consumidos aqui e nunca enviados à interface.
+    """
+    if evento == "tool_call":
+        identificador = str(dados.get("id") or "")
+        if identificador:
+            argumentos = dados.get("arguments")
+            chamadas[identificador] = {
+                "name": str(dados.get("name") or ""),
+                "arguments": argumentos if isinstance(argumentos, dict) else {},
+                "raw_arguments": str(dados.get("_raw_arguments") or ""),
+                "extra": dados.get("_provider_extra"),
+                "mcp": dados.get("mcp"),
+            }
+        return {
+            chave: valor for chave, valor in dados.items()
+            if chave not in {"_raw_arguments", "_provider_extra"}
+        }
+
+    if evento != "tool_result":
+        return dados
+
+    dados = {**dados, "output": str(dados.get("output", ""))[:limite]}
+    identificador = str(dados.get("id") or "")
+    if identificador and not any(passo.call_id == identificador for passo in passos):
+        chamada = chamadas.pop(identificador, {})
+        argumentos = chamada.get("arguments")
+        passos.append(ToolStepOut(
+            name=str(dados.get("name") or chamada.get("name") or ""),
+            arguments=argumentos if isinstance(argumentos, dict) else {},
+            output=str(dados.get("output", "")),
+            duration_ms=max(0, int(dados.get("duration_ms") or 0)),
+            call_id=identificador,
+            ok=bool(dados.get("ok", False)),
+            raw_arguments=str(chamada.get("raw_arguments") or ""),
+            mcp=dados.get("mcp") if isinstance(dados.get("mcp"), dict)
+            else (chamada.get("mcp") if isinstance(chamada.get("mcp"), dict) else None),
+            extra=chamada.get("extra") if isinstance(chamada.get("extra"), dict) else None,
+        ))
+    return dados
 
 
 async def _ou_sinal_de_vida(fila: asyncio.Queue, segundos: float = SINAL_DE_VIDA_S):
@@ -212,7 +268,9 @@ async def _texto(
     modelo = engine.resolve_model(payload.model) if hasattr(engine, "resolve_model") else options.model
 
     pieces: list[str] = []
+    raciocinio_guardado: list[str] = []
     stored = False
+    motivo_do_fim = PARADA_ABORTADA
     #: O `usage` do rodapé do stream (ver `Piece.usage`). Sem ferramentas não há
     #: `StepResult`, então é daqui que sai o contador da ficha.
     uso: dict[str, int] = {}
@@ -221,6 +279,7 @@ async def _texto(
         alos = 0
         while True:
             trecho: list[str] = []
+            raciocinio_trecho: list[str] = []
             truncado = False
             repetiu = False
             async for piece in filtrar_stream(engine.stream(turns, options)):
@@ -236,6 +295,8 @@ async def _texto(
                     repetiu = True
                     continue
                 if piece.reasoning:
+                    raciocinio_guardado.append(piece.text)
+                    raciocinio_trecho.append(piece.text)
                     # O raciocínio não é a resposta: vai para a tela para o usuário acompanhar o
                     # modelo pensando, mas não entra no texto gravado da mensagem.
                     yield sse("reasoning", {"text": piece.text})
@@ -254,14 +315,14 @@ async def _texto(
                     break
                 texto_parcial = "".join(trecho)
                 if texto_parcial:
-                    turns.append(ChatTurn(role="assistant", text=texto_parcial))
+                    turns.append(ChatTurn(role="assistant", text=texto_parcial, reasoning_content="".join(raciocinio_trecho) if raciocinio_trecho else None))
                 turns.append(ChatTurn(role="user", text=ALO_DE_RACIOCINIO))
                 continue
             if not truncado:
                 break
             texto_parcial = "".join(trecho)
             if texto_parcial:
-                turns.append(ChatTurn(role="assistant", text=texto_parcial))
+                turns.append(ChatTurn(role="assistant", text=texto_parcial, reasoning_content="".join(raciocinio_trecho) if raciocinio_trecho else None))
             turns.append(ChatTurn(role="user", text=CONTINUAR_TRUNCADA))
 
         text = "".join(pieces).strip()
@@ -285,6 +346,7 @@ async def _texto(
             int(uso.get("prompt_tokens", 0) or 0) or None,
             # O custo vai junto porque é dele que sai a conta das moedas na ficha.
             tokens_total=_custo_tokens(uso),
+            reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
         )
         stored = True
         yield sse(
@@ -300,6 +362,7 @@ async def _texto(
             },
         )
     except ProviderError as error:
+        motivo_do_fim = PARADA_PROVEDOR
         yield sse("error", {"message": str(error)})
         # Contrato de vivacidade (achado 9 do QA): erro **encerra a rodada**, e o cliente
         # precisa do evento terminal para sair de "Pensando"/"Trabalhando…". Antes, o `done`
@@ -324,10 +387,12 @@ async def _texto(
     finally:
         # Cliente fechou no meio (botão de parar): guarda o que já veio, para o
         # histórico do banco e o da tela ficarem iguais.
-        if pieces and not stored:
+        if (pieces or raciocinio_guardado) and not stored:
             text = "".join(pieces).strip()
-            if text:
-                _store(db, conversation_id, text, modelo, None, [])
+            if text or raciocinio_guardado:
+                _store(db, conversation_id, text, modelo, None, [], completou=False,
+                       motivo=motivo_do_fim,
+                       reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None)
 
 
 # --------------------------------------------------------------- modo agente
@@ -422,12 +487,14 @@ async def _agente(
     # `conteudo_do_turno` e não `turn.text`: é ele que transforma o turno com imagem no
     # `content` em partes (`text` + `image_url`) que o provedor entende como visão. O loop
     # do agente reenvia esta lista a cada passo sem tocar nela.
-    mensagens += [conteudo_do_turno(turn) for turn in turns]
+    mensagens += [conteudo_do_turno(turn, incluir_raciocinio=isinstance(engine, HostProvider)) for turn in turns]
 
     pedacos: list[str] = []
+    raciocinio_guardado: list[str] = []
     #: Última lista de tarefas que o agente registrou — vai gravada na mensagem.
     plano: list[dict[str, object]] = []
     passos: list[ToolStepOut] = []
+    chamadas_do_stream: dict[str, dict[str, object]] = {}
     resultado = Resultado(texto="", passos=[], completou=False, uso={})
     stored = False
     #: Por que a rodada fechou quando ela não fechou pelo caminho normal. Quem grava o que
@@ -435,20 +502,33 @@ async def _agente(
     #: registrada como «interrompida» — outro motivo, e outra conversa para quem lê.
     motivo_do_fim: str = PARADA_ABORTADA
     fim: asyncio.Queue[tuple[str, dict[str, object]] | None] = asyncio.Queue()
+    filtro_ui = FiltroKodaUI()
     #: Id desta tarefa. Vai junto de cada processo que ela começar, para o Parar derrubar
     #: só os processos **dela** (ver `ferramentas.encerrar_do_dono`).
     dono_da_tarefa = new_id()
     cancelamento = threading.Event()
 
-    async def emit(evento: str, dados: dict[str, object]) -> None:
-        if evento == "tool_result":
-            # O que fica gravado é o que aparece na tela: saída limitada.
-            dados = {**dados, "output": str(dados.get("output", ""))[:limite]}
+    async def enfileirar(evento: str, dados: dict[str, object]) -> None:
+        if evento == "reasoning" and isinstance(dados.get("text"), str):
+            raciocinio_guardado.append(dados["text"])
+        dados = _registrar_passo_do_stream(
+            evento, dados, passos, chamadas_do_stream, limite
+        )
         if evento == "todos":
             # A lista da última vez é a que fica: é o estado do plano no fim da resposta.
             plano.clear()
             plano.extend(dados.get("todos") or [])  # type: ignore[arg-type]
         await fim.put((evento, dados))
+
+    async def emit(evento: str, dados: dict[str, object]) -> None:
+        # Segura apenas blocos koda-ui até fechar e validar; texto comum, ferramentas e
+        # raciocínio continuam saindo no ritmo normal do stream.
+        if evento == "delta" and isinstance(dados.get("text"), str):
+            seguro = filtro_ui.alimentar(str(dados["text"]))
+            if not seguro:
+                return
+            dados = {**dados, "text": seguro}
+        await enfileirar(evento, dados)
 
     modo_permissao = await call(_modo_de_permissao, db)
     # A aba Subs pede a rodada livre: ela não tem cartão de permissão, e um pedido sem cartão
@@ -501,8 +581,12 @@ async def _agente(
                 # A configuração desta execução: quem a usa é o `sub_agente`, que monta a
                 # rodada dele a partir dela (o `subs.agentes.md`, os tetos, as skills).
                 settings=settings,
+                retomada=payload.resume,
             )
         finally:
+            pendente = filtro_ui.finalizar()
+            if pendente:
+                await enfileirar("delta", {"text": pendente})
             await fim.put(None)
 
     loop_task: asyncio.Task[Resultado] | None = None
@@ -556,6 +640,7 @@ async def _agente(
                 # O endereço de origem do que veio de servidor MCP: é o que a tela mostra
                 # como "recurso acionado" (servidor + ferramenta reais).
                 mcp=passo.mcp,
+                extra=passo.extra,
             )
             for passo in resultado.passos
         ]
@@ -593,6 +678,7 @@ async def _agente(
             # Por nome e não por posição de propósito: quinze argumentos posicionais é onde um
             # dia alguém troca dois de lugar sem perceber.
             tokens_total=_custo_tokens(resultado.uso),
+            reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
         )
         stored = True
         yield sse(
@@ -690,6 +776,7 @@ async def _agente(
                     # respondido foi cobrado do mesmo jeito. Uma gravação sem ele viraria uso
                     # não contado.
                     tokens_total=_custo_tokens(resultado.uso),
+                    reasoning_content="".join(raciocinio_guardado) if raciocinio_guardado else None,
                 )
 
 
@@ -735,7 +822,7 @@ def _compactar_e_guardar(
     """
     resumo_novo, turns, compactados = contexto.compactar_turnos(turns, orcamento)
     if not compactados:
-        return (resumo_guardado, turns, 0)
+        return (contexto.resumo_acumulado("", resumo_guardado), turns, 0)
 
     # `compactar_turnos` conta **turnos**; o que fica guardado é índice de **mensagem** — e os
     # dois números não batem (uma resposta com ferramenta vira vários turnos, uma apresentação
@@ -750,11 +837,9 @@ def _compactar_e_guardar(
     if novas <= 0:
         # O corte caiu **dentro** de uma mesma mensagem (a chamada saiu, o resultado ficou):
         # nenhuma mensagem inteira virou resumo, então não há o que guardar — nem nota a dar.
-        return (resumo_guardado, turns, 0)
+        return (contexto.resumo_acumulado("", resumo_guardado), turns, 0)
 
-    junto = "\n\n".join(
-        parte.strip() for parte in (resumo_guardado, resumo_novo) if parte and parte.strip()
-    )
+    junto = contexto.resumo_acumulado(resumo_guardado, resumo_novo)
     with db.connect() as conn:
         salvar_resumo(conn, conversation_id, junto, cobertas + novas)
     return (junto, turns, novas)
@@ -893,6 +978,66 @@ def _conversa_existe(db: Database, conversation_id: str | None) -> bool:
     return conversa is not None and bool(conversa.messages)
 
 
+def _texto_de_retoma(
+    pedido: Message | None,
+    recentes: list[Message],
+    store: anexos.AnexoStore,
+    visao: bool,
+) -> str:
+    """Recoloca a tarefa e um checkpoint no fim do contexto da retomada.
+
+    O botão Retomar antes acrescentava só uma ordem genérica de olhar o disco. Quando a
+    compactação cobria o pedido original, o modelo explorava o workspace em vez de seguir
+    a ferramenta pendente. O pedido aqui vira o último turno, preservado pelo compactador.
+    """
+    if pedido is None:
+        return RETOMAR_TAREFA
+    texto = pedido.text.strip() or "(pedido enviado somente com anexos)"
+    if len(texto) > 24_000:
+        texto = texto[:16_000] + "\n...[trecho central no histórico salvo]...\n" + texto[-8_000:]
+
+    ultimo_usuario = next(
+        (indice for indice in range(len(recentes) - 1, -1, -1)
+         if recentes[indice].role == "user"), -1
+    )
+    passos = [passo for mensagem in recentes[ultimo_usuario + 1:]
+              if mensagem.role == "assistant" for passo in mensagem.steps]
+    linhas = []
+    for passo in passos[-24:]:
+        argumentos = json.dumps(passo.arguments, ensure_ascii=False, default=str)[:220]
+        linhas.append(f"- {passo.name}({argumentos}): {'ok' if passo.ok else 'falhou'}")
+    checkpoint = (
+        "\n".join(linhas)[-5_500:] if linhas
+        else "(nenhuma chamada de ferramenta salva após esse pedido)"
+    )
+    proxima_leitura = ""
+    for passo in reversed(passos):
+        if passo.name != "read_attachment" or not passo.ok:
+            continue
+        try:
+            inicio = int(passo.arguments.get("inicio", 0))
+            limite = int(passo.arguments.get("limite", 0))
+        except (TypeError, ValueError):
+            break
+        if inicio > 0 and limite > 0:
+            proxima_leitura = (
+                f"\nÚltima faixa de anexo salva: início {inicio}, limite {limite}. "
+                "Se o pedido exige leitura sequencial, a próxima faixa ainda não "
+                f"confirmada começa em {inicio + limite}. Chame read_attachment antes "
+                "de relatar que a leu."
+            )
+        break
+    bloco = _bloco_de_anexos(pedido.attachments, visao, store)
+    return (
+        f"Pedido original da pessoa:\n{texto}\n\n"
+        f"[retomada interna]\n{RETOMAR_TAREFA}\n"
+        f"Ferramentas já executadas após esse pedido ({len(passos)} no total; últimas 24):\n"
+        f"{checkpoint}{proxima_leitura}\n"
+        "Continue da próxima etapa ainda não executada. Não repita chamadas já concluídas."
+        + (f"\n\n{bloco}" if bloco else "")
+    )
+
+
 def _prepare(
     db: Database,
     store: anexos.AnexoStore,
@@ -928,12 +1073,16 @@ def _prepare(
             resumo, cobertas = resumo_da_conversa(conn, payload.conversation_id)
             # Só o trecho **depois** do resumo: o que já virou resumo não é reenviado.
             mensagens = mensagens_da_conversa(conn, payload.conversation_id, cobertas)
+            tarefa_atual = mensagens_da_tarefa_atual(conn, payload.conversation_id)
         if not mensagens and not cobertas:
             # Inalcançável pela rota (a checagem é feita antes do stream): se acontecer, a
             # conversa sumiu entre a checagem e a montagem do histórico.
             raise LookupError("não há conversa para retomar")
         turns, origens = _turns(mensagens, store, visao)
-        turns.append(ChatTurn(role="user", text=RETOMAR_TAREFA))
+        pedido_original = tarefa_atual[0] if tarefa_atual and tarefa_atual[0].role == "user" else None
+        turns.append(ChatTurn(role="user", text=_texto_de_retoma(
+            pedido_original, tarefa_atual, store, visao
+        )))
         # O turno do «retomar» não vem do banco: fica **depois** de tudo, para que a conta de
         # mensagens cobertas nunca o inclua.
         origens.append(origens[-1] + 1 if origens else 0)
@@ -1193,6 +1342,8 @@ def _turns(
         if item.role == "assistant" and item.steps:
             chamadas = [
                 {
+                    **{k: v for k, v in (passo.extra or {}).items()
+                       if k not in {"id", "type", "function", "index"}},
                     "id": passo.call_id or f"call_{indice}",
                     "type": "function",
                     "function": {
@@ -1205,7 +1356,8 @@ def _turns(
                 }
                 for indice, passo in enumerate(item.steps)
             ]
-            turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas))
+            turns.append(ChatTurn(role="assistant", text=corpo, chamadas=chamadas,
+                                  reasoning_content=item.reasoning_content))
             origens.append(posicao)
             turns += [
                 _turno_de_ferramenta(passo.output or "", chamadas[indice]["id"], visao)
@@ -1218,7 +1370,8 @@ def _turns(
             if visao and store is not None and item.role == "user"
             else []
         )
-        turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens))
+        turns.append(ChatTurn(role=item.role, text=corpo, imagens=imagens,
+                              reasoning_content=item.reasoning_content if item.role == "assistant" else None))
         origens.append(posicao)
     return turns, origens
 
@@ -1268,6 +1421,7 @@ def _store(
     # No **fim** da assinatura de propósito: as chamadas existentes passam os primeiros por
     # posição, e um parâmetro novo no meio mudaria o significado delas em silêncio.
     tokens_total: int | None = None,
+    reasoning_content: str | None = None,
 ) -> Message:
     """Grava a resposta.
 
@@ -1283,6 +1437,7 @@ def _store(
         elapsed_ms=elapsed_ms,
         tokens=tokens,
         tokens_total=tokens_total,
+        reasoning_content=reasoning_content,
         contexto=contexto,
         at=now_ms(),
         steps=steps,

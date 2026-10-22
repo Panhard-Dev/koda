@@ -34,6 +34,13 @@ from ..contracts.turn import texto_do_conteudo
 #: contexto que ainda caberia.
 ORCAMENTO_PADRAO = 1_000_000
 
+# Começar a encolher antes do teto anunciado deixa espaço para o prompt de sistema,
+# catálogo de ferramentas e diferenças entre a estimativa e o contador do host.
+FRACAO_DE_COMPACTACAO = 0.60
+MAX_MENSAGENS_NO_LOOP = 80
+# Teto local conservador: alguns hosts recusam pedidos bem antes da janela anunciada.
+LIMITE_OPERACIONAL = 64_000
+
 #: Quantos turnos da conversa ficam inteiros ao compactar o histórico de fora da tarefa.
 #: Doze é o suficiente para o modelo lembrar do que se estava falando antes.
 TURNOS_INTEIROS = 12
@@ -49,6 +56,9 @@ FRACAO_POR_TURNO = 0.35
 #: Tetos do resumo: o que substitui as mensagens antigas tem que ser **curto**, senão não
 #: compacta nada. Caracteres, não tokens — é texto para o modelo ler.
 LIMITE_RESUMO = 4_000
+# O resumo persistido entra em TODO pedido no prompt de sistema; sem teto ele volta a
+# crescer indefinidamente, mesmo após remover as mensagens antigas do contexto vivo.
+LIMITE_RESUMO_ACUMULADO = 8_000
 LIMITE_TRECHO = 400
 
 #: Média de caracteres por token. Inglês fica perto de 4, português perto de 3 — 3,5 é o
@@ -177,6 +187,18 @@ def _cortar(texto: str, limite: int) -> str:
     return texto[:limite] + f"…[mais {len(texto) - limite} caracteres]"
 
 
+def resumo_acumulado(anterior: str, novo: str) -> str:
+    """Mantém início e trecho recente em tamanho fixo; o histórico integral fica no banco."""
+    partes = [parte.strip() for parte in (anterior, novo) if parte and parte.strip()]
+    junto = "\n\n".join(partes)
+    if len(junto) <= LIMITE_RESUMO_ACUMULADO:
+        return junto
+    separador = "\n\n[trecho intermediário omitido do contexto; mensagens originais no banco]\n\n"
+    inicio = 2_000
+    fim = LIMITE_RESUMO_ACUMULADO - inicio - len(separador)
+    return junto[:inicio] + separador + junto[-fim:]
+
+
 def _aviso_das_ferramentas(historico: list[dict[str, Any]]) -> str:
     """O que já foi usado, em uma linha: `write_file×3, read_file×7, shell×2`.
 
@@ -235,7 +257,9 @@ def indice_do_pedido(historico: list[dict[str, Any]]) -> int:
     o agente perdia a instrução que estava executando.
     """
     for indice in range(len(historico) - 1, 0, -1):
-        if historico[indice].get("role") == "user":
+        if historico[indice].get("role") == "user" and not texto_do_conteudo(
+            historico[indice].get("content")
+        ).startswith("[contexto compactado]"):
             return indice
     return -1
 
@@ -286,14 +310,15 @@ def compactar_historico(
     """
     if orcamento <= 0 or not historico:
         return (0, 0)
+    orcamento = max(1, int(min(orcamento, LIMITE_OPERACIONAL) * FRACAO_DE_COMPACTACAO))
     antes = tokens_do_historico(historico)
-    if antes <= orcamento:
+    if antes <= orcamento and len(historico) <= MAX_MENSAGENS_NO_LOOP:
         return (antes, antes)
 
     # --- 1: encolher o conteúdo antigo, mantendo a estrutura ---------------------
     _encolher(historico, len(historico) - INTOCAVEIS)
     depois = tokens_do_historico(historico)
-    if depois <= orcamento:
+    if depois <= orcamento and len(historico) <= MAX_MENSAGENS_NO_LOOP:
         return (antes, depois)
 
     # --- 2: o miolo sai e dá lugar ao resumo do que já foi feito -----------------
@@ -316,6 +341,17 @@ def compactar_historico(
         aviso = _aviso_das_ferramentas(removidas)
         if aviso:
             resumo.append(aviso)
+        # Um checkpoint curto dos resultados preserva decisões e caminhos já vistos,
+        # reduzindo a chance de o agente repetir ações depois do corte.
+        nomes = {
+            chamada.get("id"): (chamada.get("function") or {}).get("name", "ferramenta")
+            for mensagem in removidas for chamada in (mensagem.get("tool_calls") or [])
+            if isinstance(chamada, dict)
+        }
+        for mensagem in [m for m in removidas if m.get("role") == "tool"][-12:]:
+            nome = nomes.get(mensagem.get("tool_call_id"), "ferramenta")
+            saida_curta = " ".join(texto_do_conteudo(mensagem.get("content")).split())
+            resumo.append(f"Resultado já obtido ({nome}): {_cortar(saida_curta, 180)}")
         ultimo = _ultimo_texto(removidas, "assistant")
         if ultimo:
             resumo.append(f"Última coisa que você escreveu antes do corte: {ultimo}")
@@ -370,6 +406,7 @@ def compactar_turnos(
     """
     if orcamento <= 0 or not turnos:
         return ("", turnos, 0)
+    orcamento = max(1, int(min(orcamento, LIMITE_OPERACIONAL) * FRACAO_DE_COMPACTACAO))
 
     teto_por_turno = max(2_000, int(orcamento * FRACAO_POR_TURNO * CARACTERES_POR_TOKEN))
     usados = 0
@@ -387,11 +424,17 @@ def compactar_turnos(
             texto = _cortar(texto, teto_por_turno)
             turno = _com_texto(turno, texto)
         custo = estimar_tokens(texto)
-        if len(mantidos) >= inteiros or usados + custo > orcamento:
+        raciocinio = getattr(turno, "reasoning_content", None)
+        if isinstance(raciocinio, str):
+            custo += estimar_tokens(raciocinio)
+        if not eh_o_pedido_atual and (len(mantidos) >= inteiros or usados + custo > orcamento):
             break
         usados += custo
         mantidos.append(turno)
     mantidos.reverse()
+    # O primeiro resultado de ferramenta precisa ter sua chamada no mesmo pedido.
+    while mantidos and getattr(mantidos[0], "role", "") == "tool":
+        mantidos.pop(0)
 
     saiu = len(turnos) - len(mantidos)
     if saiu <= 0:

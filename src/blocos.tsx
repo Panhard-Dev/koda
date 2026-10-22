@@ -161,6 +161,48 @@ const SECOES: Secao[] = [
 }`,
         ),
       },
+      {
+        nome: 'comparação · quatro celulares',
+        pergunta: 'qual desses quatro celulares eu levo?',
+        fala:
+          'Aqui a comparação é de ficha, não de opinião: cada coluna é um aparelho, cada linha é o mesmo atributo nos quatro. O que ganha a linha fica em destaque, e passar o mouse acende a coluna inteira.',
+        largo: true,
+        bloco: bloco(
+          'koda-comparacao',
+          `{
+  "tipo": "comparacao",
+  "titulo": "Quatro celulares, mesma ficha",
+  "legenda": "preços de hoje, à vista",
+  "atributos": ["Preço", "Tela", "Bateria", "Câmera"],
+  "itens": [
+    { "nome": "Celular 1", "valores": { "Preço": "R$ 2.899", "Tela": "6,1\\" OLED", "Bateria": "4.200 mAh", "Câmera": "48 MP" } },
+    { "nome": "Celular 2", "valores": { "Preço": "R$ 3.499", "Tela": "6,4\\" AMOLED", "Bateria": "5.000 mAh", "Câmera": "50 MP" }, "recomendado": true },
+    { "nome": "Celular 3", "valores": { "Preço": "R$ 4.199", "Tela": "6,7\\" LTPO", "Bateria": "4.900 mAh", "Câmera": "64 MP" } },
+    { "nome": "Celular 4", "valores": { "Preço": "R$ 1.999", "Tela": "6,0\\" LCD", "Bateria": "5.200 mAh", "Câmera": "32 MP" } }
+  ],
+  "destaques": { "Preço": "Celular 4", "Bateria": "Celular 4", "Câmera": "Celular 3" }
+}`,
+        ),
+      },
+      {
+        nome: 'comparação · ficha achatada',
+        pergunta: 'notebook pra programar, qual dos três?',
+        fala:
+          'O mesmo bloco aceita a ficha achatada no item, sem o objeto `valores` — é como a IA escreve quando está com pressa. Nenhum destaque aqui: só o recomendado, para você ver que ele funciona sem nada marcado.',
+        largo: true,
+        bloco: bloco(
+          'koda-comparacao',
+          `{
+  "tipo": "comparacao",
+  "titulo": "Notebook para programar",
+  "itens": [
+    { "nome": "Leve 13", "Tela": "13,3\\" 2.5K", "Processador": "8 núcleos", "Memória": "16 GB", "Peso": "1,2 kg", "Preço": "R$ 5.990" },
+    { "nome": "Equilibrado 14", "Tela": "14\\" 2.8K", "Processador": "10 núcleos", "Memória": "32 GB", "Peso": "1,5 kg", "Preço": "R$ 7.490", "recomendado": true },
+    { "nome": "Potente 16", "Tela": "16\\" 3K", "Processador": "14 núcleos", "Memória": "32 GB", "Peso": "2,1 kg", "Preço": "R$ 9.890" }
+  ]
+}`,
+        ),
+      },
     ],
   },
   {
@@ -446,11 +488,10 @@ const SECOES: Secao[] = [
         nome: 'tabela',
         pergunta: 'o que cada arquivo do src faz?',
         fala:
-          'Tabela de verdade: cabeçalho, linhas, e rolagem de lado se não couber. Passa o mouse na linha.',
+          'Tabela de verdade: cabeçalho, linhas, e rolagem de lado se não couber. Sem `tipo` no JSON — `colunas` com `linhas` de lista só existe em tabela, então o bloco se reconhece pelo formato.',
         bloco: bloco(
           'koda-visual',
           `{
-  "tipo": "tabela",
   "titulo": "O que cada arquivo faz",
   "colunas": ["Arquivo", "Papel", "Quando mexe"],
   "linhas": [
@@ -485,6 +526,181 @@ const SECOES: Secao[] = [
 }`,
         ),
         largo: true,
+      },
+    ],
+  },
+  {
+    id: 'diagrama',
+    titulo: 'Diagramas',
+    texto:
+      'o desenho que a IA já faz com traço e seta: caixa, bifurcação, rótulo no fio. Aqui ele deixa de ser parede de caracteres — o traço ganha cor de traço, o texto cor de texto, e o alinhamento fica intacto.',
+    exemplos: [
+      {
+        nome: 'diagrama · arquitetura',
+        pergunta: 'como o cérebro do koda se liga no resto?',
+        fala:
+          'A caixa de cima é quem manda; as duas de baixo são o que ele chama. O rótulo fica no fio da seta, como no desenho à mão — só que agora o traço tem cor e o texto tem peso.',
+        largo: true,
+        bloco: bloco(
+          'koda-diagrama',
+          `┌──────────────────────────────────────────────────────┐
+│ O CÉREBRO (nosso código, TS/Bun)                     │
+│                                                      │
+│ - recebe o pedido (web ou CLI)                       │
+│ - manda a IA pensar                                  │
+│ - executa as tools (Read, Edit, Bash)                │
+│ - chama o N8N quando precisa de referência           │
+│ - controla o loop (para quando o teste passa)        │
+│ - guarda o que ficou em Liz.md                       │
+└──────────────────────────────────────────────────────┘
+              ┌─────────────┴───────────────┐
+              │ chama quando precisa        │ executa no projeto
+              │                             │
+              ▼                             ▼
+┌──────────────────────────┐  ┌──────────────────────────┐
+│ N8N                      │  │ projeto do usuário       │
+│ (só funis)               │  │ (CLI)                    │
+│                          │  │                          │
+│ Render, pronto           │  │ onde o código roda       │
+└──────────────────────────┘  └──────────────────────────┘
+
+O cérebro também chama a IA (sempre): cérebro → IA.`,
+        ),
+      },
+      {
+        nome: 'diagrama · decisão',
+        pergunta: 'e quando o teste falha, quem decide parar?',
+        fala:
+          'Bifurcação com rótulo em cada saída. Quem decide é o teste, não a opinião do modelo — e o desenho deixa isso explícito na própria caixa da decisão.',
+        largo: true,
+        bloco: bloco(
+          'koda-diagrama',
+          `CÉREBRO executa o estágio 4 (a IA propõe, o cérebro roda):
+  ler o código → reproduzir o erro → diagnosticar → editar → testar
+                                 │
+                                 ▼
+            ┌────────────────────────────────────────┐
+            │ cérebro avalia: parou?                 │
+            │ (teste passou, não opinião do modelo)  │
+            └────────────────────────────────────────┘
+                  ┌──────────────┴──────────────┐
+             SIM  │                             │  NÃO
+                  │                             │
+                  ▼                             ▼
+     ┌────────────────────────┐ ┌───────────────────────────────┐
+     │ 7. cérebro fecha       │ │ 5. N8N cirúrgico              │
+     │ lê o diff → Memori.md  │ │ 6. IA ajusta, cérebro roda    │
+     │ destila → Liz.md       │ │ ↺ volta ao 4 (teste de novo)  │
+     │ apaga Memori.md        │ └───────────────────────────────┘
+     └────────────────────────┘`,
+        ),
+      },
+      {
+        nome: 'diagrama · arquitetura em colunas',
+        pergunta: 'onde cada coisa mora nesse projeto?',
+        fala:
+          'Aqui o desenho não é digitado: a IA manda a estrutura (coluna → caixas → tom) e o Koda desenha. O que está duplicado ganha cor de aviso, e a coluna estica com a tela em vez de ficar presa na largura de um caractere.',
+        largo: true,
+        bloco: bloco(
+          'koda-diagrama',
+          `{
+  "tipo": "diagrama",
+  "titulo": "Onde cada coisa mora",
+  "legenda": "o que está duplicado aparece em âmbar; o que é risco, em vermelho",
+  "setas": ["HTTP", "SQL"],
+  "colunas": [
+    { "titulo": "Frontend", "blocos": [
+      { "titulo": "js/ — desktop", "linhas": ["chat · ui · core", "mural · settings · plans"] },
+      { "titulo": "mobile/js/ — cópia paralela", "linhas": ["chat, settings, render de novo", "settings sozinho: 913 linhas"], "tom": "atencao" },
+      { "titulo": "login/", "linhas": ["forms 656L · render 645L"] }
+    ]},
+    { "titulo": "Backend — Cloudflare Worker", "blocos": [
+      { "titulo": "routes/ · services/ · lib/", "linhas": ["24 arquivos, o maior com 281L"] },
+      { "titulo": "src/index.js — 2.865 linhas", "linhas": ["roteador + auth + SSE", "+ memória + resumo", "+ imagens + enriquecimento"], "tom": "atencao" }
+    ]},
+    { "titulo": "Dados", "blocos": [
+      { "titulo": "D1", "linhas": ["conversas · mensagens"] },
+      { "titulo": "R2", "linhas": ["arquivos"] },
+      { "titulo": "Firestore", "linhas": ["perfil (do login)"], "tom": "atencao" },
+      { "titulo": "Armazenamento local", "linhas": ["histórico duplicado"], "tom": "erro" }
+    ]}
+  ],
+  "notas": [
+    { "titulo": "327 testes verdes + CI", "linhas": ["cada correção entra com teste que falha no código antigo"], "tom": "ok" },
+    { "titulo": "Lixo versionado", "linhas": ["backend.log · frontend.log", "saida-testes.txt · wrangler-test.log"], "tom": "atencao" }
+  ]
+}`,
+        ),
+      },
+      {
+        nome: 'diagrama · camadas',
+        pergunta: 'onde o pedido para quando eu escrevo aqui?',
+        fala:
+          'Coluna é «quem fala com quem» na horizontal; camada é «o que está por baixo». Mesma ideia, leitura de cima para baixo — e as caixas de uma camada ficam lado a lado porque são alternativas dentro dela.',
+        bloco: bloco(
+          'koda-diagrama',
+          `{
+  "tipo": "diagrama",
+  "titulo": "Onde o pedido para",
+  "camadas": [
+    { "titulo": "Cliente", "blocos": [
+      { "titulo": "webview (Tauri)", "linhas": ["conversa · ajustes · mural"] },
+      { "titulo": "Python empacotado", "linhas": ["backend local em porta efêmera"] }
+    ]},
+    { "titulo": "Serviço local", "blocos": [
+      { "titulo": "FastAPI (uvicorn)", "linhas": ["rotas · agente · ferramentas"] },
+      { "titulo": "c-host.exe", "linhas": ["catálogo de modelos autorizado"], "tom": "neutro" }
+    ]},
+    { "titulo": "Dados", "blocos": [
+      { "titulo": "%APPDATA%\\\\app.koda.desktop\\\\data", "linhas": ["koda.db · mcps.json"], "tom": "ok" },
+      { "titulo": "Worker na nuvem", "linhas": ["sessão da conta · versão publicada"] }
+    ]}
+  ]
+}`,
+        ),
+      },
+      {
+        nome: 'diagrama · fluxo',
+        pergunta: 'como é uma rodada do agente?',
+        fala:
+          'Caixa em cima da outra, com a condição escrita no fio da seta. Não é lista numerada: aqui cada etapa é uma caixa, e dá para pintar a que pede atenção.',
+        bloco: bloco(
+          'koda-diagrama',
+          `{
+  "tipo": "diagrama",
+  "titulo": "Uma rodada do agente",
+  "fluxo": [
+    { "titulo": "você pergunta", "linhas": ["a mensagem entra no histórico"] },
+    { "titulo": "o assistente pensa", "linhas": ["responde com texto e/ou tool_calls"] },
+    { "titulo": "a ferramenta executa", "linhas": ["leitura é direta; escrita mostra o cartão de permissão"], "tom": "atencao" },
+    { "titulo": "o resultado volta", "linhas": ["o assistente lê o resultado e decide"] },
+    { "titulo": "a resposta final", "linhas": ["texto na tela, sem ferramenta pendente"], "tom": "ok" }
+  ],
+  "setas": ["o prompt de sistema entra à frente", "quando chamar ferramenta", "o resultado volta no histórico", "quando não chamar mais nada"],
+  "notas": [{ "titulo": "o laço não tem número máximo de voltas", "tom": "atencao" }]
+}`,
+        ),
+      },
+      {
+        nome: 'diagrama · matriz 2×2',
+        pergunta: 'se eu tiver pouco tempo, o que eu faço primeiro?',
+        fala:
+          'Dois eixos e quatro quadrantes, na ordem de leitura. Os eixos ficam como legenda — texto deitado, porque texto em pé numa conversa é esforço de graça.',
+        bloco: bloco(
+          'koda-diagrama',
+          `{
+  "tipo": "diagrama",
+  "titulo": "O que fazer primeiro",
+  "eixo_y": "impacto",
+  "eixo_x": "esforço",
+  "quadrantes": [
+    { "titulo": "fazer agora", "itens": ["corrigir o 400 da continuação", "empacotar a correção"], "tom": "ok" },
+    { "titulo": "planejar com calma", "itens": ["dividir o src/index.js", "juntar o mobile/js no js/"] },
+    { "titulo": "se sobrar tempo", "itens": ["varredura de logs antigos"] },
+    { "titulo": "deixar para depois", "itens": ["traduzir textos de aviso", "ícones novos"], "tom": "neutro" }
+  ]
+}`,
+        ),
       },
     ],
   },
@@ -550,11 +766,10 @@ const SECOES: Secao[] = [
         nome: 'cartões de número',
         pergunta: 'resumo do mês em números',
         fala:
-          'Os números grandes em cartões. A variação vem colorida embaixo — pra ler de relance.',
+          'Os números grandes em cartões, com a variação colorida embaixo. Repare que o JSON não diz o tipo: quem decide é o formato — `cartoes` só existe aqui, então o bloco se reconhece sozinho.',
         bloco: bloco(
           'koda-visual',
           `{
-  "tipo": "metrica",
   "titulo": "O mês em números",
   "cartoes": [
     { "rotulo": "Conversas", "valor": "1.284", "variacao": "+12%" },

@@ -8,17 +8,65 @@
  * DOM, e o parser/avaliador continuam puros.
  */
 
-/** O corpo de um evento, na forma `… => setNome(expressão)`. */
-const SETTER = /=>\s*set(\w+)\((.+)\)\s*$/
+/** O estado que um evento muda e a expressão que calcula o novo valor. */
+export type Evento = { alvo: string; expr: string; recebeControle?: boolean }
 
-/** O estado que o evento muda e a expressão que calcula o novo valor. */
-export type Evento = { alvo: string; expr: string }
+/**
+ * Extrai uma ou mais chamadas simples `setNome(expressão)` de uma seta.
+ *
+ * Alguns modelos limpam um campo depois de adicionar um item usando `setLista(...)
+ * + setTexto("")`. Isso continua sendo uma expressão declarativa, sem JavaScript
+ * executável. Cada argumento é avaliado pelo interpretador fechado. Só aceitamos
+ * setters no nível externo, separados por `;` ou `+`; blocos, chamadas arbitrárias e
+ * qualquer texto restante são rejeitados.
+ */
+export function eventosDoCorpo(corpo: string): Evento[] | null {
+  const setterDireto = corpo.trim().match(/^set(\w+)$/)
+  if (setterDireto) return [{ alvo: setterDireto[1] ?? '', expr: '', recebeControle: true }]
 
-/** Extrai o `setNome(expressão)` do corpo do evento, ou `null` se não casar. */
+  const seta = corpo.indexOf('=>')
+  if (seta < 0) return null
+  let restante = corpo.slice(seta + 2).trim()
+  if (!restante || restante.startsWith('{')) return null
+
+  const eventos: Evento[] = []
+  while (restante) {
+    const chamada = restante.match(/^set(\w+)\s*\(/)
+    if (!chamada) return null
+    const inicio = chamada[0].length
+    let profundidade = 1
+    let aspas = ''
+    let escapado = false
+    let fim = inicio
+    for (; fim < restante.length && profundidade > 0; fim++) {
+      const c = restante[fim] ?? ''
+      if (aspas) {
+        if (escapado) escapado = false
+        else if (c === '\\') escapado = true
+        else if (c === aspas) aspas = ''
+        continue
+      }
+      if (c === '"' || c === "'" || c === '`') aspas = c
+      else if (c === '(' || c === '[' || c === '{') profundidade++
+      else if (c === ')' || c === ']' || c === '}') profundidade--
+    }
+    if (profundidade !== 0 || aspas) return null
+    const expr = restante.slice(inicio, fim - 1).trim()
+    if (!expr) return null
+    eventos.push({ alvo: chamada[1] ?? '', expr })
+    restante = restante.slice(fim).trimStart()
+    if (!restante) break
+    const separador = restante[0]
+    if (separador !== '+' && separador !== ';') return null
+    restante = restante.slice(1).trimStart()
+    if (!restante) return null
+  }
+  return eventos.length ? eventos : null
+}
+
+/** Extrai o primeiro `setNome(expressão)` por compatibilidade com consumidores antigos. */
 export function alvoDoEvento(corpo: string): Evento | null {
-  const m = corpo.match(SETTER)
-  if (!m) return null
-  return { alvo: m[1] ?? '', expr: (m[2] ?? '').trim() }
+  return eventosDoCorpo(corpo)?.[0] ?? null
 }
 
 /**
@@ -38,5 +86,9 @@ export function nomeDoEstado(alvoCru: string, chaves: string[]): string {
 
 /** O evento quer número (`Number(e.target.value)`) em vez do texto cru do controle? */
 export function querNumero(expr: string): boolean {
-  return /\bNumber\s*\(/.test(expr)
+  return (
+    /\bNumber\s*\(/.test(expr) ||
+    /\bparse(?:Int|Float)\s*\(/.test(expr) ||
+    /\+\s*\w+(?:\.target)?\.value\b/.test(expr)
+  )
 }

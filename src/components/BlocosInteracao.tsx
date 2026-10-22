@@ -58,7 +58,7 @@ export type Interacao = {
   limpar: () => void
 }
 
-export function usarInteracao(): Interacao {
+export function useInteracao(): Interacao {
   const [dica, setDica] = useState<Dica | null>(null)
   const [posicao, setPosicao] = useState<{ x: number; y: number } | null>(null)
   const [destacados, setDestacados] = useState<Set<string>>(new Set())

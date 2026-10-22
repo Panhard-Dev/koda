@@ -348,7 +348,8 @@ def _quiz_em_texto(texto: str) -> bool:
 #: destes valores em `"tipo"`.
 TIPOS_KODA = (
     "barras|empilhadas|linhas|area|pizza|rosca|dispersao|bolha|radar|timeline|sankey|"
-    "tabela|mapa|mapa-radial|passos|comparacao|diffs|arvore|metrica|citacao|quiz|plano"
+    "tabela|mapa|mapa-radial|passos|comparacao|diagrama|fluxograma|diffs|arvore|metrica|"
+    "citacao|quiz|plano"
 )
 TIPO_DE_BLOCO_NO_JSON = re.compile(
     r'"tipo"\s*:\s*"(?:' + TIPOS_KODA + r')"\s*[,}]', re.IGNORECASE
@@ -625,9 +626,10 @@ AVISO_DE_RACIOCINIO_EM_LOOP = (
 #: tarefa quer a **mesma** tarefa de antes, com as mesmas ferramentas — reler "continue"
 #: como pedido novo classificaria a rodada como resposta e tiraria o catálogo.
 RETOMAR_TAREFA = (
-    "A pessoa clicou em Retomar: a rodada anterior não terminou. Olhe o estado atual do "
-    "disco e conclua o que ficou pendente, usando as ferramentas. Não repita o que já está "
-    "feito — continue do ponto onde parou."
+    "A pessoa clicou em Retomar: a rodada anterior não terminou. Continue exclusivamente "
+    "o pedido original reproduzido nesta mensagem, respeitando todas as restrições dele. "
+    "Use o histórico e o registro das ferramentas já executadas para seguir do próximo "
+    "passo; não explore arquivos ou tarefas sem relação com esse pedido."
 )
 
 #: As ferramentas que **mexem no disco**. É delas que sai a lista de "o que foi alterado"
@@ -1392,7 +1394,7 @@ def _explicar_mcp(historico: list[dict[str, Any]], ferramentas_mcp: list[dict[st
 #: para responder ("responda apenas: quantas linhas tem o arquivo?").
 PERGUNTA_RESTRITA = re.compile(
     r"\b(sem|n[ãa]o\s+use|n[ãa]o\s+utilize)\s+(ferramenta|ferramentas|arquivos?|pastas?|"
-    r"web|internet|o\s+shell|comando|comandos)\b",
+    r"web|internet|o\s+shell)\b",
     re.IGNORECASE,
 )
 
@@ -2015,6 +2017,7 @@ async def executar(
     skills: Any = None,
     settings: Settings | None = None,
     planejar: bool = False,
+    retomada: bool = False,
 ) -> Resultado:
     """Roda até o modelo encerrar sem pedir ferramenta, ou até esgotar os passos.
 
@@ -2130,6 +2133,7 @@ async def executar(
     repeticoes: dict[str, int] = {}
     repeticao_terminal = False
     cobrancas = 0
+    cobrancas_retomada = 0
     #: Quantas vezes o anúncio insistente foi retomado por mensagem interna. É da
     #: **tarefa**, não do passo — ver
     #: `MAX_RETOMADAS_ANUNCIO`.
@@ -2191,21 +2195,34 @@ async def executar(
     entregou_visual = False
     #: Tamanho do histórico no último aviso de compactação (ver o bloco no laço).
     avisado = 0
-    #: Tarefa grande: começa com plano. `todos` é a última lista registrada, e
-    #: `plano_feito` diz se ela já existe (é o que libera a execução). Sem ferramenta
-    #: nenhuma nem em rodada de resposta não há plano que valha.
-    grande = pedido_grande(mensagens) and not sem_ferramentas and modo == MODO_CODIGO
+    #: Tarefa grande: começa com plano — **no modo Plan, e só nele**. Fora dele a pessoa
+    #: já disse quanto quer de pergunta (`PERGUNTA` em `policy/approvals.py`): no Auto e no
+    #: Livre ela pediu para o agente seguir sozinho, e parar para pedir aprovação num modo
+    #: que promete isso é desobedecer a escolha dela (visto em 17/10/2026: o modelo abria o
+    #: cartão de plano no Auto e ficava parado esperando um «sim» que ninguém ia dar).
+    #:
+    #: `todos` continua sendo a última lista registrada e `plano_feito` diz se ela existe:
+    #: a lista segue valendo como progresso — o que muda é que ela não congela a rodada.
+    grande = (
+        planejar
+        and pedido_grande(mensagens)
+        and not sem_ferramentas
+        and modo == MODO_CODIGO
+    )
     todos: list[dict[str, Any]] = []
     plano_feito = False
     if grande:
         # A instrução entra como mensagem de pessoa, depois do pedido: é o formato que o
         # provedor aceita, e o modelo lê o "divida antes de executar" junto do pedido.
         historico.append({"role": "user", "content": DIVIDIR_TAREFA})
-    # PORTÃO DO PLANO: o estado que segura a execução. `aceito` nasce da última fala da
-    # pessoa ("plano aceito, pode começar" — o botão do cartão manda exatamente isso);
-    # enquanto falso, todo plano registrado congela a rodada. Vale para plano pedido
-    # (`grande`) e para plano que o modelo montou por conta: quem registrou itens
-    # declarou que a coisa é grande.
+    # PORTÃO DO PLANO: o estado que segura a execução **no modo Plan**. `aceito` nasce da
+    # última fala da pessoa ("plano aceito, pode começar" — o botão do cartão manda
+    # exatamente isso); enquanto falso, todo plano registrado congela a rodada. Vale para
+    # plano pedido (`grande`) e para plano que o modelo montou por conta: quem registrou
+    # itens declarou que a coisa é grande.
+    #
+    # Fora do modo Plan, `aceito` não é consultado por portão nenhum — a escolha do modo
+    # (Auto/Livre/Padrão/Manual) já respondeu "pode seguir" antes de o turno começar.
     aceito = _aceitou_plano(mensagens)
     #: Quantas vezes o loop já cobrou o bloco visual do plano (ver EXIGIR_BLOCO_PLANO).
     cobrancas_plano = 0
@@ -2367,7 +2384,9 @@ async def executar(
         contexto_usado = max(
             contexto_usado, int(resultado.usage.get("prompt_tokens", 0) or 0)
         )
-        historico.append(_mensagem_assistente(resultado))
+        # Sem texto nem chamadas, o passo não forma uma mensagem de assistente válida.
+        if resultado.calls or resultado.text.strip():
+            historico.append(_mensagem_assistente(resultado))
 
         if resultado.truncado:
             # Eco degenerado: o modelo gastou o orçamento repetindo o mesmo trecho. Empurrar a
@@ -2541,6 +2560,30 @@ async def executar(
             # de portões empilhados, que era o que fazia a IA continuar depois de entregar.
             pendentes = [item for item in todos if not item.get("feito")]
 
+            # O botão Retomar só aparece para uma tarefa interrompida. Se o pedido
+            # original era de ação e esta nova rodada ainda não executou ferramenta,
+            # texto como "blocos 7–17 lidos" não é prova de progresso. A compactação
+            # pode ter removido as chamadas antigas da janela viva; peça a próxima
+            # chamada real antes de aceitar o encerramento.
+            if retomada and de_acao and tools and ferramentas_ok == 0 and not bloqueios:
+                if cobrancas_retomada < 2:
+                    cobrancas_retomada += 1
+                    historico.append({
+                        "role": "user",
+                        "content": (
+                            "Esta é uma retomada de tarefa interrompida. Nesta rodada você "
+                            "ainda não executou ferramenta nenhuma: não afirme que leu, "
+                            "alterou ou verificou novos itens. Use o checkpoint da retomada "
+                            "e chame agora a próxima ferramenta necessária com argumentos "
+                            "completos. Só relate progresso depois do resultado real."
+                        ),
+                    })
+                    continue
+                motivo = PARADA_CHAMADAS
+                texto_final = resultado.text
+                completou = False
+                break
+
             # A régua de tudo: resposta limpa fecha a rodada. Só há trabalho a cutucar
             # quando o estado mostra que sobrou algo (itens do plano em aberto, comando
             # ainda rodando) ou quando o texto é anúncio/promessa do que **ia** fazer —
@@ -2569,7 +2612,11 @@ async def executar(
             # pessoa ainda não disse sim. A rodada **fecha aqui** — pendência de plano
             # esperando aceite não é item esquecido a retomar, e a cobrança abaixo não
             # pode empurrar o modelo a "continuar" por conta própria.
-            if todos and plano_feito and not aceito:
+            #
+            # Só no modo Plan (`planejar`): no Auto/Livre/Padrão/Manual o portão não
+            # existe, e a rodada segue a régua normal — se sobrou item na lista, o
+            # `retomar_tarefa` abaixo faz o modelo **executar** em vez de esperar.
+            if planejar and todos and plano_feito and not aceito:
                 texto_final = resultado.text
                 completou = False
                 motivo = PARADA_AGUARDANDO_ACEITE
@@ -2628,6 +2675,11 @@ async def executar(
                     "name": chamada.name,
                     "arguments": argumentos,
                     "step": numero,
+                    # Metadados de reconstrução da chamada. O roteador os consome antes
+                    # de enviar o evento à interface, para que um cancelamento do stream
+                    # ainda possa salvar o passo completo sem expor estado opaco ao cliente.
+                    "_raw_arguments": chamada.raw_arguments,
+                    "_provider_extra": chamada.extra,
                 },
             )
 
@@ -2644,6 +2696,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2678,6 +2731,7 @@ async def executar(
                         output=problema_de_json,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2713,6 +2767,7 @@ async def executar(
                         output=recusa,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2761,6 +2816,7 @@ async def executar(
                     output=saida,
                     duration_ms=0,
                     call_id=chamada.id,
+                    extra=chamada.extra,
                     ok=False,
                 )
                 passos.append(passo)
@@ -2795,6 +2851,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                 )
@@ -2854,6 +2911,7 @@ async def executar(
                         output=saida,
                         duration_ms=0,
                         call_id=chamada.id,
+                        extra=chamada.extra,
                         ok=False,
                     )
                     passos.append(passo)
@@ -3033,6 +3091,7 @@ async def executar(
                 output=saida,
                 duration_ms=duracao,
                 call_id=chamada.id,
+                extra=chamada.extra,
                 ok=ok,
             )
             passos.append(passo)
@@ -3054,7 +3113,10 @@ async def executar(
         # bloco `koda-plano`, o cartão está na tela e basta parar; se não trouxe, o loop
         # cobra o bloco (EXIGIR_BLOCO_PLANO) uma vez antes de fechar, para a interface
         # interativa aparecer em vez de um plano em prosa.
-        if todos and plano_feito and not aceito:
+        #
+        # **Só no modo Plan.** Fora dele, registrar a lista não é pedido de licença: é o
+        # agente organizando o próprio trabalho, e o turno continua até entregar.
+        if planejar and todos and plano_feito and not aceito:
             if BLOCO_PLANO.search(resultado.text):
                 texto_final = resultado.text
                 completou = False
@@ -3345,6 +3407,7 @@ async def _executar_passo(
         return await modelo.step(historico, tools, model)
 
     resultado: StepResult | None = None
+    texto: list[str] = []
     async for item in streamar(historico, tools, model, reasoning, effort):
         if isinstance(item, StepResult):
             resultado = item
@@ -3353,8 +3416,15 @@ async def _executar_passo(
             # Raciocínio não é resposta: vai para a tela, mas não conta como "mostrou".
             await emit("reasoning", {"text": item.text})
             continue
+        # O texto do passo fica em buffer até o provedor confirmar que terminou. Se a rede
+        # cair no meio, o laço pode reconectar e repetir o passo sem deixar um pedaço antigo
+        # na tela nem duplicar efeitos de uma chamada de ferramenta incompleta.
+        texto.append(item.text)
+    if resultado is not None and texto and not resultado.text:
+        resultado.text = "".join(texto)
+    if resultado is not None and resultado.text:
         estado["mostrou"] = True
-        await emit("delta", {"text": item.text})
+        await emit("delta", {"text": resultado.text})
     return resultado
 
 
@@ -3422,6 +3492,12 @@ async def _com_tentativas(
                     tentativa=usadas + 1,
                     total=total_de_tentativas,
                 )
+                reconectar = getattr(modelo, "reconectar", None)
+                if callable(reconectar):
+                    try:
+                        await reconectar(error)
+                    except Exception:  # noqa: BLE001 — a tentativa normal ainda pode resolver
+                        pass
                 if not await _esperar(espera, limite):
                     return None
                 continue

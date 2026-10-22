@@ -28,7 +28,7 @@ import BolhaUsuario from './components/BolhaUsuario'
 import Composer from './components/Composer'
 import FalaDoModelo from './components/FalaDoModelo'
 import ToolSteps from './components/ToolSteps'
-import { MODELO_PADRAO } from './models'
+import { lerModeloSalvo, salvarModelo } from './modelo-salvo'
 import { streamChat } from './api/client'
 import type { SendPayload } from './components/Composer'
 import type { ApiAnexo, ToolStep } from './api/client'
@@ -41,7 +41,9 @@ type Fala =
 
 function ChatSolto() {
   const [falas, setFalas] = useState<Fala[]>([])
-  const [modelo, setModelo] = useState(MODELO_PADRAO)
+  // A mesma escolha da janela principal: esta página é uma segunda porta para o mesmo
+  // seletor, e trocar de modelo aqui tem de valer lá — e depois de fechar também.
+  const [modelo, setModelo] = useState(lerModeloSalvo)
   const [ocupado, setOcupado] = useState(false)
   const [erro, setErro] = useState<string | null>(null)
   const pararRef = useRef<AbortController | null>(null)
@@ -169,7 +171,10 @@ function ChatSolto() {
             busy={ocupado}
             variant={falas.length > 0 ? 'chat' : 'home'}
             model={modelo}
-            onModelChange={setModelo}
+            onModelChange={(valor) => {
+              setModelo(valor)
+              salvarModelo(valor)
+            }}
             // `auto` para a rodada não parar num cartão de permissão que esta página não
             // desenha — aqui o objetivo é ver a caixa e a conversa, não aprovar passo.
             permissionMode="auto"

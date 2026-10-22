@@ -37,11 +37,12 @@ import type { SettingsSection } from './components/SettingsScreen'
 import ProjectPicker from './components/ProjectPicker'
 import PainelLateral from './components/PainelLateral'
 import BarraLateralCamera from './components/BarraLateralCamera'
-import { findModel, MODELO_PADRAO } from './models'
+import { findModel } from './models'
+import { lerModeloSalvo, salvarModelo } from './modelo-salvo'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
 import { dayStart, dayKey, monthStart, weekStart } from './plan'
-import { PLANO_FREE } from './plano'
+import { PLANO_FREE, planoParaBeneficios } from './plano'
 import { moedasDeTokensPorModelo } from './custo'
 import { DEFAULT_APPEARANCE } from './appearance'
 import type { Appearance } from './appearance'
@@ -872,6 +873,9 @@ function App() {
   // na etiqueta. Sem guardar isto, a tela teria de adivinhar o plano, e adivinhar plano é
   // mostrar «Free» para quem paga.
   const [planoDaConta, setPlanoDaConta] = useState<PlanoDaConta | null>(null)
+  // O painel pode manter os números de um plano cancelado para o histórico. Eles não podem
+  // continuar valendo como horas/moedas depois do cancelamento ou reembolso.
+  const planoDeBeneficios = planoParaBeneficios(planoDaConta)
   /**
    * Os créditos **avulsos** da conta — comprados ou dados pelo painel.
    *
@@ -897,7 +901,19 @@ function App() {
     })
   }
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
-  const [model, setModel] = useState(MODELO_PADRAO)
+  const [model, setModel] = useState(lerModeloSalvo)
+  /**
+   * Troca de modelo com memória.
+   *
+   * A escolha vai para o `localStorage` **no clique**, e não num efeito que observa o
+   * estado: assim ela já está guardada mesmo se a janela fechar no instante seguinte — e
+   * fechar no instante seguinte é exatamente o que acontece quando a pessoa escolhe o
+   * modelo e sai. Na abertura, quem lê é `lerModeloSalvo` (ver `src/modelo-salvo.ts`).
+   */
+  const escolherModelo = (valor: string) => {
+    setModel(valor)
+    salvarModelo(valor)
+  }
   const [appearance, setAppearance] = useState<Appearance>(DEFAULT_APPEARANCE)
   /** Porta de entrada: enquanto não se sabe se há sessão, o app não aparece. */
   const [sessao, setSessao] = useState<'checando' | 'dentro' | 'fora'>('checando')
@@ -1187,8 +1203,8 @@ function App() {
    * troca de plano não aparecia em lugar nenhum do chat.
    */
   useEffect(() => {
-    definirHorasDoDia(planoDaConta?.horas_por_dia ?? PLANO_FREE.horasPorDia)
-  }, [planoDaConta])
+    definirHorasDoDia(planoDeBeneficios?.horas_por_dia ?? PLANO_FREE.horasPorDia)
+  }, [planoDeBeneficios])
 
   /*
    * O rascunho do dia é **por conta**.
@@ -1882,7 +1898,7 @@ function App() {
       ? Math.max(
           0,
           Math.floor(
-            (planoDaConta?.moedas_por_mes ?? PLANO_FREE.moedasPorMes) +
+            (planoDeBeneficios?.moedas_por_mes ?? PLANO_FREE.moedasPorMes) +
               creditosAvulsos -
               (remoteUsage ? moedasDeTokensPorModelo(remoteUsage.monthly.tokens_por_modelo) : 0),
           ),
@@ -2989,7 +3005,7 @@ function App() {
           projectId={projectId}
           onProjectChange={trocarProjeto}
           model={modeloAtivo}
-          onModelChange={setModel}
+          onModelChange={escolherModelo}
           remoteModels={modelosVisiveis}
           modelosBloqueados={modelosBloqueados}
           skills={skills}
@@ -3066,7 +3082,22 @@ function App() {
           onScroll={aoRolar}
           onWheel={(evento) => aoRolarComRoda(evento.deltaY)}
           className={[
-            'min-h-0 overflow-y-auto transition-all duration-500',
+            // **`overscroll-contain`**: a roda para no fim da conversa. Sem isto, o scroll
+            // vaza para a casca e é ela que anda — a conversa fica parada e a interface
+            // inteira sobe, que é exatamente o «me joga pra cima» de quem está lendo o
+            // histórico. A casca é `overflow-hidden`, mas `overflow: hidden` ainda guarda
+            // `scrollTop`: quem rola ali não vê barra, só o conteúdo deslocado.
+            //
+            // **`transition-[opacity]`, e não `transition-all`**: animar a *altura* de um
+            // container que rola faz o conteúdo andar junto com a animação sempre que o
+            // composer muda de tamanho (a fila, o cartão de permissão, a caixa de escrever
+            // crescendo). Aqui a única coisa que precisa animar é a conversa aparecendo.
+            //
+            // **`[overflow-anchor:none]`**: o Chrome reancora a rolagem sozinho quando
+            // algo acima da viewport muda de altura — o raciocínio que fecha, o bloco em
+            // construção que vira desenho, a ficha que aparece. Reancorar é mover a tela
+            // sem ninguém pedir; quem decide a posição aqui é o `seguirOFimRef`, e só ele.
+            'min-h-0 overflow-y-auto overscroll-contain transition-[opacity] duration-500 [overflow-anchor:none]',
             EASE,
             hasMessages ? 'flex-1 opacity-100' : 'flex-none opacity-0',
           ].join(' ')}
@@ -3297,7 +3328,7 @@ function App() {
               erroPermissao={erroPermissao}
               onDecidirPermissao={responderPermissao}
               model={modeloAtivo}
-              onModelChange={setModel}
+              onModelChange={escolherModelo}
               remoteModels={modelosVisiveis}
               modelosBloqueados={modelosBloqueados}
               contextoPorModelo={contextoPorModelo}

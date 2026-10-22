@@ -19,6 +19,7 @@
  */
 
 import { dayKey, monthStart, weekStart } from '../plan'
+import { planoParaBeneficios } from '../plano'
 
 const bruto = import.meta.env.VITE_CLOUD_URL as string | undefined
 
@@ -516,7 +517,7 @@ type PerfilDoPainel = {
  * `cancelada` acabou. Só `ativa` e `atrasada` são plano de verdade.
  */
 export function assinaturaVale(plano: PlanoDaConta | null): boolean {
-  return plano?.status === 'ativa' || plano?.status === 'atrasada'
+  return planoParaBeneficios(plano) !== null
 }
 
 /**

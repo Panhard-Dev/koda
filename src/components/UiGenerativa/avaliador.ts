@@ -115,10 +115,20 @@ function dividirArray(dentro: string): string[] {
   const pedacos: string[] = []
   let prof = 0
   let atual = ''
+  let aspas = ''
+  let escapado = false
   for (const c of dentro) {
-    if (c === '{' || c === '[' || c === '(') prof++
+    if (aspas) {
+      atual += c
+      if (escapado) escapado = false
+      else if (c === '\\') escapado = true
+      else if (c === aspas) aspas = ''
+      continue
+    }
+    if (c === '"' || c === "'") aspas = c
+    else if (c === '{' || c === '[' || c === '(') prof++
     else if (c === '}' || c === ']' || c === ')') prof--
-    if (c === ',' && prof === 0) {
+    if (c === ',' && prof === 0 && !aspas) {
       pedacos.push(atual.trim())
       atual = ''
     } else {
@@ -379,16 +389,15 @@ class Descendente {
 
   /** Ponto de entrada: uma expressão completa. */
   expressao(): Valor {
-    // Ternário: `cond ? a : b`. Avalia a condição; se for verdade, come o `?` e devolve
-    // `a`; senão come o `:` e devolve `b`. A condição é uma expressão de comparação.
+    // Ternário associativo à direita: `cond ? a : b` e `a ? x : b ? y : z`.
     const cond = this.soma(0)
     const tok = this.tokens[this.pos]
     if (tok && tok.tipo === 'tern' && tok.valor === '?') {
       this.pos++
-      const seSim = this.soma(0)
+      const seSim = this.expressao()
       const dpts = this.tokens[this.pos]
       if (dpts && dpts.tipo === 'tern' && dpts.valor === ':') this.pos++
-      const seNao = this.soma(0)
+      const seNao = this.expressao()
       return verdadeiro(cond) ? seSim : seNao
     }
     // sem ternário: só devolve o que a soma já calculou (evita re-consumir)
@@ -458,7 +467,7 @@ class Descendente {
       const m = argumento.match(/(\d+)/)
       return receptor.toFixed(m ? Number(m[1]) : 2)
     }
-    if (metodo === 'length' && Array.isArray(receptor)) return receptor.length
+    if (metodo === 'length' && (Array.isArray(receptor) || typeof receptor === 'string')) return receptor.length
     return receptor as Valor
   }
 
@@ -578,16 +587,21 @@ class Descendente {
    * sem isto, remover do carrinho/TODO não fazia nada (o avaliador não entendia `.filter`).
    */
   private filtrar(lista: Valor[], argumento: string): Valor[] {
-    const cond = this.corpoDaSeta(argumento)
-    if (!cond) return lista
+    const seta = this.corpoDaSeta(argumento)
+    if (!seta) return lista
     return lista.filter((item, i) => {
       const estadoItem: Estado = {
         ...this.estado,
-        item,
         i,
         index: i,
+        [seta.parametro]: item,
+        ...(seta.indice ? { [seta.indice]: i } : {}),
       }
-      return verdadeiro(avaliar(cond, estadoItem, this.funcoes))
+      // `item` é o alias legado quando o estado original não declarou um `item` externo.
+      // Dentro de um repeat, porém, `item` pode ser a linha selecionada; um callback com
+      // alias (`tarefa`) não deve apagá-la enquanto filtra por `tarefa.id !== item.id`.
+      if (!('item' in this.estado) || seta.parametro === 'item') estadoItem.item = item
+      return verdadeiro(avaliar(seta.expr, estadoItem, this.funcoes))
     })
   }
 
@@ -601,18 +615,25 @@ class Descendente {
    * tem o campo `...item` que precisa expandir.
    */
   private mapear(lista: Valor[], argumento: string): Valor[] {
-    const expr = this.corpoDaSeta(argumento)
-    if (!expr) return lista
+    const seta = this.corpoDaSeta(argumento)
+    if (!seta) return lista
     return lista.map((item, i) => {
-      const estadoItem: Estado = { ...this.estado, item, i, index: i }
-      return avaliar(expr, estadoItem, this.funcoes)
+      const estadoItem: Estado = {
+        ...this.estado,
+        i,
+        index: i,
+        [seta.parametro]: item,
+        ...(seta.indice ? { [seta.indice]: i } : {}),
+      }
+      if (!('item' in this.estado) || seta.parametro === 'item') estadoItem.item = item
+      return avaliar(seta.expr, estadoItem, this.funcoes)
     })
   }
 
-  /** Extrai o corpo da seta `(item) => expressão` → `expressão`. */
-  private corpoDaSeta(argumento: string): string | null {
-    const m = argumento.match(/=>\s*(.+)$/)
-    return m ? (m[1] ?? '').trim() : null
+  /** Extrai `(item, indice) => expressão` e mantém os nomes locais da seta. */
+  private corpoDaSeta(argumento: string): { parametro: string; indice?: string; expr: string } | null {
+    const m = argumento.match(/^\s*\(?\s*([\w$]+)?\s*(?:,\s*([\w$]+))?\s*\)?\s*=>\s*([\s\S]+)$/)
+    return m ? { parametro: m[1] || 'item', indice: m[2], expr: (m[3] ?? '').trim() } : null
   }
 
   /** Encadeamento de método já tratado no `atomo`; fica aqui só a nota. */
@@ -630,6 +651,14 @@ class Descendente {
    * quando existe, senão de `.toFixed(n)`.
    */
   private resolverChamada(nome: string, argumento: string): Valor {
+    // Conversão simples e explícita, sem expor o objeto global ao avaliador.
+    if (nome === 'String') {
+      const valor = avaliar(argumento, this.estado, this.funcoes)
+      return valor === undefined ? 'undefined' : String(valor)
+    }
+    // Útil para IDs de itens; não oferece acesso a outros métodos de Date.
+    if (nome === 'Date.now') return Date.now()
+
     // Encadeamento: `(...)__m__metodo` — o receptor é uma sub-expressão já chamada
     // (ex: `Math.round(x)`), e o método é o de Formatação (`toLocaleString`, `toFixed`).
     if (nome.includes('__m__')) {
@@ -649,15 +678,15 @@ class Descendente {
         const m = argumento.match(/(\d+)/)
         return receptor.toFixed(m ? Number(m[1]) : 2)
       }
-      if (metodo === 'length' && Array.isArray(receptor)) return receptor.length
+      if (metodo === 'length' && (Array.isArray(receptor) || typeof receptor === 'string')) return receptor.length
       return undefined
     }
 
     const [base, metodo] = nome.split('.')
     // Math.round/floor/ceil/abs
     if (base === 'Math') {
-      const v = this.somaDe(argumento)
-      const n = Number(v)
+      const valores = dividirArray(argumento).map((parte) => Number(this.somaDe(parte)))
+      const n = valores[0] ?? Number.NaN
       switch (metodo) {
         case 'round':
           return Math.round(n)
@@ -667,6 +696,10 @@ class Descendente {
           return Math.ceil(n)
         case 'abs':
           return Math.abs(n)
+        case 'min':
+          return valores.length ? Math.min(...valores) : undefined
+        case 'max':
+          return valores.length ? Math.max(...valores) : undefined
         default:
           return undefined
       }
@@ -688,7 +721,7 @@ class Descendente {
         maximumFractionDigits: casas,
       })
     }
-    if (metodo === 'length' && Array.isArray(receptor)) return receptor.length
+    if (metodo === 'length' && (Array.isArray(receptor) || typeof receptor === 'string')) return receptor.length
 
     // **Operações de lista** — o que faz carrinho/TODO/lista de alunos funcionar.
     // A IA escreve `setCarrinho([...carrinho, item])` (adicionar),
@@ -746,7 +779,7 @@ class Descendente {
     if (base !== undefined && base in this.estado) {
       const v = this.estado[base]
       if (metodo === 'toFixed' && typeof v === 'number') return v.toFixed(2)
-      if (metodo === 'length' && Array.isArray(v)) return v.length
+      if (metodo === 'length' && (Array.isArray(v) || typeof v === 'string')) return v.length
       // **Campo de objeto** (`item.texto`, `aluno.nota`): quando o identificador é um
       // objeto no estado e tem um campo depois do ponto, devolve o campo. É o que faz
       // `item.texto !== "maçã"` (filter) e `item.nota` (map) funcionarem — sem isto,

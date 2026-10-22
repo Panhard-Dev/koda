@@ -61,6 +61,10 @@ def _estado(settings: Settings) -> dict:
         # Onde a página está rolada. O painel é outra instância do navegador e carrega a página
         # do zero: sem isto, ele fica sempre no topo enquanto a IA lê lá embaixo.
         "rolagem": rolagem if isinstance(rolagem, dict) else None,
+        # Última posição do mouse enviada por CDP. O Painel Dev desenha um cursor proporcional
+        # sobre a página espelhada usando o tamanho original da viewport.
+        "ponteiro": dados.get("ponteiro") if vivo and isinstance(dados.get("ponteiro"), dict) else None,
+        "viewport": dados.get("viewport") if vivo and isinstance(dados.get("viewport"), dict) else None,
         "idade_s": round(idade_s, 1) if idade_s is not None else None,
         "motivo": None if vivo else "a sessão parou de publicar",
     }

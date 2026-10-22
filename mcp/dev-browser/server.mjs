@@ -224,6 +224,10 @@ class Navegador {
     this._erroNavegador = []
     /** Onde a página está rolada. Vai no estado publicado, para o painel acompanhar. */
     this._rolagem = null
+    /** Última posição enviada por CDP, para o Painel Dev desenhar o ponteiro da IA. */
+    this._ponteiro = null
+    /** Tamanho CSS da janela CDP, usado para converter as coordenadas no painel. */
+    this._viewport = null
     /** O texto que a IA foi olhar, quando ela rolou até um trecho. Ver `_publicar`. */
     this._alvoRolagem = null
     /** O patch do WebGL já foi injetado nesta sessão? Ver `_prepararCanvasLegivel`. */
@@ -470,6 +474,8 @@ class Navegador {
     this.ws = null
     this.processo = null
     this.sessionId = null
+    this._ponteiro = null
+    this._viewport = null
     this._publicar(false)
     if (this.perfil) {
       try {
@@ -488,7 +494,68 @@ class Navegador {
   }
 
   enviar(metodo, params = {}) {
-    return this._pedir(metodo, params, this.sessionId)
+    return this._pedir(metodo, params, this.sessionId).then((resultado) => {
+      if (
+        metodo === 'Input.dispatchMouseEvent' &&
+        Number.isFinite(params.x) &&
+        Number.isFinite(params.y)
+      ) {
+        this._ponteiro = {
+          x: Math.round(params.x),
+          y: Math.round(params.y),
+          pressionado: Number(params.buttons) > 0,
+        }
+        // O painel desenha o cursor sobre o espelho. Publique cada amostra do trajeto,
+        // mas sem reescrever o feed de erros a cada passo do mouse.
+        this._publicar(true, false)
+      }
+      return resultado
+    })
+  }
+
+  /** Move o ponteiro em amostras curtas para que o espelho mostre um trajeto contínuo. */
+  async _moverSuave(x, y, { buttons = 0, button, passos: passosSolicitados } = {}) {
+    const destino = {
+      x: Math.max(0, Number(x) || 0),
+      y: Math.max(0, Number(y) || 0),
+    }
+    const inicio = this._ponteiro
+      ? { x: this._ponteiro.x, y: this._ponteiro.y }
+      : this._viewport
+        ? { x: this._viewport.largura / 2, y: this._viewport.altura / 2 }
+        : { x: Math.max(0, destino.x - 120), y: Math.max(0, destino.y - 80) }
+    const distancia = Math.hypot(destino.x - inicio.x, destino.y - inicio.y)
+    if (distancia < 1) {
+      await this.enviar('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        ...destino,
+        ...(button ? { button } : {}),
+        buttons,
+      })
+      return
+    }
+
+    const duracao = Math.min(480, Math.max(120, distancia / 1.8))
+    const passos = passosSolicitados === undefined
+      ? Math.min(36, Math.max(6, Math.ceil(duracao / 16)))
+      : Math.min(60, Math.max(6, Math.round(Number(passosSolicitados) || 24)))
+    for (let i = 1; i <= passos; i++) {
+      const t = i / passos
+      const progresso = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+      const ponto = i === passos
+        ? destino
+        : {
+            x: Math.round(inicio.x + (destino.x - inicio.x) * progresso),
+            y: Math.round(inicio.y + (destino.y - inicio.y) * progresso),
+          }
+      await this.enviar('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        ...ponto,
+        ...(button ? { button } : {}),
+        buttons,
+      })
+      if (i < passos) await dormir(duracao / passos)
+    }
   }
 
   _pedir(metodo, params, sessionId) {
@@ -684,6 +751,7 @@ class Navegador {
 
   async clicar(alvo) {
     const elemento = await this._elemento(alvo)
+    await this._moverSuave(elemento.x, elemento.y)
     for (const type of ['mousePressed', 'mouseReleased']) {
       await this.enviar('Input.dispatchMouseEvent', {
         type,
@@ -701,6 +769,7 @@ class Navegador {
 
   async digitar(alvo, texto, enter) {
     const elemento = await this._elemento(alvo)
+    await this._moverSuave(elemento.x, elemento.y)
     for (const type of ['mousePressed', 'mouseReleased']) {
       await this.enviar('Input.dispatchMouseEvent', {
         type,
@@ -930,6 +999,7 @@ class Navegador {
 
     if (pedido?.seletor || pedido?.n !== undefined) {
       const alvo = await this._elemento({ seletor: pedido.seletor, n: pedido.n })
+      await this._moverSuave(alvo.x, alvo.y)
       await this.enviar('Input.dispatchMouseEvent', { type: 'mousePressed', x: alvo.x, y: alvo.y, button: 'left', clickCount: 1, buttons: 1 })
       await this.enviar('Input.dispatchMouseEvent', { type: 'mouseReleased', x: alvo.x, y: alvo.y, button: 'left', clickCount: 1, buttons: 0 })
       await dormir(80)
@@ -958,8 +1028,8 @@ class Navegador {
   /**
    * Passa o mouse por cima — hover de verdade.
    *
-   * Dois movimentos, não um: um salto único não dispara `mouseenter`/`mouseover` em todo
-   * componente, porque muitos escutam `mousemove` para decidir que o ponteiro entrou.
+   * A trajetória tem passos intermediários para disparar os eventos que menus e componentes
+   * esperam, além de ficar visível sem saltos no espelho do Painel Dev.
    */
   async hover(pedido) {
     let x
@@ -975,9 +1045,7 @@ class Navegador {
       y = alvo.y
       descricao = alvo.descricao
     }
-    await this.enviar('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.max(0, x - 24), y: Math.max(0, y - 24), buttons: 0 })
-    await dormir(60)
-    await this.enviar('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 })
+    await this._moverSuave(x, y)
     await dormir(150)
     return descricao
   }
@@ -1003,19 +1071,10 @@ class Navegador {
     // origem sem rolar é o que impede o arrasto de começar no lugar errado.
     const origem = { ...(await this._posicaoDe(de)), descricao: 'origem' }
 
-    await this.enviar('Input.dispatchMouseEvent', { type: 'mouseMoved', x: origem.x, y: origem.y, buttons: 0 })
+    await this._moverSuave(origem.x, origem.y)
     await this.enviar('Input.dispatchMouseEvent', { type: 'mousePressed', x: origem.x, y: origem.y, button: 'left', clickCount: 1, buttons: 1 })
-    const passos = Math.min(Math.max(Number(pedido?.passos) || 14, 2), 60)
-    for (let i = 1; i <= passos; i++) {
-      await this.enviar('Input.dispatchMouseEvent', {
-        type: 'mouseMoved',
-        x: Math.round(origem.x + ((destino.x - origem.x) * i) / passos),
-        y: Math.round(origem.y + ((destino.y - origem.y) * i) / passos),
-        button: 'left',
-        buttons: 1,
-      })
-      await dormir(16)
-    }
+    const passos = Math.min(Math.max(Number(pedido?.passos) || 24, 6), 60)
+    await this._moverSuave(destino.x, destino.y, { buttons: 1, button: 'left', passos })
     await this.enviar('Input.dispatchMouseEvent', { type: 'mouseReleased', x: destino.x, y: destino.y, button: 'left', clickCount: 1, buttons: 0 })
     await dormir(250)
     return origem.x + ',' + origem.y + ' → ' + destino.descricao
@@ -2194,7 +2253,7 @@ class Navegador {
    * próprio (que não conseguiria ler nem clicar em página de outra origem), ele desenha o
    * quadro que este processo publica.
    */
-  _publicar(vivo) {
+  _publicar(vivo, incluirFeed = true) {
     try {
       writeFileSync(
         join(this._dados, 'dev-browser.json'),
@@ -2213,6 +2272,8 @@ class Navegador {
             // quebra mais, e a mesma fração cai em outro trecho. Com o texto, o painel acha a
             // mesma seção na própria renderização dele.
             rolagem: this._rolagem ? { ...this._rolagem, alvo: this._alvoRolagem } : null,
+            ponteiro: vivo ? this._ponteiro : null,
+            viewport: vivo ? this._viewport : null,
             atualizado: Date.now(),
           },
           null,
@@ -2224,8 +2285,10 @@ class Navegador {
       log('não consegui publicar o estado:', erro.message)
     }
 
+    if (!incluirFeed) return
+
     // O feed de erros vai em **arquivo separado**, e não dentro do `dev-browser.json`: são dois
-    // consumidores diferentes e com ritmos diferentes. O painel lê o estado a cada 1,5 s; o MCP
+    // consumidores diferentes e com ritmos diferentes. O painel lê o estado em alta frequência; o MCP
     // `koda-dev-logs` lê este aqui quando a IA pergunta. Misturar os dois faria o painel carregar
     // a lista inteira de erros a cada tique.
     try {
@@ -2253,6 +2316,14 @@ class Navegador {
 
   _ligarEspelho() {
     if (this._relogio) return
+    // A primeira medição evita esconder o ponteiro até o primeiro ciclo de screenshot.
+    void this.avaliar('({ largura: Math.round(window.innerWidth), altura: Math.round(window.innerHeight) })')
+      .then((viewport) => {
+        if (!this.vivo || !viewport) return
+        this._viewport = viewport
+        this._publicar(true, false)
+      })
+      .catch(() => {})
     this._relogio = setInterval(async () => {
       if (!this.vivo) return
       try {
@@ -2261,6 +2332,9 @@ class Navegador {
         await this._atualizarTitulo()
         this._rolagem = await this.avaliar(
           '({ topo: Math.round(window.scrollY), total: Math.round(document.documentElement.scrollHeight), janela: window.innerHeight })',
+        )
+        this._viewport = await this.avaliar(
+          '({ largura: Math.round(window.innerWidth), altura: Math.round(window.innerHeight) })',
         )
         this._publicar(true)
       } catch {
@@ -2562,8 +2636,8 @@ const FERRAMENTAS = [
     name: 'hover',
     description:
       'Passa o mouse por cima de um elemento (ou de um ponto) e para ali. É o que revela o que ' +
-      'só aparece no hover — tooltip, menu que abre, sublinhado, mudança de cor. O resultado ' +
-      'se lê depois com `enxergar`.',
+      'só aparece no hover — tooltip, menu que abre, sublinhado, mudança de cor. O ponteiro fica ' +
+      'visível no Painel Dev na posição em que parou. O resultado se lê depois com `enxergar`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2592,7 +2666,7 @@ const FERRAMENTAS = [
         para: { type: 'object', description: 'Destino: { seletor } ou { n }.' },
         paraX: { type: 'number', description: 'Destino por coordenada (x).' },
         paraY: { type: 'number', description: 'Destino por coordenada (y).' },
-        passos: { type: 'number', description: 'Quantos passos intermediários (padrão 14).' },
+        passos: { type: 'number', description: 'Quantos passos intermediários (padrão 24).' },
       },
       required: ['de'],
     },
