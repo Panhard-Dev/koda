@@ -434,3 +434,19 @@ html {
   animation: contexto-girando 0.9s linear infinite;
   transform-origin: center;
 }
+
+/*
+ * Fonte do diagrama de traço (`koda-diagrama`).
+ *
+ * O desenho é uma **grade de caracteres**: `─` só vira linha contínua numa fonte cujo glifo
+ * ocupa a célula inteira. Consolas — o mono que o Windows resolve por padrão — desenha o
+ * traço mais estreito que o avanço, e a caixa sai **picotada**, com um vão entre cada
+ * pedacinho (visto em 20/10/2026, no primeiro teste do bloco). Cascadia Mono desenha cheio.
+ *
+ * Consolas fica de reserva de propósito: sem Cascadia o desenho sai pontilhado, mas continua
+ * alinhado e legível — melhor do que cair numa fonte proporcional e desmontar a caixa.
+ */
+.koda-diagrama {
+  font-family: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+  font-variant-ligatures: none;
+}

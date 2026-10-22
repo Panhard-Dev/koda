@@ -22,6 +22,7 @@ from .base import ChatOptions, ChatTurn, Piece, TransientProviderError
 MODEL_LABELS = {
     "liz-nano": "Liz Nano",
     "liz-4": "Liz 4",
+    "liz-4-5-super": "Liz 4.5 Super",
     "liz-3-flash": "Liz 3 Flash",
     "liz-mini-1-3": "Liz Mini 1.3",
     "liz-mini-2": "Liz Mini 2",

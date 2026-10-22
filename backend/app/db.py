@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS messages (
   -- A **conta** a que esta mensagem pertence (o e-mail de quem estava logado). É por ela
   -- que o uso — tempo do dia e moedas — é separado: sem esta coluna o gasto era da
   -- máquina, e trocar de conta no mesmo PC continuava mostrando o da conta anterior.
-  conta           TEXT
+  conta           TEXT,
+  reasoning_content TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, at);
@@ -128,6 +129,8 @@ class Database:
     def _migrar(conn: sqlite3.Connection) -> None:
         """Bancos antigos ganham as colunas novas sem perder o que já têm."""
         colunas = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "reasoning_content" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT")
         if "steps" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN steps TEXT NOT NULL DEFAULT '[]'")
         if "tokens" not in colunas:

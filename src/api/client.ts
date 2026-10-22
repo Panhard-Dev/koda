@@ -463,6 +463,10 @@ export type EstadoDoNavegador = {
    * medidos na janela da IA (`janela`) — o painel converte para a proporção dele, que é outra.
    */
   rolagem?: { topo: number; total: number; janela: number; alvo?: string | null } | null
+  /** Última posição do mouse automatizado, em pixels CSS do navegador controlado pelo MCP. */
+  ponteiro?: { x: number; y: number; pressionado: boolean } | null
+  /** Tamanho da viewport CDP, para escalar o ponteiro no Painel Dev. */
+  viewport?: { largura: number; altura: number } | null
   idade_s?: number | null
   motivo?: string | null
 }
@@ -1332,9 +1336,15 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
     }
     if (!data) return
 
+    let parsed: Record<string, unknown>
     try {
-      const parsed = JSON.parse(data) as Record<string, unknown>
-      if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
+      parsed = JSON.parse(data) as Record<string, unknown>
+    } catch {
+      // Só ignora JSON inválido. Erros lançados pelos callbacks precisam chegar ao
+      // laço de reconexão; antes este catch engolia também o onError do provedor.
+      return
+    }
+    if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
       else if (event === 'delta') handlers.onDelta(String(parsed.text ?? ''))
       else if (event === 'reasoning') handlers.onReasoning?.(String(parsed.text ?? ''))
       else if (event === 'aviso')
@@ -1357,9 +1367,6 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
         viuTerminal = true
         handlers.onError?.(String(parsed.message ?? 'erro no backend'))
       }
-    } catch {
-      // Bloco ilegível: segue lendo o stream em vez de derrubar a resposta.
-    }
   }
 
   // O terminal desta rodada. `done` e `error` encerram; qualquer outra saída do fluxo

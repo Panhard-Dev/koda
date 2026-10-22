@@ -122,6 +122,7 @@ class ChatRequest(BaseModel):
 class ToolStepOut(BaseModel):
     """Uma ferramenta que o modelo chamou, com o que ela devolveu."""
 
+    extra: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     output: str = ""
@@ -137,6 +138,8 @@ class ToolStepOut(BaseModel):
     mostrar um nome que não existe no `mcps.json`.
     """
     mcp: dict[str, str] | None = None
+    #: Estado opaco usado apenas ao reconstruir a chamada; nunca exposto à interface.
+    extra: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class TodoItem(BaseModel):
@@ -158,6 +161,8 @@ class Message(BaseModel):
     id: str
     role: Role
     text: str
+    #: Dado interno do provedor, sem exposição pela API da conversa.
+    reasoning_content: str | None = Field(default=None, exclude=True, repr=False)
     attachments: list[AttachmentInfo] = Field(default_factory=list)
     """Os anexos da mensagem, com os metadados que a tela mostra (nome, tipo, tamanho).
 

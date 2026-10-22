@@ -28,9 +28,9 @@
 import { createContext, useContext, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { Balao, usarInteracao } from '../BlocosInteracao'
+import { Balao, useInteracao } from '../BlocosInteracao'
 
-import type { Estado, FuncoesUI, ListaUI } from './parser'
+import type { Estado, FuncoesUI } from './parser'
 
 /** As props que a IA passou, já resolvidas para valores de verdade. */
 export type Props = Record<string, unknown>
@@ -42,7 +42,7 @@ export type Comp = (props: Props & { filhos?: ReactNode[] }) => ReactNode
 export type EstadoUI = {
   valor: Estado
   funcoes: FuncoesUI
-  set: (nome: string, valor: number | string | boolean | ListaUI) => void
+  set: (nome: string, valor: unknown) => void
 }
 
 // ---------------------------------------------------------------- o nível de caixa
@@ -429,14 +429,14 @@ export function Toggle({ valor, rotulo, onChange }: Props): ReactNode {
 /**
  * `<chart>` — gráfico de barras **com balão no mouse**, igual ao do Koda.
  *
- * É o mesmo mecanismo do `BlocosVisuais` (`usarInteracao` + `Balao`): passar o mouse
+ * É o mesmo mecanismo do `BlocosVisuais` (`useInteracao` + `Balao`): passar o mouse
  * numa barra mostra o rótulo e o valor formatado num balão que segue o ponteiro; clicar
  * destaca e apaga o resto; `Esc` limpa. Sem isto o gráfico da UI generativa era "burro" —
  * a pessoa via as barras mas não o número de cada uma (o dono cobrou: "passo o mouse e
  * não mostra nada"). Componente com estado interno porque o balão é estado do React.
  */
 export function Chart({ dados, titulo }: Props): ReactNode {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const lista = Array.isArray(dados)
     ? (dados as Array<{ rotulo?: string; valor?: number }>)
     : []
@@ -629,25 +629,40 @@ export function Repeat({
   itens,
   filhos,
   estado,
-}: Props & { filhos?: ReactNode[]; estado?: EstadoUI }): ReactNode {
+  renderizar,
+}: Props & {
+  filhos?: ReactNode[]
+  estado?: EstadoUI
+  renderizar?: (item: unknown, indice: number) => ReactNode
+}): ReactNode {
   const lista = Array.isArray(itens)
-    ? (itens as Array<{ texto: string }>)
+    ? itens
     : estado && Array.isArray(estado.valor[String(itens)])
-      ? (estado.valor[String(itens)] as Array<{ texto: string }>)
+      ? (estado.valor[String(itens)] as unknown[])
       : []
   if (!lista.length) return <p className="text-[12.5px] text-koda-fg/45">lista vazia</p>
+  const visiveis = lista.slice(0, 100)
   return (
     <div className="flex flex-col gap-1.5">
-      {lista.map((item, i) => (
-        <div key={i} className="flex items-start gap-2">
+      {visiveis.map((item, i) => (
+        <div key={typeof item === 'object' && item && 'id' in item ? String((item as { id: unknown }).id) : i} className="flex items-start gap-2">
           <span className="mt-0.5 text-[11px] text-koda-fg/35">{i + 1}.</span>
-          {filhos && filhos.length ? (
+          {renderizar ? (
+            <div className="min-w-0 flex-1">{renderizar(item, i)}</div>
+          ) : filhos && filhos.length ? (
             <div className="min-w-0 flex-1">{filhos}</div>
           ) : (
-            <span className="text-[13px] text-koda-fg/80">{item.texto}</span>
+            <span className="text-[13px] text-koda-fg/80">
+              {item && typeof item === 'object' && 'texto' in item
+                ? String((item as { texto: unknown }).texto ?? '')
+                : String(item ?? '')}
+            </span>
           )}
         </div>
       ))}
+      {lista.length > visiveis.length ? (
+        <span className="text-[11px] text-koda-fg/45">Mostrando 100 de {lista.length} itens.</span>
+      ) : null}
     </div>
   )
 }

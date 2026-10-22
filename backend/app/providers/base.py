@@ -44,6 +44,8 @@ class ChatTurn:
     chamadas: list[dict[str, Any]] = field(default_factory=list)
     #: A qual chamada este turno responde (`tool`) — casa com `chamadas[i]["id"]`.
     chamada_id: str | None = None
+    #: Eco interno para provedores que exigem o raciocínio no próximo pedido.
+    reasoning_content: str | None = None
 
 
 @dataclass(slots=True)
@@ -156,7 +158,30 @@ BLOCOS_VISUAIS = (
     "para o que acontece em ordem. "
     "`koda-comparacao` com "
     '{"titulo":"...","colunas":[{"titulo":"...","itens":["...","..."]}]} — para opções '
-    "lado a lado. "
+    "lado a lado, com os pontos a favor e contra de cada uma. "
+    "Para **ficha de produto** (celular, notebook, plano, curso), compare por atributo, "
+    "de 2 a 5 itens: "
+    '{"titulo":"...","atributos":["Preço","Tela","Bateria"],"itens":[{"nome":"...",'
+    '"valores":{"Preço":"...","Tela":"...","Bateria":"..."},"recomendado":true}],'
+    '"destaques":{"Bateria":"nome do melhor"}} — `atributos` fixa a ordem das linhas, '
+    "`destaques` marca o melhor de cada linha e `recomendado` realça a coluna; todos os "
+    "itens levam os mesmos atributos, com valor curto em texto (nada de frase inteira). "
+    "`koda-diagrama` recebe o desenho **cru**, sem JSON: é o traço que você já faz, com "
+    "`┌ ─ ┐ │ └ ┘` para as caixas, `┴` para bifurcar e `▼` para a seta, e o rótulo ao lado "
+    "do fio. Use para arquitetura, fluxo de decisão e «quem chama quem» — o Koda redesenha "
+    "com cor de traço e alinhamento intacto. Uma caixa por ideia, linha curta: o desenho "
+    "não reflui, então mantenha-o dentro de ~60 colunas. "
+    "Para arquitetura em **colunas** (frontend / backend / dados), mande a estrutura e deixe "
+    "o desenho com o Koda: "
+    '{"tipo":"diagrama","titulo":"...","setas":["HTTP","SQL"],"colunas":[{"titulo":"Frontend",'
+    '"blocos":[{"titulo":"js/","linhas":["chat · ui"],"tom":"neutro"}]}],"notas":'
+    '[{"titulo":"327 testes verdes","tom":"ok"}]} — `tom` aceita neutro|atencao|erro|ok e '
+    "serve para marcar o que está duplicado ou em risco. "
+    "O mesmo bloco desenha mais **três** formatos, e a chave é que escolhe: `camadas` "
+    "(empilhado, para o que fica por baixo), `fluxo` (caixas em sequência, com `setas` "
+    "dizendo a condição de cada fio) e `quadrantes` (matriz 2×2, com `eixo_x` e `eixo_y`, na "
+    "ordem de leitura: superior esquerdo, superior direito, inferior esquerdo, inferior "
+    "direito). "
     "`koda-visual` com um `tipo` entre: "
     '`diffs` — o que mudou num arquivo: {"titulo":"...","arquivo":"src/App.tsx",'
     '"linhas":[{"tipo":"ctx","texto":"..."},{"tipo":"add","texto":"..."},{"tipo":"del",'
@@ -229,21 +254,35 @@ UI_GENERATIVA = (
     "`carousel` (`itens` — Anterior/Próximo), `popover` (mostra/esconde conteúdo ao clicar).\n"
     "• lista dinâmica: `repeat` (`itens` — renderiza um filho por item de um array; "
     "declare o array com `DIL.useList([\"a\", \"b\"])` no `{@body}` e passe com "
-    "`itens={nomeDaLista}`; use `{lista.length}` para mostrar a contagem).\n"
+    "`itens={nomeDaLista}`; use `{lista.length}` para mostrar a contagem). Com filhos, "
+    "cada linha tem `item` e `index`; pode dar nomes claros com `item=\"tarefa\"` e "
+    "`indice=\"i\"`, por exemplo `<texto valor={tarefa.texto} />`. `useList` aceita "
+    "objetos simples: `[{id: 1, texto: \"Ler\", feito: false}]`.\n"
     "• mídia: `code` (bloco de código), `imagem` (`src`, `alt`).\n"
     "**Estado**: declare no `{@body …}` com `const [nome, setNome] = DIL.useState(valor)` "
     "(um ou vários, cada um no seu `{@body}`). Para lista use "
     "`DIL.useList([\"a\", \"b\"])` e renderize com `<repeat itens={nome}>`. **Lógica**: "
     "dentro de `{…}` vale aritmética "
     "(`+ - * /`, parênteses), comparação (`>= <= > < == !=`), concatenação de string "
-    "(`\"R$ \" + total`) e `.toFixed(2)`. Os eventos (`onClick`, `onChange`) chamam "
-    "`setNome(expressão)`; em `input`/`select`/`slider` use `setNome(e.target.value)`. "
+    "(`\"R$ \" + total`), ternário, `Math.round/min/max/abs`, `.length`, `.toFixed(2)` e "
+    "`.toLocaleString(\"pt-BR\", {minimumFractionDigits: 2})`, `String(expressão)` e "
+    "`Date.now()` (só para IDs). Os eventos (`onClick`, `onChange`) aceitam uma ou mais "
+    "chamadas `setNome(expressão)` separadas por `+`, executadas da esquerda pra direita; "
+    "em `input`/`select` use `setNome(e.target.value)` e em slider numérico use "
+    "`setNome(Number(e.target.value))`; também é válido passar `onChange={setNome}` direto "
+    "(o Koda recebe o valor e converte slider para número). Exemplo: "
+    '`<button onClick={() => setItens([...itens, {id: Date.now(), texto: novo}]) + setNovo("")}>Adicionar</button>`. '
+    "Para editar/remover uma linha, use `setTarefas(tarefas.map((t) => t.id == tarefa.id ? "
+    "{...t, feito: t.feito == false} : t))` ou `setTarefas(tarefas.filter((t) => t.id != "
+    "tarefa.id))`. A contagem pode ser `tarefas.filter((t) => t.feito == false).length`. "
     "**Regras**: um bloco `koda-ui` por tela; monte a interface que responde o pedido, com "
     "título curto; não repita em texto o que a tela já mostra; e não use para pouca coisa "
     "— uma lista simples é lista. Componente que não está na lista não existe. "
     "**O que NÃO fazer (não rola e quebra a tela):**\n"
     "• NÃO escreva função com bloco `=> { ... }` nem `function` — a lógica é uma "
-    "**expressão só** (`{usuarios * preco}`), não um programa com laço/console/try.\n"
+    "**expressão só** (`{usuarios * preco}`), não um programa com laço/console/try. "
+    "Não use `if`, `.trim()`, `.indexOf()`, `$item` ou JavaScript de `style` dentro da UI. "
+    "Para mostrar uma contagem, passe o número direto ao `stat` ou use `String(contagem)`.\n"
     "• NÃO monte editor de código que executa JavaScript real (não roda código na tela). "
     "Se o pedido for 'editor', mostre o código num bloco `code` e explique em texto — "
     "não prometa executar.\n"
@@ -256,6 +295,26 @@ UI_GENERATIVA = (
 )
 
 #: O nome de cada bloco, para a instrução acima e para quem for ler o código.
+
+#: O idioma — e ele vai **por último**, de propósito.
+#:
+#: Instrução no começo de um prompt longo perde para o que vem depois: o "responda em
+#: português do Brasil" estava na segunda linha e não bastou. Os modelos pequenos do host
+#: (o free tier é o que se usa aqui) derrapam no meio da frase — já saiu resposta em
+#: português com caractere chinês, palavra coreana e frase russa enfiada no meio, e a
+#: explicação era sobre blocos de interface. O que chega por último é o que a amostragem
+#: respeita, então a regra fecha o prompt.
+#:
+#: Não lista idiomas de propósito: citar "chinês, coreano, russo" aumenta a chance de eles
+#: aparecerem — modelo pequeno puxa do que está escrito por perto. "Outro alfabeto" cobre
+#: todos, e a saída para o termo técnico em inglês está dita, para ele não travar.
+IDIOMA = (
+    "**Idioma: português do Brasil, do começo ao fim.** Nenhuma palavra de outro idioma e "
+    "nenhum caractere de outro alfabeto no meio do texto. Nome técnico em inglês é aceitável "
+    "quando é o nome da coisa (`commit`, `pull request`, `deploy`). Se faltar a palavra em "
+    "português, diga com as palavras que você tem — trocar de idioma no meio da frase é "
+    "erro, não estilo."
+)
 
 
 def system_prompt(options: ChatOptions) -> str:
@@ -319,7 +378,9 @@ def system_prompt(options: ChatOptions) -> str:
         )
     parts.append(BLOCOS_VISUAIS)
     parts.append(UI_GENERATIVA)
-    # A identidade vai por último: é a instrução que precisa vencer a persona que o host
-    # injeta na conversa (ver `app/identidade.py`).
+    # A identidade vence a persona que o host injeta na conversa (ver `app/identidade.py`).
     parts.append(regras(options.assistente))
+    # E o idioma fecha o prompt. Ver o comentário de `IDIOMA`: instrução no começo de um
+    # prompt longo perde para o que vem depois, e o modelo derrapa no meio da resposta.
+    parts.append(IDIOMA)
     return " ".join(parts)

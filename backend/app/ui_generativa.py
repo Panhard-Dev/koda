@@ -52,6 +52,12 @@ _NAO_AGUENTA = [
     re.compile(r"\bthrow\b"),
     # declaração de variável comum (o koda-ui só usa `const [x, setX] = DIL.useState`)
     re.compile(r"\b(let|var)\s+\w"),
+    # operações fora do avaliador fechado (`.trim()`, `.indexOf()`) e notação `$item`
+    # que alguns modelos trazem de JSX/React. String(x) e Date.now() são built-ins
+    # explicitamente suportados pelo avaliador seguro.
+    re.compile(r"\.(?:trim|indexOf)\s*\("),
+    re.compile(r"\$\w+"),
+    re.compile(r"!(?!=)"),
     # template string com `${` DENTRO de uma string (o `codigo: '...${x}...'` do editor)
     # — detectado indiretamente: array grande com crase dentro de crase é o editor.
     # O sinal prático: `useState(EXEMPLOS[` (estado que depende de array externo grande)
@@ -119,6 +125,85 @@ def rebaixar_koda_ui(texto: str) -> tuple[str, int]:
     return "".join(saida), derivados
 
 
+class FiltroKodaUI:
+    """Decide cada bloco `koda-ui` antes de deixá-lo chegar à interface.
+
+    O filtro do chat livre já segurava o bloco completo. O modo agente, porém, emitia os
+    deltas direto da fila e só rebaixava o texto ao salvar: durante a resposta apareciam
+    controles de um bloco inválido, que paravam de funcionar ao reabrir o chat. Este
+    acumulador serve aos dois caminhos e também tolera a cerca de abertura dividida entre
+    pedaços do stream.
+    """
+
+    _MARCADOR = "```koda-ui"
+
+    def __init__(self) -> None:
+        self._prefixo = ""
+        self._bloco = ""
+
+    def alimentar(self, texto: str) -> str:
+        """Devolve o texto seguro que já pode ser exibido; mantém blocos incompletos."""
+        saida: list[str] = []
+        restante = self._prefixo + (texto or "")
+        self._prefixo = ""
+
+        while restante:
+            if not self._bloco:
+                abertura = _ABRE.search(restante)
+                if abertura is None:
+                    # Guarda apenas a cauda que ainda poderia completar o marcador no
+                    # próximo delta; o restante continua fluindo sem atraso.
+                    minusculo = restante.lower()
+                    limite = min(len(self._MARCADOR) - 1, len(restante))
+                    pendente = 0
+                    for tamanho in range(limite, 0, -1):
+                        if minusculo.endswith(self._MARCADOR[:tamanho]):
+                            pendente = tamanho
+                            break
+                    if pendente:
+                        saida.append(restante[:-pendente])
+                        self._prefixo = restante[-pendente:]
+                    else:
+                        saida.append(restante)
+                    break
+                if abertura.start():
+                    saida.append(restante[: abertura.start()])
+                self._bloco = restante[abertura.start() :]
+                restante = ""
+
+            if restante:
+                self._bloco += restante
+                restante = ""
+
+            # O bloco só é liberado depois da cerca final, quando a validação sabe se o
+            # interpretador suporta todos os eventos e expressões que a IA escreveu.
+            conteudo = self._bloco[len(self._MARCADOR) :]
+            fechamento = _FECHA.search(conteudo)
+            if fechamento is None:
+                break
+            fim = len(self._MARCADOR) + fechamento.end()
+            fechado = self._bloco[:fim]
+            restante = self._bloco[fim:]
+            seguro, _ = rebaixar_koda_ui(fechado)
+            saida.append(seguro)
+            self._bloco = ""
+
+        return "".join(saida)
+
+    def finalizar(self) -> str:
+        """Libera texto final; um bloco truncado vira código legível, nunca UI morta."""
+        if self._bloco:
+            # O bloco não chegou fechado do modelo: mesmo que o prefixo parcial pareça
+            # suportado, não há garantia de que a árvore/eventos estejam completos.
+            parcial = _ABRE.sub("```js", self._bloco, count=1) + "\n```"
+            seguro = parcial
+            self._bloco = ""
+            self._prefixo = ""
+            return seguro
+        pendente, self._prefixo = self._prefixo, ""
+        return pendente
+
+
 #: Um pedaço do stream (texto, reasoning, truncado, repetiu, usage, etc.).
 #: É o mesmo `Piece` do provedor; aqui só o campo `text` importa.
 class _Pedaço:
@@ -146,33 +231,21 @@ async def filtrar_stream(
     decidido, e nunca vê uma tela quebrada. Pedaços que não são `` `koda-ui` `` passam
     direto, sem segurar o stream.
     """
-    buffer = ""  # texto acumulado desde a abertura de um koda-ui
-    dentro = False  # estamos no meio de um bloco koda-ui?
+    filtro = FiltroKodaUI()
     async for peca in pecas:
         # Só o texto importa pro filtro; reasoning/usage/truncado passam direto.
         if getattr(peca, "reasoning", False) or getattr(peca, "usage", None) is not None:
             yield peca
             continue
         texto = getattr(peca, "text", "") or ""
-        if not dentro:
-            # fora de bloco: só entra em modo buffer quando aparece a abertura
-            if "```koda-ui" not in texto:
-                yield peca
-                continue
-            dentro = True
-            buffer = texto
-        else:
-            buffer += texto
-        # o bloco fechou? (segunda cerca depois da abertura)
-        if _FECHA.search(buffer.split("koda-ui", 1)[1] if "koda-ui" in buffer else buffer):
-            decidido, _ = rebaixar_koda_ui(buffer)
+        decidido = filtro.alimentar(texto)
+        if decidido:
             yield _com_texto(peca, decidido)
-            dentro = False
-            buffer = ""
-    # sobrou bloco aberto no fim do stream (cortado): rebaixa por segurança
-    if dentro and buffer:
-        decidido, _ = rebaixar_koda_ui(buffer + "\n```")
-        yield _com_texto(None, decidido)
+    # Sobrou marcador ou bloco aberto no fim do stream. Prefixo simples é texto; bloco
+    # aberto é fechado e validado pelo acumulador antes de aparecer.
+    final = filtro.finalizar()
+    if final:
+        yield _com_texto(None, final)
 
 
 def _com_texto(peca, texto: str):

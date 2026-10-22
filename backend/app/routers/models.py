@@ -42,7 +42,7 @@ BONITO = {
 
 #: Tamanho por palavra do nome. Quem não estiver aqui fica no tier do meio — é o caso de
 #: "liz-4", que é grande pela geração e não por um adjetivo de tier.
-TIERS = {"nano": 1, "mini": 2, "flash": 3, "pro": 5, "max": 6}
+TIERS = {"nano": 1, "mini": 2, "flash": 3, "pro": 5, "super": 5, "max": 6}
 TIER_PADRAO = 4
 
 
@@ -57,6 +57,12 @@ def peso(identificador: str) -> tuple[int, float]:
     `liz-4` → (4, 4.0) · `liz-3-flash` → (3, 3.0) · `liz-mini-2` → (2, 2.0) ·
     `liz-mini-1-3` → (2, 1.0) · `liz-nano` → (1, 0.0). Ordenando isso de forma decrescente,
     o maior vem primeiro.
+
+    **A ordem que a pessoa vê no seletor não é esta.** Desde 17/10/2026 a ordem é decisão
+    do dono e mora no front, em `ORDEM_DE_FORCA` (`src/models.tsx`): ele quis o Nable acima
+    de Layze e de Koda, o que nenhuma regra deduzida do nome dá — «mini» parece pequeno, e
+    ele manda o Nable em segundo. Aqui continua valendo só como desempate estável da lista
+    que o backend devolve; o front reordena por `forcaDoModelo` antes de desenhar.
     """
     partes = identificador.lower().split("-")[1:]
     tier = TIER_PADRAO

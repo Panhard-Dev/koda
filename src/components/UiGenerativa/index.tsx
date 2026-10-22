@@ -29,8 +29,8 @@ import {
   Toggle,
   type EstadoUI,
 } from './componentes'
-import { alvoDoEvento, nomeDoEstado, querNumero } from './eventos'
-import { parseUi, type Estado, type ListaUI, type No } from './parser'
+import { eventosDoCorpo, nomeDoEstado, querNumero } from './eventos'
+import { parseUi, type Estado, type No } from './parser'
 
 /** Os componentes com estado interno — montados à parte, com `createElement`. */
 const COM_ESTADO_INTERNO: Record<string, (props: Record<string, unknown>) => ReactNode> = {
@@ -80,8 +80,7 @@ export function DesenhoUi({ fonte }: { fonte: string }): ReactNode {
   const estadoUI: EstadoUI = {
     valor: valores,
     funcoes,
-    set: (nome: string, valor: number | string | boolean | ListaUI) =>
-      setValores((v: Estado) => ({ ...v, [nome]: valor })),
+    set: (nome: string, valor: unknown) => setValores((v: Estado) => ({ ...v, [nome]: valor })),
   }
 
   const nos = arvore.map((no, i) => montar(no, i, estadoUI))
@@ -117,12 +116,48 @@ function montar(no: No, chave: number, estado: Ctx): ReactNode {
     }
   }
 
+  // O modelo frequentemente usa `texto=` em componentes textuais (paragrafo, badge,
+  // callout), embora o catálogo interno chame a propriedade de `valor`. Aceitar o alias
+  // evita cartões vazios quando a DSL está correta e só o nome da prop varia.
+  if (
+    no.tag === 'componente' &&
+    props.valor === undefined &&
+    props.texto !== undefined &&
+    ['texto', 'paragrafo', 'label', 'caption', 'link', 'badge', 'alert', 'callout'].includes(no.nome)
+  ) {
+    props.valor = props.texto
+  }
+
   // Os eventos: `onClick={() => setCount(count + 1)}`. O parser guarda o corpo da
   // função; aqui a gente reconhece o padrão `setX(expr)` e chama o set de verdade.
   ligarEventos(no, props, estado)
 
-  const filhos = no.filhos.map((filho, i) => montar(filho, i, estado))
   const nomeComp = no.tag === 'componente' ? no.nome : no.tag
+
+  // `repeat` cria um escopo por item. A IA pode usar `item.texto`/`index` ou declarar
+  // `<repeat itens={tarefas} item="tarefa" indice="i">`; os eventos ainda atualizam o
+  // estado compartilhado, por exemplo `setTarefas(tarefas.filter((t) => t.id !== item.id))`.
+  if (nomeComp === 'repeat') {
+    const renderizar = (item: unknown, indice: number) => {
+      const nomeItem = String(props.item || 'item')
+      const nomeIndice = String(props.indice || 'index')
+      const escopo: EstadoUI = {
+        ...estado,
+        valor: {
+          ...estado.valor,
+          item,
+          index: indice,
+          i: indice,
+          [nomeItem]: item,
+          [nomeIndice]: indice,
+        },
+      }
+      return <>{no.filhos.map((filho, i) => montar(filho, i, escopo))}</>
+    }
+    return <Fragment key={chave}>{createElement(Repeat, { ...props, estado, renderizar })}</Fragment>
+  }
+
+  const filhos = no.filhos.map((filho, i) => montar(filho, i, estado))
 
   // Com estado interno (accordion, steps, tabs, toggle, repeat): componente React.
   const ComInterno = COM_ESTADO_INTERNO[nomeComp]
@@ -144,11 +179,11 @@ function montar(no: No, chave: number, estado: Ctx): ReactNode {
 
 /**
  * Liga `onClick`/`onChange` ao estado. A IA escreve `onClick={() => setCount(count + 1)}`;
- * o parser entrega o corpo `() => setCount(count + 1)`. Aqui reconhece-se o
- * `setNome(expressão)`, avalia a expressão contra o estado atual e chama o set.
+ * o parser entrega o corpo `() => setCount(count + 1)`. Aqui reconhecem-se uma ou mais
+ * chamadas `setNome(expressão)`, avaliam-se pela mini-linguagem e chamam os setters.
  *
- * Não é `eval`: é casar um padrão conhecido (`set` + nome + uma expressão do avaliador).
- * Corpo que não casa o padrão é ignorado — o botão fica sem ação, não executa nada.
+ * Não é `eval`: só entram chamadas `set` + nome + expressão do avaliador, separadas por
+ * `+` ou `;`. Corpo que não casa esse formato é ignorado — o botão fica sem ação.
  */
 function ligarEventos(no: No, props: Record<string, unknown>, estado: Ctx): void {
   if (no.tag !== 'componente') return
@@ -157,12 +192,14 @@ function ligarEventos(no: No, props: Record<string, unknown>, estado: Ctx): void
     if (valor.tipo !== 'expr') continue
     if (nome !== 'onClick' && nome !== 'onChange') continue
     // corpo: `() => setCount(count + 1)` ou `(e) => setUsuarios(Number(e.target.value))`
-    const evento = alvoDoEvento(valor.corpo)
-    if (!evento) continue
+    const eventos = eventosDoCorpo(valor.corpo)
+    if (!eventos) continue
     // A chave de verdade: casa `setUsuarios` com o estado `usuarios` (minúscula).
-    const alvo = nomeDoEstado(evento.alvo, chaves)
-    const expr = evento.expr
-    const querNumeroAqui = querNumero(expr)
+    const acoes = eventos.map((evento) => ({
+      alvo: nomeDoEstado(evento.alvo, chaves),
+      expr: evento.expr,
+      recebeControle: evento.recebeControle === true,
+    }))
     props[nome] = (recebido?: unknown) => {
       // O valor chega de **dois** jeitos, e o handler tem de entender os dois:
       //
@@ -175,18 +212,40 @@ function ligarEventos(no: No, props: Record<string, unknown>, estado: Ctx): void
       // vazio e o input **travava no lugar** — a barra não arrastava (visto em
       // 17/10/2026). Agora o valor é lido dos dois.
       let valorDoControle: string | number | boolean | undefined
-      if (typeof recebido === 'string' || typeof recebido === 'number') {
+      if (
+        typeof recebido === 'string' ||
+        typeof recebido === 'number' ||
+        typeof recebido === 'boolean'
+      ) {
         valorDoControle = recebido
       } else {
         valorDoControle = (recebido as { target?: { value?: string } })?.target?.value
       }
-      if (valorDoControle !== undefined) {
-        const valorFinal = querNumeroAqui ? Number(valorDoControle) : valorDoControle
+      if (valorDoControle !== undefined && acoes.length === 1) {
+        const { alvo, expr, recebeControle } = acoes[0]!
+        const componente = no.tag === 'componente' ? no.nome : ''
+        const valorFinal = recebeControle
+          ? componente === 'slider'
+            ? Number(valorDoControle)
+            : componente === 'checkbox'
+              ? valorDoControle === true || valorDoControle === 'true'
+              : valorDoControle
+          : querNumero(expr)
+            ? Number(valorDoControle)
+            : valorDoControle
         estado.set(alvo, valorFinal)
         return
       }
-      const v = avaliar(expr, estado.valor, estado.funcoes)
-      if (v !== undefined) estado.set(alvo, v as number | string | boolean)
+      // Resolve ações em sequência contra um mapa local. Assim o segundo setter pode
+      // observar o valor calculado pelo primeiro sem mutar o estado React em render.
+      const proximos: Estado = { ...estado.valor }
+      for (const { alvo, expr } of acoes) {
+        const v = avaliar(expr, proximos, estado.funcoes)
+        if (v !== undefined) {
+          proximos[alvo] = v
+          estado.set(alvo, v)
+        }
+      }
     }
   }
 }

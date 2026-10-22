@@ -68,9 +68,11 @@ o host no ar, ele cai na lista da casa, que é esta:
   `Automático` (quem decide é o botão *Reasoning*), `Mínimo`, `Baixo`, `Médio` ou `Alto` — e
   cada modelo guarda o seu. Pergunta rápida num modelo leve, tarefa cabeluda num modelo
   grande, sem reconfigurar nada.
-- **Contexto grande de verdade.** O teto é `KODA_CONTEXTO_TOKENS` — **1 milhão** por padrão,
-  a janela dos modelos — e passou disso o Koda **compacta** a conversa (saídas antigas viram
-  uma linha, o miolo resolvido vira resumo) em vez de estourar. A compactação aparece na
+- **Contexto grande de verdade.** A janela anunciada é `KODA_CONTEXTO_TOKENS` — **1 milhão**
+  por padrão. O Koda começa a **compactar** antes do limite, por volta de 60% do teto
+  operacional local de 64 mil tokens (saídas antigas viram uma linha, o miolo resolvido vira
+  resumo), para deixar espaço ao catálogo de ferramentas e à diferença entre contadores.
+  A compactação aparece na
   conversa como um **cartão** no ponto exato em que aconteceu (quantas mensagens viraram
   resumo, ou quantos milhares de tokens saíram do contexto) — antes era uma linha em itálico
   no meio da resposta, que ninguém entendia.

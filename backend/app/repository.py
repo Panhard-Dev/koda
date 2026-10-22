@@ -83,6 +83,7 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     ]
     return Message(
         id=row["id"],
+        reasoning_content=row["reasoning_content"] if "reasoning_content" in colunas else None,
         role=row["role"],
         text=row["text"],
         attachments=_carregar_anexos(row["attachments"]),
@@ -145,8 +146,8 @@ def append_message(
         INSERT INTO messages
           (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
            tokens_total, contexto, at, steps, todos, incompleto, motivo, pendentes, executou,
-           retomavel, conta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           retomavel, conta, reasoning_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -163,7 +164,7 @@ def append_message(
             message.contexto,
             message.at,
             json.dumps(
-                [passo.model_dump() for passo in message.steps], ensure_ascii=False
+                [{**passo.model_dump(), "extra": passo.extra} for passo in message.steps], ensure_ascii=False
             ),
             json.dumps(
                 [item.model_dump() for item in message.todos], ensure_ascii=False
@@ -174,6 +175,7 @@ def append_message(
             message.executou,
             1 if message.retomavel else 0,
             conta,
+            message.reasoning_content,
         ),
     )
     conn.execute(
@@ -279,6 +281,23 @@ def mensagens_da_conversa(
         "SELECT * FROM messages WHERE conversation_id = ? ORDER BY at ASC, rowid ASC "
         "LIMIT -1 OFFSET ?",
         (conversation_id, max(0, int(desde))),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
+def mensagens_da_tarefa_atual(
+    conn: sqlite3.Connection, conversation_id: str
+) -> list[Message]:
+    """Pedido mais recente e respostas seguintes, inclusive se já viraram resumo.
+
+    A retomada precisa do registro das ferramentas da tarefa em curso. Esse registro pode
+    estar fora da janela de contexto viva, então o índice `resumo_mensagens` não serve aqui.
+    """
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE conversation_id = ? AND rowid >= COALESCE("
+        "(SELECT rowid FROM messages WHERE conversation_id = ? AND role = 'user' "
+        "ORDER BY rowid DESC LIMIT 1), 0) ORDER BY rowid ASC",
+        (conversation_id, conversation_id),
     ).fetchall()
     return [_row_to_message(row) for row in rows]
 

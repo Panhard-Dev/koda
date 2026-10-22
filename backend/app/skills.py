@@ -190,25 +190,46 @@ def _do_catalogo(raiz: Path, estado: dict[str, bool]) -> list[Skill]:
     O catálogo diz **quais** pastas viajam (e em que ordem); o conteúdo vem do `SKILL.md` de
     cada uma — o arquivo é que o agente lê, então é ele que manda no nome e na descrição.
 
+    Pasta com `SKILL.md` que o catálogo **não** lista entra no fim, em ordem de nome. Antes
+    ela sumia calada, e o efeito era o pior possível: a skill viajava dentro do instalador,
+    estava em `<instalação>/skills/<nome>/SKILL.md`, e mesmo assim não aparecia na tela —
+    quem criou a skill concluía que o pacote estava errado, quando o que faltava era uma
+    linha no JSON. O catálogo continua mandando na **ordem**; ele deixou de ser a única
+    porta de entrada.
+
     Entrada apontando para pasta sem `SKILL.md` é registrada e ignorada, em vez de sumir
     calada: catálogo torto vira "a skill não aparece" e ninguém descobre por quê.
     """
     try:
         itens = json.loads((raiz / "skills.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        itens = []
     if not isinstance(itens, list):
-        return []
+        itens = []
     achadas: list[Skill] = []
+    vistas: set[str] = set()
     for item in itens:
         nome_pasta = str(item.get("pasta", "")).strip() if isinstance(item, dict) else ""
-        if not nome_pasta:
+        if not nome_pasta or nome_pasta in vistas:
             continue
+        vistas.add(nome_pasta)
         arquivo = raiz / nome_pasta / "SKILL.md"
         skill = _ler(arquivo, "global", estado)
         if skill is None:
             print(f"[koda] o catálogo lista '{nome_pasta}', mas {arquivo} não existe", flush=True)
             continue
+        achadas.append(skill)
+    for pasta in _pastas(raiz):
+        if pasta.name in vistas:
+            continue
+        skill = _ler(pasta / "SKILL.md", "global", estado)
+        if skill is None:
+            continue
+        print(
+            f"[koda] a skill '{pasta.name}' viajou no pacote mas não está no catálogo "
+            f"skills.json — listada no fim",
+            flush=True,
+        )
         achadas.append(skill)
     return achadas
 

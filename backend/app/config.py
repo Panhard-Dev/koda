@@ -199,17 +199,16 @@ class Settings(BaseSettings):
     lifecycle próprio do processo; subprocessos de execução direta são encerrados no prazo.
     """
     contexto_tokens: int = 1_000_000
-    """Quanto a conversa pode ocupar, em tokens, antes de ser compactada em resumo.
+    """Janela anunciada do modelo, em tokens, usada como base da compactação.
 
     O agente reenvia o histórico inteiro a cada passo. Num projeto grande isso vira o
     problema principal: cada saída de ferramenta entra na conta e, depois de dezenas de
-    passos, o pedido passa do que o provedor aceita — e a tarefa morre no meio. Ao chegar
-    neste teto, o que já foi resolvido é resumido (ver `contexto.py`).
+    passos, o pedido passa do que o provedor aceita — e a tarefa morre no meio. O Koda
+    começa a compactar em 60% do menor valor entre este teto e 64 mil tokens operacionais
+    (ver `contexto.py`), deixando espaço para ferramentas e erro de estimativa.
 
-    O padrão é **1 milhão**, que é a janela que os modelos do serviço aceitam. O teto
-    existe para o pedido não passar do que o provedor aguenta; compactar antes disso joga
-    fora contexto que ainda cabia — era o defeito do padrão antigo, de 200 mil. **Zero**
-    desliga a compactação: o histórico vai inteiro, como antes.
+    O padrão é **1 milhão**, a janela anunciada dos modelos do serviço. **Zero** desliga
+    a compactação: o histórico vai inteiro.
     """
 
     # Busca na web: só o Bing, raspando a página de resultados. Sem chave, sem serviço
@@ -233,13 +232,18 @@ class Settings(BaseSettings):
     """Modelo padrão do serviço, para id que ele não reconheça (ou vazio)."""
 
     host_modelos_com_visao: str = Field(
-        default="liz-4,liz-3-flash,koda-1,layze-2,liz-nano,nable-4-mini-preview",
+        default="liz-4-5-super,liz-3-flash,liz-mini-1-3,koda-1,layze-2,liz-nano,nable-4-mini-preview",
         validation_alias=AliasChoices("KODA_HOST_VISAO", "HOST_VISAO"),
     )
     """Ids do host que **enxergam imagem**, separados por vírgula — lista **curada**.
 
     O host publica `images` por modelo em `/v1/models`, e esta lista é a segunda opinião:
     mandar imagem para quem não enxerga derruba o pedido inteiro, então quem decide é ela.
+
+    Atualizada em 16/10/2026 lendo o catálogo ao vivo do host: **saiu** `liz-4` (o host o
+    trocou por `liz-4-5-super`), **entraram** `liz-4-5-super` e `liz-mini-1-3` (os dois
+    enxergam). Segue fora `liz-mini-2`, o único do catálogo com `images: false` — é a
+    exceção que justifica a lista existir.
 
     Ela é **medida**, e por isso envelhece. Medição de 10/10/2026 (sonda crua contra o
     upstream, com imagem): enxergam `big-pickle`, `space-bunny-free`, `mimo-v2.6`, os dois

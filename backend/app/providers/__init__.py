@@ -11,6 +11,7 @@ fazia o seletor oferecer os modelos da casa a um serviço que não os tem.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -123,6 +124,41 @@ class ComTeto:
             await LIMITE_DE_REQUISICOES.esperar()
         except TetoAtingido as cheio:
             raise ProviderError(MSG_DO_TETO.format(n=cheio.por_minuto)) from cheio
+
+    async def reconectar(self, erro: BaseException) -> bool:
+        """Reergue o host em erro de rede para a próxima tentativa do mesmo passo.
+
+        No app instalado, o vigia do shell é quem sobe o processo; em desenvolvimento,
+        o backend pode abrir o `c-host` local. A espera curta também cobre o tempo em que
+        o vigia instalado nota a queda. Erros HTTP como 429/500 não iniciam outro host.
+        """
+        provedor = self._provider
+        if isinstance(provedor, HostProvider):
+            causa: BaseException | None = erro
+            while causa is not None and not isinstance(causa, httpx.HTTPError):
+                causa = causa.__cause__ or causa.__context__
+            if causa is None:
+                return False
+
+            settings = provedor.settings
+            if not host_boot.dono_e_o_shell():
+                await asyncio.to_thread(host_boot.subir, settings)
+
+            for _ in range(24):
+                if await asyncio.to_thread(host_disponivel, settings, 0.5):
+                    return True
+                await asyncio.sleep(0.5)
+            return False
+
+        # O host podia já estar fora quando o chat começou, fazendo `auto` escolher o
+        # provider local. A tarefa continua viva; tenta trocar a implementação assim que
+        # o mesmo processo subir, sem exigir que a pessoa reenvie a mensagem.
+        if isinstance(provedor, LocalProvider) and provedor.settings.provider == "auto":
+            escolhido = await asyncio.to_thread(build_provider, provedor.settings)
+            if escolhido.name != "local":
+                self._provider = escolhido.desembrulhar()
+                return True
+        return False
 
     async def stream(
         self, turns: list[ChatTurn], options: ChatOptions

@@ -37,6 +37,21 @@ export const PLANO_FREE: Plano = {
   moedasRenovamNoDia: 1,
 }
 
+/**
+ * Dados mínimos do plano que podem conceder benefícios à conta.
+ *
+ * O painel pode continuar devolvendo os números de um plano depois que a assinatura foi
+ * cancelada. Esses números descrevem o plano, mas não significam que ele ainda vale.
+ */
+export type PlanoComStatus = {
+  status: 'pendente' | 'ativa' | 'atrasada' | 'cancelada'
+}
+
+/** Mantém os benefícios apenas enquanto a assinatura estiver ativa ou atrasada. */
+export function planoParaBeneficios<T extends PlanoComStatus | null>(plano: T): T | null {
+  return plano?.status === 'ativa' || plano?.status === 'atrasada' ? plano : null
+}
+
 /** Um plano que se assina: o que ele dá, mais o que ele custa. */
 export type PlanoPago = Plano & {
   /**

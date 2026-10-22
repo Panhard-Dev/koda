@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Koda",
-  "version": "0.6.9",
+  "version": "0.7.6",
   "identifier": "app.koda.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,9 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$HOME/**"],
+          "allow": [
+            "$HOME/**"
+          ],
           "deny": [
             "$HOME/.ssh/**",
             "$HOME/.aws/**",
@@ -45,7 +47,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "publisher": "KodaStudio.org",
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "resources": {
       "../host/c-host.exe": "host/c-host.exe",
       "../mcp": "mcp",
@@ -62,6 +68,10 @@
     ],
     "licenseFile": "../LICENSE",
     "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
@@ -69,12 +79,18 @@
         "headerImage": "installer/header.bmp",
         "uninstallerHeaderImage": "installer/header.bmp",
         "installMode": "currentUser",
-        "languages": ["PortugueseBR"],
+        "languages": [
+          "PortugueseBR"
+        ],
         "customLanguageFiles": {
           "PortugueseBR": "installer/PortugueseBR.nsh"
         },
         "installerHooks": "installer/hooks.nsh",
+        "template": "installer/installer.nsi",
         "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "pt-BR"
       }
     }
   }

@@ -61,6 +61,17 @@ use servicos::{Papel, Servicos};
 /// só na memória do backend.
 const URL_DO_PAINEL: &str = "https://koda-cloud-api.studiosluxgames.workers.dev";
 
+/// Chave que abre a configuração selada dentro do `c-host.exe` (modelos, relays
+/// e personas, em `secrets.enc`).
+///
+/// Desde 18/10/2026 o host **não carrega esta chave dentro dele**: lê de
+/// `SERVE_LIZ_BLOB_KEY` no ambiente e, sem ela, não sobe (fail-closed). Ela fica
+/// aqui porque o host não funciona sem ela — a configuração selada já viaja
+/// dentro do binário, e a chave precisa acompanhar, senão nada abre. Quém copia
+/// só o `c-host.exe` continua sem conseguir abrir a config sozinho: é o app quem
+/// entrega a chave ao subir o host.
+const CHAVE_DA_CONFIG_SELADA: &str = "5b32d14288b278d1ebd71775ebfd7d504434914bdd025ae9";
+
 /// Diagnóstico em arquivo: no modo `windows_subsystem`, o stdout não existe.
 /// O log fica em `%TEMP%\koda-desktop.log` — apagar à vontade.
 pub(crate) fn log(mensagem: &str) {
@@ -361,6 +372,8 @@ fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
     let painel = std::env::var("KODA_CLOUD_URL").unwrap_or_else(|_| URL_DO_PAINEL.to_string());
     log(&format!("host vai autorizar contra {painel}"));
     comando.env("SERVE_LIZ_AUTH_URL", painel);
+    // Sem a chave da config selada o host não sobe — ver `CHAVE_DA_CONFIG_SELADA`.
+    comando.env("SERVE_LIZ_BLOB_KEY", CHAVE_DA_CONFIG_SELADA);
     comando.stdout(Stdio::null()).stderr(Stdio::null());
 
     match spawn_oculto(&mut comando) {

@@ -56,7 +56,7 @@ import {
   LimparDestaque,
   apagado,
   tom,
-  usarInteracao,
+  useInteracao,
 } from './BlocosInteracao'
 import type { Interacao } from './BlocosInteracao'
 
@@ -211,7 +211,7 @@ function ComBalao({ interacao, children }: { interacao: Interacao; children: Rea
 // ---------------------------------------------------------------- barras
 
 function Barras({ dados, horizontal }: { dados: Ponto[]; horizontal?: boolean }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const maximo = Math.max(...dados.map((d) => Math.abs(d.valor)), 1)
   const maior = Math.max(...dados.map((d) => d.rotulo.length), 3)
   const dica = (d: Ponto) => ({ titulo: d.rotulo, valor: d.valor.toLocaleString('pt-BR') })
@@ -288,7 +288,7 @@ function Barras({ dados, horizontal }: { dados: Ponto[]; horizontal?: boolean })
 // ---------------------------------------------------------------- barras empilhadas
 
 function Empilhadas({ dados, series }: { dados: Ponto[]; series: string[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   // Cada barra tem um total; a fatia de cada série é `valor` (série 0) ou `valor2`.
   const totais = dados.map((d) => Math.abs(d.valor) + Math.abs(d.valor2 ?? 0))
   const maximo = Math.max(...totais, 1)
@@ -350,7 +350,7 @@ function Empilhadas({ dados, series }: { dados: Ponto[]; series: string[] }) {
 
 function Linhas({ dados, area }: { dados: Ponto[]; area?: boolean }) {
   const identificador = useId().replace(/:/g, '')
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   if (dados.length < 2) return <Barras dados={dados} horizontal />
 
   const L = 100
@@ -432,7 +432,7 @@ function Linhas({ dados, area }: { dados: Ponto[]; area?: boolean }) {
 // ---------------------------------------------------------------- pizza / rosca
 
 function Pizza({ dados, rosca }: { dados: Ponto[]; rosca?: boolean }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const total = dados.reduce((soma, d) => soma + Math.abs(d.valor), 0)
   if (total <= 0) return <Barras dados={dados} horizontal />
 
@@ -511,7 +511,7 @@ function Pizza({ dados, rosca }: { dados: Ponto[]; rosca?: boolean }) {
 // ---------------------------------------------------------------- dispersão e bolha
 
 function Dispersao({ dados, bolha }: { dados: Ponto[]; bolha?: boolean }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   if (dados.length < 2) return <Barras dados={dados} horizontal />
 
   const xs = dados.map((d) => d.valor)
@@ -589,7 +589,7 @@ function Dispersao({ dados, bolha }: { dados: Ponto[]; bolha?: boolean }) {
 // ---------------------------------------------------------------- radar
 
 function Radar({ dados }: { dados: Ponto[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   if (dados.length < 3) return <Barras dados={dados} horizontal />
 
   const maximo = Math.max(...dados.map((d) => Math.abs(d.valor)), 1)
@@ -666,7 +666,7 @@ function Radar({ dados }: { dados: Ponto[] }) {
 // ---------------------------------------------------------------- timeline
 
 function Timeline({ dados }: { dados: Ponto[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   if (!dados.length) return <Barras dados={dados} horizontal />
 
   return (
@@ -713,7 +713,7 @@ function Timeline({ dados }: { dados: Ponto[] }) {
 // ---------------------------------------------------------------- sankey
 
 function Sankey({ fluxos }: { fluxos: Elo[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   if (!fluxos.length) return <NaoEntendi motivo="não achei fluxos" bruto="" />
 
   // Colunas por profundidade: quem só aparece como origem fica na primeira, quem só
@@ -802,7 +802,7 @@ function Sankey({ fluxos }: { fluxos: Elo[] }) {
 // ---------------------------------------------------------------- mapa mental
 
 function MapaMental({ raiz, lista }: { raiz: Ramo; lista: Ramo[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const cor = useId().replace(/:/g, '')
 
   const galho = (ramo: Ramo, chave: string, nivel: number): ReactNode => {
@@ -860,7 +860,7 @@ function MapaMental({ raiz, lista }: { raiz: Ramo; lista: Ramo[] }) {
 // ---------------------------------------------------------------- fluxo / passos
 
 function Fluxo({ passos }: { passos: Passo[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   return (
     <ComBalao interacao={interacao}>
       <ol className="flex flex-col">
@@ -901,7 +901,7 @@ function Fluxo({ passos }: { passos: Passo[] }) {
 // ---------------------------------------------------------------- comparação
 
 function Comparacao({ colunas }: { colunas: { titulo: string; itens: string[] }[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   return (
     <ComBalao interacao={interacao}>
       <div className="grid min-w-0 gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]">
@@ -931,10 +931,701 @@ function Comparacao({ colunas }: { colunas: { titulo: string; itens: string[] }[
   )
 }
 
+// ---------------------------------------------------------------- comparação em matriz
+
+/** Um item da comparação: o nome, a ficha (atributo → valor) e se é o recomendado. */
+type ItemComparado = { nome: string; valores: Record<string, string>; recomendado: boolean }
+
+/** Onde a IA costuma pôr o nome do item. */
+const NOMES_DO_ITEM = ['nome', 'titulo', 'label', 'produto', 'modelo', 'item']
+
+/** Onde ela costuma pôr a ficha, quando não achata os campos no próprio item. */
+const FICHAS_DO_ITEM = ['valores', 'especificacoes', 'ficha', 'atributos', 'dados', 'caracteristicas']
+
+/** Um valor de ficha: número e booleano viram texto; objeto e lista não são valor. */
+function valorDaFicha(valor: unknown): string {
+  if (typeof valor === 'string') return valor
+  if (typeof valor === 'number' || typeof valor === 'boolean') return String(valor)
+  return ''
+}
+
+/**
+ * Lê a matriz de comparação de qualquer formato que a IA mandar.
+ *
+ * O formato preferido é `{ itens: [{ nome, valores: {...} }] }`, mas o modelo também
+ * escreve a ficha **achatada** (`{ nome: "Celular 2", Preço: "R$ 3.499" }`) e chama as
+ * chaves de `produtos`, `opcoes` ou `especificacoes`. Nada disso pode virar bloco morto:
+ * é a diferença entre "a IA tentou comparar" e "a comparação apareceu".
+ */
+function itensComparados(bruto: unknown): ItemComparado[] {
+  if (!Array.isArray(bruto)) return []
+  const itens: ItemComparado[] = []
+  bruto.forEach((item, i) => {
+    if (typeof item === 'string') {
+      const nome = item.trim()
+      if (nome) itens.push({ nome, valores: {}, recomendado: false })
+      return
+    }
+    if (typeof item !== 'object' || item === null) return
+    const o = item as Record<string, unknown>
+    const nome =
+      NOMES_DO_ITEM.map((campo) => texto(o[campo]).trim()).find(Boolean) || `Opção ${i + 1}`
+
+    const valores: Record<string, string> = {}
+    for (const campo of FICHAS_DO_ITEM) {
+      const dentro = o[campo]
+      if (typeof dentro !== 'object' || dentro === null || Array.isArray(dentro)) continue
+      for (const [atributo, valor] of Object.entries(dentro as Record<string, unknown>)) {
+        const lido = valorDaFicha(valor)
+        if (atributo.trim() && lido) valores[atributo.trim()] = lido
+      }
+    }
+    // Ficha achatada: o que sobra no item e não é nome, ficha nem selo é atributo.
+    for (const [campo, valor] of Object.entries(o)) {
+      if (NOMES_DO_ITEM.includes(campo) || FICHAS_DO_ITEM.includes(campo)) continue
+      if (campo === 'recomendado' || campo === 'melhor' || campo === 'destaque') continue
+      const lido = valorDaFicha(valor)
+      if (lido && !(campo in valores)) valores[campo] = lido
+    }
+
+    const recomendado = o.recomendado === true || o.melhor === true || o.destaque === true
+    itens.push({ nome, valores, recomendado })
+  })
+  return itens
+}
+
+/** A ordem das linhas: a que a IA pediu, ou a união dos atributos na ordem em que vieram. */
+function atributosDe(pedidos: unknown, itens: ItemComparado[]): string[] {
+  const lista = Array.isArray(pedidos)
+    ? pedidos.map((item) => texto(item).trim()).filter(Boolean)
+    : []
+  const todos = [...new Set(itens.flatMap((item) => Object.keys(item.valores)))]
+  if (!lista.length) return todos
+  // Atributo pedido que ninguém tem continua aparecendo, com a célula vazia: sumir com o
+  // atributo que a pessoa pediu para comparar é pior do que mostrar que falta o dado.
+  return [...new Set([...lista, ...todos])]
+}
+
+/** Quem ganha cada linha: aceita o nome do item ou a posição dele na lista. */
+function destaquesDe(bruto: unknown, itens: ItemComparado[]): Record<string, string> {
+  if (typeof bruto !== 'object' || bruto === null || Array.isArray(bruto)) return {}
+  const saida: Record<string, string> = {}
+  for (const [atributo, alvo] of Object.entries(bruto as Record<string, unknown>)) {
+    const nome =
+      typeof alvo === 'number' ? itens[alvo]?.nome ?? '' : texto(alvo).trim()
+    if (nome) saida[atributo.trim()] = nome
+  }
+  return saida
+}
+
+/**
+ * A comparação de verdade: N itens nas colunas, os mesmos atributos nas linhas.
+ *
+ * ## Por que existe, se já havia `comparacao`
+ *
+ * O `comparacao` de antes é "duas listas lado a lado" (prós e contras): cada coluna tem um
+ * título e marcadores soltos. Quando a pessoa pergunta "qual desses três celulares eu levo",
+ * a IA tentava responder com aquilo — e saía uma coluna com "R$ 3.499" e outra com "bateria
+ * boa", nada alinhado. Comparar ficha de produto exige **linha = atributo**, e era isso que
+ * não existia. O bloco é o mesmo (`koda-comparacao`), com `atributos` + `itens`.
+ *
+ * ## A leitura é por coluna
+ *
+ * Passar o mouse em qualquer célula acende a **coluna inteira** e apaga as outras — comparar
+ * é olhar um candidato de ponta a ponta, e célula a célula não ajuda nisso. O balão mostra o
+ * par atributo/valor exato que está embaixo do mouse.
+ */
+function TabelaComparativa({
+  itens,
+  atributos,
+  destaques,
+}: {
+  itens: ItemComparado[]
+  atributos: string[]
+  destaques: Record<string, string>
+}) {
+  const interacao = useInteracao()
+
+  return (
+    <ComBalao interacao={interacao}>
+      <div className="min-w-0 overflow-x-auto">
+        <table className="w-full border-collapse text-[12.5px]">
+          <thead>
+            <tr>
+              <th
+                scope="col"
+                className="sticky left-0 z-10 border-b border-koda-fg/15 bg-koda-bg px-2 py-2 text-left text-[10.5px] font-medium tracking-wide text-koda-fg/35 uppercase"
+              >
+                {itens.length} opções
+              </th>
+              {itens.map((item, i) => {
+                const chave = `cmp${i}`
+                const p = interacao.props(chave, {
+                  titulo: item.nome,
+                  detalhe: `${atributos.length} atributos`,
+                })
+                return (
+                  <th
+                    key={i}
+                    scope="col"
+                    {...p}
+                    style={{ ...p.style, opacity: apagado(interacao, chave) ? 0.3 : 1 }}
+                    className={`border-b border-koda-fg/15 px-2.5 py-2 text-left align-bottom ${
+                      item.recomendado ? 'bg-koda-accent/[0.07]' : ''
+                    }`}
+                  >
+                    <span
+                      className={`block text-[12.5px] font-semibold ${
+                        item.recomendado ? 'text-koda-accent' : 'text-koda-fg/85'
+                      }`}
+                    >
+                      {item.nome}
+                    </span>
+                    {item.recomendado ? (
+                      <span className="mt-1 inline-block rounded-full bg-koda-accent/15 px-1.5 py-0.5 text-[9.5px] font-medium tracking-wide text-koda-accent uppercase">
+                        recomendado
+                      </span>
+                    ) : null}
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {atributos.map((atributo) => (
+              <tr key={atributo} className="align-top">
+                <th
+                  scope="row"
+                  className="sticky left-0 z-10 border-b border-koda-fg/8 bg-koda-bg px-2 py-1.5 text-left text-[11.5px] font-medium whitespace-nowrap text-koda-fg/45"
+                >
+                  {atributo}
+                </th>
+                {itens.map((item, i) => {
+                  const chave = `cmp${i}`
+                  const valor = item.valores[atributo] ?? '—'
+                  const venceu = destaques[atributo] === item.nome
+                  const p = interacao.props(chave, {
+                    titulo: `${item.nome} · ${atributo}`,
+                    detalhe: valor,
+                  })
+                  return (
+                    <td
+                      key={i}
+                      {...p}
+                      style={{ ...p.style, opacity: apagado(interacao, chave) ? 0.3 : 1 }}
+                      className={`border-b border-koda-fg/8 px-2.5 py-1.5 whitespace-nowrap ${
+                        venceu ? 'font-semibold text-koda-accent' : 'text-koda-fg/75'
+                      } ${item.recomendado ? 'bg-koda-accent/[0.04]' : ''}`}
+                    >
+                      {valor}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ComBalao>
+  )
+}
+
+// ---------------------------------------------------------------- diagrama de traço
+
+/**
+ * Glifos que **desenham** em vez de escrever: caixa, seta e marca.
+ *
+ * A distinção é o que faz o diagrama virar desenho: o traço fica em cor de traço e o texto
+ * fica em cor de texto. Sem isso, o ASCII do modelo é uma parede de caracteres iguais — que
+ * é exatamente o que o dono apontou nas fotos dele (20/10/2026).
+ */
+const GLIFO_CAIXA = /[─│┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╠╣╦╩╬|]/
+const GLIFO_SETA = /[→←↑↓▼▲◀▶►◄]/
+
+/**
+ * A linha inteira é borda? (`+----+`, `|    |`, `=====`)
+ *
+ * `-` só entra como traço quando a linha **só** tem traço: no meio de um texto ele é hífen
+ * ou marcador de lista, e pintar aquilo de cor de desenho sujaria a leitura.
+ */
+function ehBorda(linha: string): boolean {
+  const limpa = linha.replace(/\s/g, '')
+  if (!limpa) return false
+  return /^[+\-=|]+$/.test(limpa) && (limpa.length >= 2 || limpa === '|')
+}
+
+/** Um pedaço da linha, já sabendo se é traço, seta ou texto. */
+function pedacosDaLinha(linha: string): { tipo: 'caixa' | 'seta' | 'texto'; texto: string }[] {
+  const borda = ehBorda(linha)
+  const pedacos: { tipo: 'caixa' | 'seta' | 'texto'; texto: string }[] = []
+  let atual = ''
+  let tipoAtual: 'caixa' | 'seta' | 'texto' = 'texto'
+  const fechar = () => {
+    if (atual) pedacos.push({ tipo: tipoAtual, texto: atual })
+    atual = ''
+  }
+  for (const caractere of linha) {
+    const tipo = GLIFO_SETA.test(caractere)
+      ? 'seta'
+      : borda || GLIFO_CAIXA.test(caractere)
+        ? 'caixa'
+        : 'texto'
+    if (tipo !== tipoAtual) {
+      fechar()
+      tipoAtual = tipo
+    }
+    atual += caractere
+  }
+  fechar()
+  return pedacos
+}
+
+/**
+ * O diagrama de traço, desenhado com cuidado tipográfico.
+ *
+ * ## Por que não é só um bloco de código
+ *
+ * O modelo já sabe desenhar caixa e seta com `┌ ─ │ ▼` — o que ele não sabe é que aquilo
+ * **é um desenho**. Num `<pre>` cinza, o diagrama lê igual a código, e a pessoa precisa
+ * decifrar. Aqui o traço sai na cor de destaque, a seta mais forte que a caixa, e o texto
+ * no tom normal: o olho separa a estrutura do conteúdo sem ninguém explicar.
+ *
+ * ## O alinhamento é sagrado
+ *
+ * `whitespace-pre` + `font-mono` + `leading` fixo: o desenho é uma grade de caracteres, e
+ * qualquer quebra de linha ou fonte proporcional desmonta a caixa. Em tela estreita a
+ * moldura rola na horizontal — nunca reflui o desenho.
+ */
+function Diagrama({ linhas }: { linhas: string[] }) {
+  const interacao = useInteracao()
+  return (
+    <ComBalao interacao={interacao}>
+      <div className="min-w-0 overflow-x-auto rounded-xl bg-koda-fg/[0.035] p-3 ring-1 ring-koda-fg/8">
+        <pre className="koda-diagrama text-[12px] leading-[1.5] whitespace-pre">
+          {linhas.map((linha, i) => {
+            const chave = `dg${i}`
+            const p = interacao.props(chave, { titulo: `linha ${i + 1}`, detalhe: linha.trim() })
+            return (
+              <div
+                key={i}
+                {...p}
+                style={{ ...p.style, opacity: apagado(interacao, chave) ? 0.3 : 1 }}
+                className="transition-opacity"
+              >
+                {linha
+                  ? pedacosDaLinha(linha).map((pedaco, j) => (
+                      <span
+                        key={j}
+                        className={
+                          pedaco.tipo === 'seta'
+                            ? 'text-koda-accent'
+                            : pedaco.tipo === 'caixa'
+                              ? 'text-koda-accent/50'
+                              : 'text-koda-fg/80'
+                        }
+                      >
+                        {pedaco.texto}
+                      </span>
+                    ))
+                  : '\u00A0'}
+              </div>
+            )
+          })}
+        </pre>
+      </div>
+    </ComBalao>
+  )
+}
+
+// ---------------------------------------------------------------- diagrama em colunas
+
+/** Um bloco dentro de uma coluna: título, linhas de detalhe e o tom. */
+type CaixaDoDiagrama = {
+  titulo: string
+  linhas: string[]
+  tom: 'neutro' | 'atencao' | 'erro' | 'ok'
+}
+
+/** Uma coluna do diagrama: o título em cima e as caixas empilhadas. */
+type ColunaDoDiagrama = { titulo: string; caixas: CaixaDoDiagrama[] }
+
+/**
+ * A cor da caixa pelo tom. Função, e não mapa constante: `TONS_DE_AVISO` é declarado mais
+ * abaixo no arquivo, e um mapa montado no topo leria a variável antes de ela existir.
+ */
+function classeDaCaixa(tom: CaixaDoDiagrama['tom']): string {
+  if (tom === 'atencao') return TONS_DE_AVISO.aviso
+  if (tom === 'erro') return TONS_DE_AVISO.erro
+  if (tom === 'ok') return 'border-emerald-400/40 bg-emerald-400/[0.08]'
+  return 'border-koda-fg/12 bg-koda-fg/[0.04]'
+}
+
+/** O tom que veio escrito — `atencao`/`aviso`/`erro`/`ok`, em português ou inglês. */
+function tomDaCaixa(bruto: unknown): CaixaDoDiagrama['tom'] {
+  const t = texto(bruto).toLowerCase()
+  if (t === 'ok' || t === 'bom' || t === 'verde' || t === 'sucesso') return 'ok'
+  if (t === 'erro' || t === 'ruim' || t === 'vermelho' || t === 'falha') return 'erro'
+  if (t === 'atencao' || t === 'atenção' || t === 'aviso' || t === 'alerta') return 'atencao'
+  return 'neutro'
+}
+
+/**
+ * Lê as caixas de uma coluna (ou as notas do rodapé) de qualquer formato que a IA mandar.
+ *
+ * Aceita `{ titulo, linhas }`, `{ nome, texto }`, e a string solta. As linhas podem vir como
+ * lista ou como um texto com quebras — o modelo faz das duas formas, e nenhuma delas pode
+ * virar caixa vazia na tela.
+ */
+function caixasDoDiagrama(bruto: unknown): CaixaDoDiagrama[] {
+  if (!Array.isArray(bruto)) return []
+  return bruto
+    .map((item) => {
+      if (typeof item === 'string') {
+        const titulo = item.trim()
+        return titulo ? { titulo, linhas: [], tom: 'neutro' as const } : null
+      }
+      if (typeof item !== 'object' || item === null) return null
+      const o = item as Record<string, unknown>
+      const cru = o.linhas ?? o.itens ?? o.texto ?? o.detalhe ?? o.descricao
+      const linhas = Array.isArray(cru)
+        ? cru.map((linha) => texto(linha)).filter(Boolean)
+        : texto(cru)
+            .split('\n')
+            .map((linha) => linha.trim())
+            .filter(Boolean)
+      return {
+        titulo: texto(o.titulo ?? o.nome ?? o.label),
+        linhas,
+        tom: tomDaCaixa(o.tom ?? o.estado ?? o.nivel ?? o.cor),
+      }
+    })
+    .filter((caixa): caixa is CaixaDoDiagrama => caixa !== null)
+}
+
+function colunasDoDiagrama(bruto: unknown): ColunaDoDiagrama[] {
+  if (!Array.isArray(bruto)) return []
+  return bruto
+    .map((item, i) => {
+      if (typeof item !== 'object' || item === null) return null
+      const o = item as Record<string, unknown>
+      const caixas = caixasDoDiagrama(o.blocos ?? o.caixas ?? o.itens ?? o.dados)
+      if (!caixas.length) return null
+      return { titulo: texto(o.titulo ?? o.label ?? o.nome, `coluna ${i + 1}`), caixas }
+    })
+    .filter((coluna): coluna is ColunaDoDiagrama => coluna !== null)
+}
+
+/** A seta entre duas partes: horizontal na tela larga, vertical na estreita. */
+function SetaDoDiagrama({
+  rotulo,
+  direcao = 'direita',
+}: {
+  rotulo?: string
+  direcao?: 'direita' | 'baixo'
+}) {
+  return (
+    <div className="flex shrink-0 flex-col items-center justify-center gap-1 py-1">
+      {rotulo ? (
+        <span className="max-w-[130px] text-center text-[10px] leading-tight text-koda-fg/45">
+          {rotulo}
+        </span>
+      ) : null}
+      <svg
+        width="30"
+        height="10"
+        viewBox="0 0 30 10"
+        aria-hidden="true"
+        className={`text-koda-accent/80 ${
+          direcao === 'baixo' ? 'rotate-90' : 'rotate-90 lg:rotate-0'
+        }`}
+      >
+        <path d="M1 5h24" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        <path
+          d="M21 1.5 26 5l-5 3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </div>
+  )
+}
+
+function CaixaDoDiagramaView({ caixa }: { caixa: CaixaDoDiagrama }) {
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${classeDaCaixa(caixa.tom)}`}>
+      {caixa.titulo ? (
+        <p className="flex items-start gap-1.5 font-mono text-[12px] leading-snug font-semibold text-koda-fg/90">
+          {caixa.tom === 'ok' ? (
+            <span className="text-emerald-400" aria-hidden="true">
+              ✓
+            </span>
+          ) : null}
+          <span className="min-w-0">{caixa.titulo}</span>
+        </p>
+      ) : null}
+      {caixa.linhas.map((linha, i) => (
+        <p key={i} className="mt-0.5 text-[11.5px] leading-snug text-koda-fg/60">
+          {linha}
+        </p>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * O diagrama de arquitetura: colunas lado a lado, caixas empilhadas, seta no meio.
+ *
+ * ## Por que colunas, e não traço
+ *
+ * O `koda-diagrama` de traço resolve o desenho que a IA já sabe fazer à mão — mas ele
+ * carrega a limitação do desenho à mão: largura fixa de caractere, nada se adapta à tela, e
+ * o "problema" de cada caixa só aparece se o modelo escrever a palavra. Aqui o modelo manda
+ * a **estrutura** (coluna → caixas → tom) e o Koda desenha: a coluna estica, o tom pinta a
+ * caixa, a seta vira seta. É o mesmo dado que ele já manda; só que desenhado, e não
+ * digitado (pedido do dono em 20/10/2026, com o print da arquitetura em três colunas).
+ */
+function DiagramaDeColunas({ colunas, setas }: { colunas: ColunaDoDiagrama[]; setas: string[] }) {
+  const pecas: ReactNode[] = []
+  colunas.forEach((coluna, i) => {
+    pecas.push(
+      <div
+        key={`coluna-${i}`}
+        className="flex min-w-0 flex-1 flex-col gap-2 rounded-xl bg-koda-fg/[0.03] p-2.5 ring-1 ring-koda-fg/8"
+      >
+        <p className="px-1 text-[11.5px] font-semibold text-koda-fg/70">{coluna.titulo}</p>
+        {coluna.caixas.map((caixa, j) => (
+          <CaixaDoDiagramaView key={j} caixa={caixa} />
+        ))}
+      </div>,
+    )
+    if (i < colunas.length - 1) {
+      pecas.push(<SetaDoDiagrama key={`seta-${i}`} rotulo={setas[i]} />)
+    }
+  })
+  return <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-stretch">{pecas}</div>
+}
+
+/**
+ * Camadas: a mesma ideia das colunas, empilhada.
+ *
+ * Coluna é "quem fala com quem" na horizontal; camada é "o que está por baixo" — cliente,
+ * servidor, banco, disco. A leitura é de cima para baixo, e as caixas de cada camada ficam
+ * lado a lado porque são alternativas dentro dela (dois workers, dois bancos).
+ */
+function DiagramaDeCamadas({ camadas }: { camadas: ColunaDoDiagrama[] }) {
+  const pecas: ReactNode[] = []
+  camadas.forEach((camada, i) => {
+    pecas.push(
+      <div
+        key={`camada-${i}`}
+        className="flex min-w-0 flex-col gap-2 rounded-xl bg-koda-fg/[0.03] p-2.5 ring-1 ring-koda-fg/8"
+      >
+        <p className="px-1 text-[11.5px] font-semibold text-koda-fg/70">{camada.titulo}</p>
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+          {camada.caixas.map((caixa, j) => (
+            <div key={j} className="min-w-0 flex-1">
+              <CaixaDoDiagramaView caixa={caixa} />
+            </div>
+          ))}
+        </div>
+      </div>,
+    )
+    if (i < camadas.length - 1) pecas.push(<SetaDoDiagrama key={`seta-${i}`} direcao="baixo" />)
+  })
+  return <div className="flex min-w-0 flex-col gap-1">{pecas}</div>
+}
+
+/**
+ * Fluxo: caixas em sequência, com o rótulo no fio da seta.
+ *
+ * Diferente de `koda-passos`, que é uma lista numerada: aqui cada etapa é uma **caixa**, e a
+ * seta carrega a condição ("se o teste falhar", "depois do deploy"). Para bifurcação de
+ * verdade, o modo de traço resolve melhor — duas saídas desenhadas não cabem num fluxo
+ * linear sem virar adivinhação.
+ */
+function DiagramaDeFluxo({ passos, setas }: { passos: CaixaDoDiagrama[]; setas: string[] }) {
+  const pecas: ReactNode[] = []
+  passos.forEach((passo, i) => {
+    pecas.push(
+      <div key={`passo-${i}`} className="mx-auto w-full max-w-[540px]">
+        <CaixaDoDiagramaView caixa={passo} />
+      </div>,
+    )
+    if (i < passos.length - 1) {
+      pecas.push(<SetaDoDiagrama key={`seta-${i}`} rotulo={setas[i]} direcao="baixo" />)
+    }
+  })
+  return <div className="flex min-w-0 flex-col gap-1">{pecas}</div>
+}
+
+/**
+ * Matriz 2×2: dois eixos e quatro quadrantes.
+ *
+ * A ordem dos quadrantes é a de leitura: superior esquerdo, superior direito, inferior
+ * esquerdo, inferior direito. Os eixos aparecem como legenda acima e à direita — girar texto
+ * na vertical fica bonito em revista e ilegível numa conversa.
+ */
+function DiagramaDeMatriz({
+  quadrantes,
+  eixoX,
+  eixoY,
+}: {
+  quadrantes: CaixaDoDiagrama[]
+  eixoX: string
+  eixoY: string
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      {eixoY ? (
+        <p className="text-[10.5px] tracking-wide text-koda-fg/40 uppercase">↑ {eixoY}</p>
+      ) : null}
+      <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+        {quadrantes.slice(0, 4).map((quadrante, i) => (
+          <div
+            key={i}
+            className={`flex min-w-0 flex-col gap-1.5 rounded-xl border px-3 py-2.5 ${classeDaCaixa(quadrante.tom)}`}
+          >
+            <p className="text-[12px] font-semibold text-koda-fg/85">{quadrante.titulo}</p>
+            <ul className="flex flex-col gap-1">
+              {quadrante.linhas.map((linha, j) => (
+                <li key={j} className="flex gap-1.5 text-[11.5px] leading-snug text-koda-fg/65">
+                  <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-koda-fg/35" />
+                  <span className="min-w-0">{linha}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+      {eixoX ? (
+        <p className="text-right text-[10.5px] tracking-wide text-koda-fg/40 uppercase">
+          {eixoX} →
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/** As notas do rodapé, iguais em todos os formatos de diagrama. */
+function ComNotas({ notas, children }: { notas: CaixaDoDiagrama[]; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      {children}
+      {notas.length ? (
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+          {notas.map((nota, i) => (
+            <div key={i} className="min-w-0 flex-1">
+              <CaixaDoDiagramaView caixa={nota} />
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Qual diagrama desenhar — decidido pela **chave que veio**, não por um `tipo` a mais.
+ *
+ * `colunas` (horizontal), `camadas` (empilhado), `fluxo` (sequência) e `quadrantes` (matriz
+ * 2×2) são quatro desenhos diferentes do mesmo bloco. O modelo escolhe a forma que combina
+ * com o que ele tem a dizer, e não precisa aprender um nome novo a cada uma.
+ */
+function DiagramaEstruturado({ dados }: { dados: Record<string, unknown> }) {
+  const lista = (chave: unknown) => (Array.isArray(chave) ? chave.map((item) => texto(item)) : [])
+  const notas = caixasDoDiagrama(dados.notas)
+
+  const colunas = colunasDoDiagrama(dados.colunas)
+  if (colunas.length) {
+    return (
+      <ComNotas notas={notas}>
+        <DiagramaDeColunas colunas={colunas} setas={lista(dados.setas)} />
+      </ComNotas>
+    )
+  }
+  const camadas = colunasDoDiagrama(dados.camadas ?? dados.pilha)
+  if (camadas.length) {
+    return (
+      <ComNotas notas={notas}>
+        <DiagramaDeCamadas camadas={camadas} />
+      </ComNotas>
+    )
+  }
+  const passos = caixasDoDiagrama(dados.fluxo ?? dados.sequencia)
+  if (passos.length) {
+    return (
+      <ComNotas notas={notas}>
+        <DiagramaDeFluxo passos={passos} setas={lista(dados.setas)} />
+      </ComNotas>
+    )
+  }
+  const quadrantes = caixasDoDiagrama(dados.quadrantes)
+  if (quadrantes.length) {
+    return (
+      <ComNotas notas={notas}>
+        <DiagramaDeMatriz
+          quadrantes={quadrantes}
+          eixoX={texto(dados.eixo_x ?? dados.eixoX)}
+          eixoY={texto(dados.eixo_y ?? dados.eixoY)}
+        />
+      </ComNotas>
+    )
+  }
+  return null
+}
+
+/**
+ * `koda-diagrama` aceita as três formas que o modelo escreve:
+ *
+ * 1. o desenho **cru** (que é o natural — ele já desenha assim, com `┌ ─ │ ▼`);
+ * 2. o JSON `{ "titulo", "linhas": [...] }` quando quer título e legenda;
+ * 3. o JSON **estruturado** `{ "colunas": [{ "titulo", "blocos": [...] }] }`, que sai como
+ *    arquitetura em colunas — caixa, tom e seta desenhados, sem depender de fonte.
+ *
+ * Enquanto o bloco chega pela metade, o texto cru aparece como está: nada de cartão de erro
+ * piscando no meio do stream.
+ */
+export function DiagramaDeTexto({ fonte }: { fonte: string }) {
+  const bruto = fonte.trim()
+  let linhas: string[] = []
+  let titulo = ''
+  let legenda = ''
+  let estruturado: ReactNode = null
+  if (bruto.startsWith('{')) {
+    try {
+      const dados = JSON.parse(bruto) as Record<string, unknown>
+      estruturado = <DiagramaEstruturado dados={dados} />
+      const cru = dados.linhas ?? dados.texto ?? dados.diagrama ?? dados.ascii
+      linhas = Array.isArray(cru) ? cru.map((item) => texto(item)) : texto(cru).split('\n')
+      titulo = texto(dados.titulo ?? dados.title)
+      legenda = texto(dados.legenda ?? dados.rodape)
+    } catch {
+      // JSON pela metade: cai no texto cru abaixo, que é o que já está na tela.
+    }
+  }
+  if (estruturado) {
+    return (
+      <Moldura titulo={titulo} legenda={legenda}>
+        {estruturado}
+      </Moldura>
+    )
+  }
+  if (!linhas.some((linha) => linha.trim())) linhas = fonte.replace(/\n+$/, '').split('\n')
+  if (!linhas.some((linha) => linha.trim())) return null
+  return (
+    <Moldura titulo={titulo} legenda={legenda}>
+      <Diagrama linhas={linhas} />
+    </Moldura>
+  )
+}
+
 // ---------------------------------------------------------------- tabela
 
 function Tabela({ colunas, linhas }: { colunas: string[]; linhas: string[][] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   return (
     <ComBalao interacao={interacao}>
       <div className="min-w-0 overflow-x-auto">
@@ -1017,7 +1708,7 @@ function linhasDiff(bruto: unknown): LinhaDiff[] {
 }
 
 function Diffs({ arquivo, linhas }: { arquivo?: string; linhas: LinhaDiff[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const adds = linhas.filter((l) => l.tipo === 'add').length
   const dels = linhas.filter((l) => l.tipo === 'del').length
 
@@ -1093,7 +1784,7 @@ function nos(bruto: unknown, profundidade = 0): NoArvore[] {
 }
 
 function Arvore({ lista }: { lista: NoArvore[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
 
   const galho = (no: NoArvore, chave: string): ReactNode => {
     const pasta = (no.filhos?.length ?? 0) > 0
@@ -1151,7 +1842,7 @@ function cartoes(bruto: unknown): Cartao[] {
 }
 
 function Metrica({ lista }: { lista: Cartao[] }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
 
   return (
     <ComBalao interacao={interacao}>
@@ -1330,7 +2021,7 @@ function MapaRadial({
   centroSub?: string
   lista: NoRadial[]
 }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   const idBrilho = useId().replace(/:/g, '')
   const [selecionado, setSelecionado] = useState<number | null>(null)
 
@@ -1572,7 +2263,7 @@ function Plano({
   mudancas: Mudanca[]
   resultado?: string
 }) {
-  const interacao = usarInteracao()
+  const interacao = useInteracao()
   /**
    * A decisão do plano. Enquanto não decidida, o cartão termina nos dois botões —
    * **Fazer** (aceita e o agente começa) e **Desistir** (recusa). Depois de clicar, os
@@ -1708,36 +2399,147 @@ function Plano({
 
 // ---------------------------------------------------------------- o despacho
 
-export function desenhar(linguagem: string, bruto: string): ReactNode {
-  let dados: Record<string, unknown>
+/**
+ * O primeiro objeto JSON que **fecha** dentro do texto do bloco.
+ *
+ * Existe porque o modelo erra o JSON de um jeito específico: ele fecha o objeto e
+ * **continua escrevendo** logo depois — em 17/10/2026 saiu um plano com `...,"como":[...]}`
+ * seguido de `,{"arquivo":"package.json",...}` até o fim do bloco. O `JSON.parse` recusa o
+ * conjunto ("Extra data"), o bloco caía no `Codigo`, e o JSON cru aparecia na conversa com
+ * o cabeçalho KODA-VISUAL.
+ *
+ * Ler o primeiro objeto é o certo aqui, e não um atalho: o bloco declara o que é nas
+ * primeiras chaves (`tipo`, `titulo`), e o resto — quando existe — é o modelo emendando
+ * uma segunda estrutura que a interface não conhece. Desenhar o que fechou é melhor que
+ * mostrar código para quem pediu um desenho; o excedente não some da mensagem, só não
+ * vira desenho.
+ *
+ * O caminho rápido é o `JSON.parse` de sempre. A varredura só roda quando ele falha, e
+ * respeita strings e escapes para não se perder numa `}` dentro de um texto.
+ */
+export function primeiroObjeto(bruto: string): Record<string, unknown> | null {
+  const corpo = bruto.trim()
+  const aceitar = (valor: unknown): Record<string, unknown> | null =>
+    typeof valor === 'object' && valor !== null && !Array.isArray(valor)
+      ? (valor as Record<string, unknown>)
+      : null
+
   try {
-    dados = JSON.parse(bruto.trim()) as Record<string, unknown>
+    return aceitar(JSON.parse(corpo))
   } catch {
-    return <NaoEntendi motivo="o conteúdo não é um JSON válido" bruto={bruto} />
-  }
-  if (typeof dados !== 'object' || dados === null || Array.isArray(dados)) {
-    return <NaoEntendi motivo="o JSON precisa ser um objeto" bruto={bruto} />
+    // JSON torto: tenta o primeiro objeto completo, abaixo.
   }
 
-  const tipo = texto(dados.tipo ?? dados.type, linguagem.replace(/^koda-/, '')).toLowerCase()
-  // **Quiz por conteúdo, e não só por `tipo`.** O `base.py` ensinou a IA a escrever o
-  // JSON do quiz sem o campo `tipo` (é a única forma que ele documenta). Sem tipo, o
-  // `Desenho` caía no fallback `koda-visual` → `visual`, que não existe no switch — e
-  // o cartão amarelo «não conheço o tipo "visual"» aparecia em cada pergunta, mesmo
-  // com o JSON válido (visto em 16/10/2026). O quiz tem assinatura própria no conteúdo:
-  // `pergunta`/`enunciado` + `opcoes`. Quem tem essa forma é quiz, com ou sem `tipo`.
-  const temOpcoes = Array.isArray(dados.opcoes ?? dados.alternativas)
-  const ehQuiz = tipo === 'quiz' || tipo === 'pergunta' ||
-    (temOpcoes && (dados.pergunta ?? dados.enunciado) != null)
-  const tipoFinal = ehQuiz ? 'quiz' : tipo
-  return <Desenho tipo={tipoFinal} dados={dados} bruto={bruto} />
+  const inicio = corpo.indexOf('{')
+  if (inicio === -1) return null
+  let profundidade = 0
+  let emTexto = false
+  let escape = false
+  for (let i = inicio; i < corpo.length; i += 1) {
+    const caractere = corpo[i]
+    if (emTexto) {
+      if (escape) escape = false
+      else if (caractere === '\\') escape = true
+      else if (caractere === '"') emTexto = false
+      continue
+    }
+    if (caractere === '"') emTexto = true
+    else if (caractere === '{') profundidade += 1
+    else if (caractere === '}') {
+      profundidade -= 1
+      if (profundidade === 0) {
+        try {
+          return aceitar(JSON.parse(corpo.slice(inicio, i + 1)))
+        } catch {
+          return null
+        }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * O tipo, lido do **formato dos dados**, quando o modelo esqueceu de dizer qual é.
+ *
+ * A ordem vai da assinatura mais específica para a mais genérica, porque várias chaves se
+ * repetem entre desenhos (`linhas` é tabela, diff e diagrama; `colunas` é tabela, comparação
+ * e diagrama em colunas). Cada linha aqui é uma assinatura que **só** aquele desenho tem.
+ */
+function deduzirTipo(dados: Record<string, unknown>): string {
+  const lista = (chave: string) => (Array.isArray(dados[chave]) ? (dados[chave] as unknown[]) : [])
+
+  if ((dados.pergunta ?? dados.enunciado) != null && lista('opcoes').length) return 'quiz'
+  if (lista('cartoes').length) return 'metrica'
+  if (lista('fluxos').length) return 'sankey'
+  if (lista('ramos').length || dados.centro != null) return 'mapa'
+  if (lista('passos').length || lista('etapas').length) return 'passos'
+  if (lista('nos').length) return 'mapa-radial'
+
+  const colunas = lista('colunas')
+  const linhas = lista('linhas')
+
+  // `colunas` + `linhas` de arrays é tabela; de objetos com `blocos` é diagrama em colunas.
+  if (colunas.length && linhas.length && Array.isArray(linhas[0])) return 'tabela'
+  if (colunas.length && typeof colunas[0] === 'object' && colunas[0] !== null) {
+    const primeira = colunas[0] as Record<string, unknown>
+    if (Array.isArray(primeira.blocos ?? primeira.caixas)) return 'diagrama'
+    if (Array.isArray(primeira.itens)) return 'comparacao'
+  }
+
+  // `linhas` de texto é o desenho de traço; de objeto é diff.
+  if (linhas.length && typeof linhas[0] === 'string') return 'diagrama'
+  if (linhas.length && typeof linhas[0] === 'object') return 'diffs'
+
+  const itens = lista('itens')
+  if (itens.length && typeof itens[0] === 'object' && itens[0] !== null) {
+    const primeiro = itens[0] as Record<string, unknown>
+    if (primeiro.valores != null || primeiro.especificacoes != null || dados.atributos != null) {
+      return 'comparacao'
+    }
+    if (primeiro.filhos != null) return 'arvore'
+  }
+
+  const pontos = lista('dados')
+  if (pontos.length && typeof pontos[0] === 'object' && pontos[0] !== null) {
+    if ('rotulo' in (pontos[0] as Record<string, unknown>)) return 'barras'
+  }
+
+  if (dados.texto != null && (dados.tom != null || dados.titulo != null)) return 'citacao'
+  return ''
+}
+
+export function desenhar(linguagem: string, bruto: string): ReactNode {
+  const dados = primeiroObjeto(bruto)
+  if (!dados) {
+    return <NaoEntendi motivo="o conteúdo não é um JSON válido" bruto={bruto} />
+  }
+
+  const daCerca = linguagem.replace(/^koda-/, '').toLowerCase()
+  const declarado = texto(dados.tipo ?? dados.type).toLowerCase()
+
+  // **A cerca genérica não diz o desenho — os dados dizem.**
+  //
+  // `koda-visual` é a cerca de tudo que não tem cerca própria; quem escolhe o desenho é o
+  // `tipo` dentro do JSON. Quando o modelo esquece esse campo, o código usava o nome da
+  // cerca — e `visual` não existe no switch, então a resposta morria num cartão amarelo
+  // «não conheço o tipo "visual"» com o JSON cru embaixo. Aconteceu com o quiz (16/10/2026)
+  // e voltou em 20/10/2026 com métrica e tabela, em modelos diferentes: **o dado estava
+  // certo, faltava o rótulo**. Agora o formato do próprio dado resolve (`deduzirTipo`), e
+  // o cartão amarelo fica só para o que não tem forma reconhecível.
+  const tipo =
+    declarado === 'pergunta'
+      ? 'quiz'
+      : declarado || (daCerca === 'visual' ? deduzirTipo(dados) : daCerca)
+
+  return <Desenho tipo={tipo || daCerca} dados={dados} bruto={bruto} />
 }
 
 /**
  * O componente que escolhe o desenho.
  *
  * É um componente, e não um `switch` dentro de `desenhar`, por causa das **regras dos
- * hooks**: cada gráfico chama `usarInteracao()` para ter o próprio balão, e chamar isso
+ * hooks**: cada gráfico chama `useInteracao()` para ter o próprio balão, e chamar isso
  * dentro de um `switch` faria a contagem de hooks mudar entre renderizações — o React
  * recusa, e com razão. Como componente, o hook de cada desenho nasce e morre com ele.
  */
@@ -1897,21 +2699,54 @@ function Desenho({
 
     case 'comparacao':
     case 'comparar':
+    case 'comparativo':
     case 'versus': {
-      const cru = dados.colunas ?? dados.itens ?? dados.dados
+      const cru = dados.itens ?? dados.produtos ?? dados.opcoes ?? dados.colunas ?? dados.dados
+      // Ficha de produto vem primeiro: é o formato que a IA usa quando a pergunta é "qual
+      // desses eu levo". Sem atributo nenhum (só marcadores por coluna), cai nas listas.
+      const itens = itensComparados(cru)
+      const atributos = atributosDe(dados.atributos ?? dados.campos ?? dados.linhas, itens)
+      if (itens.length && atributos.length) {
+        const destaques = destaquesDe(
+          dados.destaques ?? dados.melhores ?? dados.vencedores,
+          itens,
+        )
+        return moldura(
+          <TabelaComparativa itens={itens} atributos={atributos} destaques={destaques} />,
+        )
+      }
       const colunas = Array.isArray(cru)
         ? cru
             .map((item) => {
               if (typeof item !== 'object' || item === null) return null
               const o = item as Record<string, unknown>
               const dentro = o.itens ?? o.contents ?? o.lista
-              const itens = Array.isArray(dentro) ? dentro.map((x) => texto(x)) : []
-              return { titulo: texto(o.titulo ?? o.label ?? o.nome), itens }
+              const lista = Array.isArray(dentro) ? dentro.map((x) => texto(x)) : []
+              return { titulo: texto(o.titulo ?? o.label ?? o.nome), itens: lista }
             })
             .filter((c): c is { titulo: string; itens: string[] } => c !== null)
         : []
-      if (!colunas.length) return <NaoEntendi motivo="não achei `colunas`" bruto={bruto} />
+      if (!colunas.length) return <NaoEntendi motivo="não achei `itens` nem `colunas`" bruto={bruto} />
       return moldura(<Comparacao colunas={colunas} />)
+    }
+
+    case 'diagrama':
+    case 'ascii':
+    case 'fluxograma': {
+      // Arquitetura/camadas/fluxo/matriz: o modelo mandou a estrutura, o desenho é do Koda.
+      const estruturado = <DiagramaEstruturado dados={dados} />
+      if (estruturado) return moldura(estruturado)
+      const cru = dados.linhas ?? dados.texto ?? dados.diagrama ?? dados.ascii
+      const linhas = Array.isArray(cru) ? cru.map((item) => texto(item)) : texto(cru).split('\n')
+      if (!linhas.some((linha) => linha.trim())) {
+        return (
+          <NaoEntendi
+            motivo="o diagrama precisa de `linhas`, `colunas`, `camadas`, `fluxo` ou `quadrantes`"
+            bruto={bruto}
+          />
+        )
+      }
+      return moldura(<Diagrama linhas={linhas} />)
     }
 
     case 'diffs':
@@ -2049,12 +2884,23 @@ function Desenho({
   }
 }
 
+/**
+ * As etiquetas de bloco que viram desenho em vez de código cru.
+ *
+ * `koda-plano` entra aqui porque é **o nome que o backend pede**: o portão do modo Plan
+ * manda o modelo apresentar o plano num bloco ```koda-plano``` (`EXIGIR_BLOCO_PLANO` em
+ * `agent/loop.py`). Fora desta lista o cartão não era desenhado — o JSON do plano aparecia
+ * cru na conversa, com o cabeçalho "KODA-PLANO" e as chaves à mostra (visto em 17/10/2026).
+ * O tipo sai do próprio nome (`koda-plano` → `plano`), então não precisa de campo `tipo`.
+ */
 export const LINGUAGENS = [
   'koda-grafico',
   'koda-mapa',
   'koda-passos',
   'koda-comparacao',
+  'koda-diagrama',
   'koda-visual',
+  'koda-plano',
 ] as const
 
 export function ehBlocoVisual(linguagem: string): boolean {

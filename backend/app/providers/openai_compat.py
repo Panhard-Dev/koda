@@ -113,7 +113,7 @@ def _texto_do_usuario(turno: Any) -> str:
     return str(getattr(turno, "text", "") or "")
 
 
-def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
+def conteudo_do_turno(turno: ChatTurn, *, incluir_raciocinio: bool = False) -> dict[str, Any]:
     """O turno no formato do provedor: `content` string, ou lista de partes com imagem.
 
     Sem imagem o corpo é idêntico ao de antes (uma string) — o caminho de visão não pode
@@ -144,15 +144,21 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
             "tool_call_id": turno.chamada_id or "",
             "content": turno.text,
         }
+    razao = (
+        {"reasoning_content": turno.reasoning_content}
+        if incluir_raciocinio and turno.role == "assistant" and turno.reasoning_content is not None
+        else {}
+    )
     if turno.chamadas:
         # `content` vazio vira `None`: é o que o formato espera de um turno que só chamou.
         return {
             "role": turno.role,
             "content": turno.text or None,
             "tool_calls": turno.chamadas,
+            **razao,
         }
     if not turno.imagens:
-        return {"role": turno.role, "content": turno.text}
+        return {"role": turno.role, "content": turno.text, **razao}
     partes: list[dict[str, Any]] = []
     if turno.text:
         partes.append({"type": "text", "text": turno.text})
@@ -163,7 +169,7 @@ def conteudo_do_turno(turno: ChatTurn) -> dict[str, Any]:
         # Só chega aqui um turno sem texto e sem imagem que escapou do filtro: um `content`
         # vazio é recusado por parte dos provedores.
         partes.append({"type": "text", "text": " "})
-    return {"role": turno.role, "content": partes}
+    return {"role": turno.role, "content": partes, **razao}
 
 
 def _identidade_pedida(historico: Iterable[Any]) -> bool:
@@ -322,8 +328,13 @@ class OpenAICompatibleProvider:
         messages += [conteudo_do_turno(turn) for turn in turns]
         return messages
 
-    def _erro(self, status: int, detalhe: str) -> ProviderError:
-        mensagem = f"O provedor respondeu {status}: {detalhe}"
+    def _historico_para_pedido(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return messages
+
+    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None) -> ProviderError:
+        mensagem = f"O provedor respondeu {status}{_medidas_do_pedido(payload)}: {detalhe.strip() or 'corpo da resposta vazio'}"
         return TransientProviderError(mensagem) if status in TRANSITORIOS else ProviderError(mensagem)
 
     async def esforco(self, reasoning: bool, modelo: str, escolha: str | None = None) -> str:
@@ -389,7 +400,7 @@ class OpenAICompatibleProvider:
                     json=payload,
                 ) as response:
                     if response.status_code >= 400:
-                        detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
+                        detalhe = (await response.aread()).decode("utf-8", "replace")
                         if ajustes < 2 and _recusou_esforco(detalhe):
                             proximo = self._proximo_esforco(
                                 payload.get("reasoning_effort"), modelo
@@ -398,7 +409,7 @@ class OpenAICompatibleProvider:
                                 payload["reasoning_effort"] = proximo
                                 ajustes += 1
                                 continue
-                        raise self._erro(response.status_code, detalhe)
+                        raise self._erro(response.status_code, detalhe, payload)
 
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -488,7 +499,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
             "stream": False,
-            "messages": messages,
+            "messages": self._historico_para_pedido(messages, tools),
             # Teto **generoso** de tokens de saída, e explícito. Os modelos de raciocínio
             # (o `liz-4`, o `layze-2`) gastam o orçamento **pensando**: medido, o `liz-4`
             # devolveu texto vazio com `max_tokens` 80 e 400 e só falou a partir de ~1000.
@@ -510,7 +521,7 @@ class OpenAICompatibleProvider:
             raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
         if response.status_code >= 400:
-            raise self._erro(response.status_code, response.text[:300])
+            raise self._erro(response.status_code, response.text, payload)
 
         try:
             dados = response.json()
@@ -524,6 +535,10 @@ class OpenAICompatibleProvider:
             raise TransientProviderError("resposta sem choices")
 
         mensagem = choices[0].get("message") or {}
+        # O raciocínio vem **fora** do `content`. Guardado aqui para o laço devolver o mesmo
+        # texto no próximo passo (ver `StepResult.reasoning_content`): é contrato de alguns
+        # provedores, não resposta — nada disto vai para a tela.
+        raciocinio_bruto = mensagem.get("reasoning_content")
         calls = [
             ToolCall(
                 id=str(item.get("id", "")),
@@ -544,6 +559,7 @@ class OpenAICompatibleProvider:
                 "total_tokens": int(uso.get("total_tokens", 0) or 0),
             },
             truncado=str(choices[0].get("finish_reason") or "") == "length",
+            reasoning_content=raciocinio_bruto if isinstance(raciocinio_bruto, str) else None,
         )
 
     async def step_streaming(
@@ -571,7 +587,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": modelo,
             "stream": True,
-            "messages": messages,
+            "messages": self._historico_para_pedido(messages, tools),
             # O teto de tokens de saída **faltava** aqui — e este é o caminho que o agente
             # usa de verdade. O `step()` (não-streaming) mandava `MAX_TOKENS_SAIDA`, então a
             # proteção contra resposta gigante não valia para a execução real.
@@ -588,6 +604,10 @@ class OpenAICompatibleProvider:
         #: `index` -> os pedaços daquela chamada. `extra` guarda o envelope opaco que veio
         #: junto (ver `_extra_do_item`), que é dict e não string — daí o `Any`.
         parciais: dict[int, dict[str, Any]] = {}
+        #: Os pedaços de `reasoning_content` desta tentativa, na ordem em que chegaram. É
+        #: lista (e não string) para o `clear()` do bloco de nova tentativa zerar tudo: um
+        #: retry que somasse ao anterior mandaria o raciocínio duplicado ao provedor.
+        raciocinio_bruto: list[str] = []
         uso: dict[str, Any] = {}
         motivo_de_fim = ""
         #: O stream anunciou o próprio fim? `[DONE]` é o marcador da OpenAI; `finish_reason` é
@@ -604,6 +624,7 @@ class OpenAICompatibleProvider:
             while True:
                 texto.clear()
                 parciais.clear()
+                raciocinio_bruto.clear()
                 uso.clear()
                 motivo_de_fim = ""
                 terminou = False
@@ -617,7 +638,7 @@ class OpenAICompatibleProvider:
                     json=payload,
                 ) as response:
                     if response.status_code >= 400:
-                        detalhe = (await response.aread()).decode("utf-8", "replace")[:300]
+                        detalhe = (await response.aread()).decode("utf-8", "replace")
                         if ajustes < 2 and _recusou_esforco(detalhe):
                             proximo = self._proximo_esforco(
                                 payload.get("reasoning_effort"), modelo
@@ -626,7 +647,7 @@ class OpenAICompatibleProvider:
                                 payload["reasoning_effort"] = proximo
                                 ajustes += 1
                                 continue
-                        raise self._erro(response.status_code, detalhe)
+                        raise self._erro(response.status_code, detalhe, payload)
 
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -652,6 +673,10 @@ class OpenAICompatibleProvider:
                         delta = escolha.get("delta") or {}
 
                         razao = delta.get("reasoning_content")
+                        # Só texto entra no eco. Campo nulo ou objeto (já visto em gateway
+                        # que normaliza o raciocínio) não é raciocínio para devolver.
+                        if isinstance(razao, str):
+                            raciocinio_bruto.append(razao)
                         if razao:
                             yield Piece(str(razao), reasoning=True)
                             if vigia.alimentar(str(razao)):
@@ -732,6 +757,10 @@ class OpenAICompatibleProvider:
             truncado=not laco_de_raciocinio
             and (motivo_de_fim == "length" or not (terminou or motivo_de_fim)),
             repetiu=laco_de_raciocinio,
+            # Lista vazia = o provedor não mandou raciocínio nenhum → ausência (`None`).
+            # Lista com `""` = ele mandou o campo vazio → devolve-se vazio, que é outra
+            # coisa para quem exige o campo na continuação.
+            reasoning_content="".join(raciocinio_bruto) if raciocinio_bruto else None,
         )
 
 
@@ -904,23 +933,53 @@ class HostProvider(OpenAICompatibleProvider):
             return self.settings.host_model
         return model
 
-    def _erro(self, status: int, detalhe: str) -> ProviderError:
+    def _messages(self, turns: list[ChatTurn], options: ChatOptions) -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": system_prompt(options)},
+            *(conteudo_do_turno(turn) for turn in turns),
+        ]
+
+    def _historico_para_pedido(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        # Conversas antigas não guardavam o campo. O host aceita uma marca vazia quando
+        # há ferramentas; preserve o texto original quando ele estiver disponível.
+        if not tools:
+            if not any("reasoning_content" in message for message in messages):
+                return messages
+            # O campo é parte do contrato de continuação com ferramentas; fora desse
+            # fluxo, mantenha o payload compatível com provedores que o rejeitam.
+            return [
+                {chave: valor for chave, valor in message.items() if chave != "reasoning_content"}
+                for message in messages
+            ]
+        return [
+            {**message, "reasoning_content": ""}
+            if message.get("role") == "assistant" and message.get("reasoning_content") is None
+            else message
+            for message in messages
+        ]
+
+    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None) -> ProviderError:
         motivo = _motivo_do_host(detalhe)
         if status in TRANSITORIOS_PROXY:
-            return TransientProviderError(f"o host respondeu {status}: {motivo}")
-        return ProviderError(f"o host respondeu {status}: {motivo}")
+            return TransientProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}")
+        return ProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}")
 
 
 def _motivo_do_host(detalhe: str) -> str:
-    """Erro do host em uma linha: JSON cru atrapalha quem está lendo o chat."""
-    try:
-        dados = json.loads(detalhe)
-    except (json.JSONDecodeError, TypeError):
-        return detalhe.strip()[:200]
-    mensagem = str((dados.get("error") or {}).get("message", detalhe))
-    if "429" in mensagem:
-        return "o host bateu no limite de cota (429)"
-    return mensagem[:200]
+    """Mantém o corpo integral: código e mensagem isolada ocultavam a causa do 400."""
+    return detalhe.strip() or "corpo da resposta vazio"
+
+
+def _medidas_do_pedido(payload: dict[str, Any] | None) -> str:
+    """Só tamanho e quantidade, sem registrar conteúdo ou credenciais."""
+    if payload is None:
+        return ""
+    tamanho = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    mensagens = len(payload.get("messages") or [])
+    unidade = "mensagem" if mensagens == 1 else "mensagens"
+    return f" (pedido: {tamanho} bytes, {mensagens} {unidade})"
 
 
 def _json_ou_vazio(valor: Any) -> dict[str, Any]:

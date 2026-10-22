@@ -27,40 +27,240 @@
 ; Os nomes das macros são os que o template do Tauri procura (`NSIS_HOOK_POSTINSTALL`).
 ; Trocar qualquer um deles faz o gancho deixar de rodar sem erro nenhum de compilação.
 
+!macro NSIS_HOOK_PREINSTALL
+  ; ---------------------------------------------------------------------------
+  ; O Koda aberto segura os arquivos da instalação anterior.
+  ;
+  ; Sem isso, quem atualiza por cima da versão velha vê "NSIS Error — Error
+  ; launching installer" e mais nada: o instalador não consegue substituir o que
+  ; está em uso e aborta antes de explicar. A pessoa não tem como saber que bastava
+  ; fechar o programa — e algumas desinstalam na mão, o que não devia ser
+  ; necessário para atualizar.
+  ;
+  ; Fecha a árvore inteira com /T: o `koda.exe` é pai do serviço local em Python e
+  ; do `c-host.exe`, então matar a árvore encerra os três de uma vez. Nada se
+  ; perde — conversas, banco e `mcps.json` ficam em
+  ; %APPDATA%\app.koda.desktop\data, que o instalador não substitui.
+  ;
+  ; Só age se havia instalação anterior: em máquina limpa não há o que fechar.
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    ; Um exe com atributo somente-leitura dá **a mesma** caixa — «Erro ao abrir o
+    ; arquivo para gravação» — sem que o programa esteja aberto. Tirar o atributo
+    ; custa uma linha e elimina a causa antes de culpar o processo.
+    SetFileAttributes "$INSTDIR\${MAINBINARYNAME}.exe" NORMAL
+    SetFileAttributes "$INSTDIR\uninstall.exe" NORMAL
+
+    DetailPrint "Fechando o Koda que está aberto (para atualizar sem erro)…"
+
+    ; ---------------------------------------------------------------------------
+    ; Fechar não é o mesmo que estar fechado.
+    ;
+    ; Aqui havia `taskkill` + `Sleep 1000` e a esperança de que o Windows soltasse o
+    ; arquivo nesse segundo. Não solta sempre, e o resultado era a caixa «Erro ao
+    ; abrir o arquivo para gravação» apontando para C:\...\Koda\koda.exe — sem uma
+    ; palavra sobre o programa estar aberto. Quem escolhia «Ignorar» ficava com a
+    ; instalação pela metade: recursos novos e binário velho, que é pior do que não
+    ; instalar.
+    ;
+    ; Duas coisas mudaram aqui.
+    ;
+    ; A primeira é **como** o app é encerrado. O `taskkill` saiu do lugar de honra:
+    ; ele abre um console, pode ser negado e — o que mais dói — era chamado por
+    ; `nsExec::ExecToLog`, que escreve na janela de log do instalador. Em instalação
+    ; silenciosa essa janela não existe, e o comando não rodava: o app continuava
+    ; aberto segurando o arquivo enquanto o instalador achava que tinha feito a
+    ; parte dele. Agora quem encerra é o plugin nativo do Tauri
+    ; (`KillProcessCurrentUser`), que não depende de console nem de janela. Os
+    ; filhos — o serviço em Python e o host — caem junto pelo job object que o app
+    ; arma na subida.
+    ;
+    ; A segunda é que o laço **pergunta ao próprio arquivo** se já dá para gravar
+    ; (abrir para escrita é o teste, e nada é escrito nele) em vez de supor que o
+    ; processo morreu só porque o encerramento voltou.
+    StrCpy $R7 0   ; já mostrou a caixa pedindo para fechar o Koda?
+    StrCpy $R8 0   ; tentativas do laço atual
+
+    nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+    Pop $R9
+
+    koda_fechar_laco:
+      ; O `c-host.exe` de uma execução órfã (o job object morre com o app; um app que
+      ; já morreu não leva o host junto) segura o próprio binário em `host\`. O
+      ; `ExecToStack` — e não `ExecToLog` — funciona em qualquer modo de instalação.
+      nsExec::ExecToStack 'taskkill /F /IM c-host.exe /T'
+      Pop $0
+      Pop $0
+      ; os handles do Windows demoram um instante para soltar depois do processo morrer
+      Sleep 300
+
+      ClearErrors
+      FileOpen $1 "$INSTDIR\${MAINBINARYNAME}.exe" a
+      ${IfNot} ${Errors}
+        FileClose $1
+        Goto koda_exe_liberado
+      ${EndIf}
+
+      ; ainda travado: insiste no encerramento antes da próxima tentativa
+      nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+      Pop $R9
+
+      IntOp $R8 $R8 + 1
+      ${If} $R8 < 12
+        Goto koda_fechar_laco
+      ${EndIf}
+
+      ; Segunda rodada, com a pessoa no circuito: o encerramento pode ser negado (o app
+      ; aberto por outro usuário, uma política da máquina), e aí não há laço que
+      ; resolva — só fechar o programa na mão. Instalação silenciosa e passiva não
+      ; param numa caixa: seguem para o plano B, que não precisa de ninguém.
+      ${If} $R7 == 0
+        StrCpy $R7 1
+        IfSilent koda_tentar_renomear
+        ${If} $PassiveMode == 1
+          Goto koda_tentar_renomear
+        ${EndIf}
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+          "O instalador não conseguiu substituir o Koda porque o programa ainda está em uso.$\r$\n\
+          $\r$\n\
+          Feche o Koda — inclusive o ícone ao lado do relógio — e clique em Repetir." \
+          IDRETRY koda_repetir
+        Abort
+        koda_repetir:
+          StrCpy $R8 0
+          Goto koda_fechar_laco
+      ${EndIf}
+
+    ; ---------------------------------------------------------------------------
+    ; Plano B, e ele existe porque o Windows **permite renomear um executável em
+    ; uso**: a imagem é carregada com FILE_SHARE_DELETE. O arquivo travado sai do
+    ; caminho sem precisar morrer; o `koda.exe` novo entra no lugar dele e o velho
+    ; é apagado no próximo boot. Sem isto, o `File` falhava aqui e a instalação
+    ; ficava pela metade.
+    koda_tentar_renomear:
+      DetailPrint "O koda.exe antigo não soltou o arquivo: renomeando para trocar na próxima reinicialização."
+      Delete "$INSTDIR\${MAINBINARYNAME}.exe.velho"
+      ClearErrors
+      Rename "$INSTDIR\${MAINBINARYNAME}.exe" "$INSTDIR\${MAINBINARYNAME}.exe.velho"
+      ${If} ${Errors}
+        ; Nem matar, nem renomear: aqui não há saída silenciosa. Melhor parar e dizer
+        ; o que fazer do que deixar recursos novos em cima de um binário velho.
+        IfSilent koda_exe_travado_fim
+        MessageBox MB_ICONSTOP|MB_OK \
+          "O Koda está aberto e o Windows não deixou o instalador substituir o programa.$\r$\n\
+          $\r$\n\
+          Feche o Koda — inclusive o ícone ao lado do relógio — e rode este instalador de novo."
+        koda_exe_travado_fim:
+        Abort
+      ${EndIf}
+      Delete /REBOOTOK "$INSTDIR\${MAINBINARYNAME}.exe.velho"
+      ; Se ele ainda está rodando — que é o motivo do rename — encerra agora que o
+      ; caminho novo está livre: sem isto sobrariam duas janelas do Koda na tela.
+      nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+      Pop $R9
+
+    koda_exe_liberado:
+
+    ; ---------------------------------------------------------------------------
+    ; Limpa o cache da versão anterior.
+    ;
+    ; O WebView2 guarda o app velho em %LOCALAPPDATA%\app.koda.desktop (perfil do
+    ; Chromium: cache, Service Worker, código antigo). Atualizar por cima sem
+    ; limpar deixa resquício da versão anterior aparecendo na nova.
+    ;
+    ; O que NÃO mora aqui: conversas, banco e `mcps.json` ficam em
+    ; %APPDATA%\app.koda.desktop\data — outro diretório, intacto.
+    RMDir /r "$LOCALAPPDATA\app.koda.desktop"
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
+  ; ---------------------------------------------------------------------------
+  ; Python e Node no sistema, só o que precisar.
+  ;
+  ; O instalador JÁ carrega os dois: `backend\python` (interpretador + dependências)
+  ; e `node`. O app instalado não depende de nada externo, e é assim que tem que
+  ; continuar sendo — nada aqui é pré-requisito, e esta seção não vira exigência.
+  ;
+  ; Ela existe para a máquina em que o runtime portátil falha (política de
+  ; execução estranha, DLL barrada, Windows com imagem modificada). A regra é:
+  ;
+  ;   não tem .......... instala
+  ;   tem, versão velha . atualiza
+  ;   tem, versão atual . não faz nada, e não baixa nada
+  ;
+  ; A checagem é rodar o próprio binário (`python --version`, `node --version`) e
+  ; olhar o código de saída, e não `where`: no PATH do Windows vive o apelido da
+  ; Microsoft Store, que o `where` acha mas que não executa Python nenhum.
+  ;
+  ; `winget install` só age quando falta. `winget upgrade` só age quando o
+  ; manifesto tem versão mais nova — no-op quando já está em ordem. Por isso os
+  ; dois comandos cobrem os três casos sem precisar comparar versão, que em NSIS
+  ; daria mais trabalho que esta seção inteira.
+  ;
+  ; winget pode não existir (Windows antigo), pode estar sem rede e pode pedir UAC.
+  ; Nada disso derruba a instalação: cada tentativa é só uma tentativa, e o
+  ; instalador segue com o runtime que já trouxe. Também desaparece em instalação
+  ; silenciosa, porque o UAC no meio de uma atualização automática trava o
+  ; processo.
+  IfSilent koda_winget_fim
+
+  nsExec::ExecToStack 'python --version'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "Python não responde nesta máquina: instalando."
+    nsExec::ExecToLog 'winget install --id Python.Python.3.13 -e --silent --scope user --accept-package-agreements --accept-source-agreements'
+    Pop $0
+  ${Else}
+    DetailPrint "Python já funciona aqui ($1)."
+  ${EndIf}
+
+  nsExec::ExecToStack 'node --version'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "Node não responde nesta máquina: instalando."
+    nsExec::ExecToLog 'winget install --id OpenJS.NodeJS.LTS -e --silent --scope user --accept-package-agreements --accept-source-agreements'
+    Pop $0
+  ${Else}
+    DetailPrint "Node já funciona aqui ($1)."
+  ${EndIf}
+
+  ; Quem tem versão velha é problema do upgrade, não do install. Já está na
+  ; versão do manifesto? Não faz nada, e não baixa nada.
+  DetailPrint "Atualizando Python e Node se estiverem defasados…"
+  nsExec::ExecToLog 'winget upgrade --id Python.Python.3.13 -e --silent --scope user --accept-package-agreements --accept-source-agreements'
+  Pop $0
+  nsExec::ExecToLog 'winget upgrade --id OpenJS.NodeJS.LTS -e --silent --scope user --accept-package-agreements --accept-source-agreements'
+  Pop $0
+
+  koda_winget_fim:
+
   ; No painel de detalhes, para quem instala em silêncio e para o log do instalador.
   DetailPrint "Runtime do serviço local instalado: Python 3.13 + dependências e Node (nada a instalar à parte)."
 
   ; ---------------------------------------------------------------------------
-  ; A quarentena do antivírus — resolvida aqui, e não com um aviso.
+  ; Sem toque no antivírus, de propósito.
   ;
-  ; O `c-host.exe` é um binário de Go ofuscado e sem assinatura digital. Em algumas
-  ; máquinas o Windows Defender o classifica como ameaça **na hora de executar** e apaga o
-  ; arquivo: o log do app mostra `ERROR_VIRUS_INFECTED (os error 225)` e, logo depois,
-  ; "c-host.exe ausente". A partir daí não há o que reerguer — o Koda fica sem modelos
-  ; oficiais para sempre, e reinstalar só faz o antivírus comer o arquivo de novo.
+  ; Aqui havia uma exclusão de pasta no Defender — `Add-MpPreference
+  ; -ExclusionPath '$INSTDIR\host'` — disparada por um PowerShell elevado. Foi
+  ; retirada por dois motivos.
   ;
-  ; Não há como o app impedir isso mexendo no próprio processo: quem decide é o antivírus.
-  ; O que o app pode fazer é **pedir ao Windows, uma vez, para não verificar aquele
-  ; arquivo** — e é exatamente isto: uma exclusão de pasta, do mesmo jeito que a tela do
-  ; Defender oferece (Segurança do Windows › Proteção contra vírus e ameaças › Exclusões).
+  ; O primeiro é o que o dono pediu: aquilo abria UAC e um shell na cara de quem
+  ; estava instalando, e instalador que faz isso sem aviso parecia defeito.
   ;
-  ; Exclui a pasta `host` inteira, e não só o executável: ela não tem mais nada dentro, e
-  ; assim a exclusão sobrevive a uma troca de nome do binário numa versão futura.
+  ; O segundo é mais sério. Instalador per-user que escala privilégio e desliga a
+  ; verificação de antivírus numa pasta é assinatura de malware — é o padrão que
+  ; os motores de heurística procuram justamente. Além de abrir uma janela na tela,
+  ; aquele passo trabalhava contra o Koda: ele podia ser parte do motivo de o
+  ; instalador ser olhado com desconfiança.
   ;
-  ; Exclusão no Defender é decisão de máquina e exige administrador: daí o `runas`, que
-  ; abre o UAC. Recusou? A instalação segue normalmente — o host continua sujeito ao
-  ; antivírus, e o app diz no log o que aconteceu.
-  ;
-  ; Em instalação silenciosa o passo é pulado de propósito: o UAC não pode aparecer no meio
-  ; de uma atualização automática, que é onde o instalador roda com `/S`. Quem instalou
-  ; olhando a tela já tem a exclusão; quem instalou em silêncio fica com o comportamento
-  ; antigo (e o log do app explica).
-  IfSilent koda_exclusao_fim
-  DetailPrint "Pedindo ao Windows para não verificar o serviço de modelos (evita a quarentena do antivírus)…"
-  ExecShellWait "runas" "powershell.exe" \
-    "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command $\"try { Add-MpPreference -ExclusionPath '$INSTDIR\host' -ErrorAction Stop } catch { }$\""
-  koda_exclusao_fim:
+  ; O `c-host.exe` de hoje é build limpo, e não precisa de muleta: compilado sem
+  ; ofuscação, com o registro selado (nada de provedor, relay ou modelo em claro),
+  ; verificado contra vazamento e varrido pelo Defender sem acusação. Se numa
+  ; máquina específica ele for quarentenado, o aviso abaixo avisa na hora — e o
+  ; conserto ali é o usuário restaurar o arquivo, não o instalador se meter na
+  ; configuração de segurança da máquina dele.
 
   ; Os modelos oficiais dependem deste binário proprietário. O instalador já o empacota
   ; como recurso; confira o arquivo instalado para detectar remoção por antivírus ou pacote
@@ -104,6 +304,14 @@
     $0Se a conversa não responder, abra Ajustes > Sobre > Serviço local e clique em «Ver diagnóstico»: ali aparecem o estado do serviço e o log dele."
 
   koda_aviso_python_fim:
+
+  ; ---------------------------------------------------------------------------
+  ; Sobra do PREINSTALL: quando o `koda.exe` antigo não soltou o arquivo, ele foi
+  ; renomeado para `koda.exe.velho` para o novo entrar no lugar. Agora que a
+  ; instalação acabou, tenta apagar; se o processo velho ainda estiver rodando, o
+  ; Windows só aceita a remoção no próximo boot.
+  Delete "$INSTDIR\${MAINBINARYNAME}.exe.velho"
+  Delete /REBOOTOK "$INSTDIR\${MAINBINARYNAME}.exe.velho"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -111,4 +319,9 @@
   ; só o banco e as conversas ficam em `%APPDATA%\app.koda.desktop`, que o desinstalador
   ; pergunta se quer apagar.
   DetailPrint "Removendo o app e os runtimes do serviço local (Python e Node)."
+
+  ; Resto de uma atualização em que o binário velho não pôde ser apagado na hora: sem
+  ; esta linha ele fica sozinho em $INSTDIR e o `RMDir` do fim não consegue remover a pasta.
+  Delete "$INSTDIR\${MAINBINARYNAME}.exe.velho"
+  Delete /REBOOTOK "$INSTDIR\${MAINBINARYNAME}.exe.velho"
 !macroend

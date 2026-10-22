@@ -56,6 +56,14 @@ class StepResult:
     #: O laço usa isto para **dar um alô** ao modelo em vez de encerrar a rodada — matar o
     #: pensamento à força tira dele a chance de responder o que já tinha.
     repetiu: bool = False
+    #: O raciocínio que o provedor devolveu e **cobra de volta** na continuação com
+    #: ferramentas. Sem ele, o segundo passo da rodada é recusado com HTTP 400 por quem
+    #: trata o campo como parte do contrato (visto em 20/10/2026, com `liz-4-5-super`).
+    #:
+    #: Fica só no histórico em memória da rodada: não substitui a resposta visível, não vai
+    #: para o banco, não entra em log, e ninguém resume o texto — é o que o provedor emitiu,
+    #: byte por byte. `None` é ausência; `""` é campo presente e vazio, e a diferença vale.
+    reasoning_content: str | None = None
 @dataclass(slots=True)
 class ToolStep:
     """Passo de ferramenta, o que fica gravado junto da mensagem."""
@@ -77,6 +85,8 @@ class ToolStep:
     #: reaberta depois, e sem isto o nome normalizado (`eco_server`) seria tudo o que a tela
     #: teria para mostrar — um nome que não existe no `mcps.json`.
     mcp: dict[str, str] | None = None
+    #: Metadados opacos da chamada do provedor, necessários ao reconstruir o histórico.
+    extra: dict[str, Any] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {

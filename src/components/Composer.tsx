@@ -1345,11 +1345,11 @@ export function Composer({
 
         <div
           className={[
-            'flex items-center justify-between gap-3',
+            'flex min-w-0 items-center justify-between gap-3',
             isChat ? 'mt-2 flex-wrap gap-2' : 'mt-1',
           ].join(' ')}
         >
-          <div className="flex flex-wrap items-center gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <Menu
               options={PLUS_ACTIONS}
               onSelect={(value) => {
@@ -1403,7 +1403,7 @@ export function Composer({
 
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
             {/* A folha do mapa do tesouro virou menu: cada modo melhora o rascunho de
                 um jeito (com base, do zero, estrutura, fala, grafia), sempre com o
                 modelo que estiver selecionado. Solta, à esquerda da coroa — não é

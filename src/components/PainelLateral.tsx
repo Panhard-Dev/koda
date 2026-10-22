@@ -495,6 +495,14 @@ export function PainelLateral({
   const [aviso, setAviso] = useState('')
   /** Só serve para forçar recarga: trocar a `key` remonta o iframe. */
   const [recarga, setRecarga] = useState(0)
+  /** Posição do ponteiro do MCP escalada para a página que o painel mostra. */
+  const [ponteiroDaIA, setPonteiroDaIA] = useState<{
+    x: number
+    y: number
+    pressionado: boolean
+    largura: number
+    altura: number
+  } | null>(null)
   /** O iframe que mostra a página — o painel rola ele para acompanhar a IA. */
   const moldura = useRef<HTMLIFrameElement>(null)
   /** A última rolagem publicada pela IA, para reaplicar quando a página terminar de carregar. */
@@ -602,15 +610,50 @@ export function PainelLateral({
   useEffect(() => {
     if (!aberto || aba !== 'Painel Dev') return
     let parado = false
+    let consultando = false
     let visto = ''
     let rolado = ''
 
     const passo = async () => {
-      if (parado) return
+      if (parado || consultando) return
+      consultando = true
       try {
         const estado = await estadoDoNavegador()
         if (parado) return
-        if (!estado.vivo || !estado.url) return
+        if (!estado.vivo || !estado.url) {
+          setPonteiroDaIA(null)
+          return
+        }
+        const p = estado.ponteiro
+        const janela = estado.viewport
+        const proximoPonteiro =
+          p &&
+          janela &&
+          Number.isFinite(p.x) &&
+          Number.isFinite(p.y) &&
+          Number.isFinite(janela.largura) &&
+          Number.isFinite(janela.altura) &&
+          janela.largura > 0 &&
+          janela.altura > 0
+            ? {
+                x: p.x,
+                y: p.y,
+                pressionado: p.pressionado,
+                largura: janela.largura,
+                altura: janela.altura,
+              }
+            : null
+        setPonteiroDaIA((atual) =>
+          atual &&
+          proximoPonteiro &&
+          atual.x === proximoPonteiro.x &&
+          atual.y === proximoPonteiro.y &&
+          atual.pressionado === proximoPonteiro.pressionado &&
+          atual.largura === proximoPonteiro.largura &&
+          atual.altura === proximoPonteiro.altura
+            ? atual
+            : proximoPonteiro,
+        )
         rolagemDaIA.current = estado.rolagem ?? null
 
         if (estado.url !== visto) {
@@ -637,11 +680,13 @@ export function PainelLateral({
         }
       } catch {
         // backend fora do ar: o painel segue sendo o navegador de sempre
+      } finally {
+        consultando = false
       }
     }
 
     void passo()
-    const id = window.setInterval(() => void passo(), 1500)
+    const id = window.setInterval(() => void passo(), 80)
     return () => {
       parado = true
       window.clearInterval(id)
@@ -671,6 +716,43 @@ export function PainelLateral({
   }
 
   if (!aberto) return null
+
+  const marcadorDePonteiro = ponteiroDaIA ? (
+    <span
+      aria-label="Ponteiro da IA"
+      title="Ponteiro da IA"
+      className="pointer-events-none absolute z-20"
+      style={{
+        left: `${(Math.min(Math.max(ponteiroDaIA.x, 0), ponteiroDaIA.largura) / ponteiroDaIA.largura) * 100}%`,
+        top: `${(Math.min(Math.max(ponteiroDaIA.y, 0), ponteiroDaIA.altura) / ponteiroDaIA.altura) * 100}%`,
+        transform: 'translate(-4px, -3px)',
+        transition: 'left 70ms linear, top 70ms linear',
+        willChange: 'left, top',
+      }}
+    >
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 24 24"
+        className="h-6 w-6 drop-shadow-[0_2px_2px_rgba(0,0,0,0.75)]"
+      >
+        <path
+          d="M4 3 18.5 14 11 15 8.2 21Z"
+          fill={ponteiroDaIA.pressionado ? '#f59e0b' : '#c084fc'}
+          stroke="#18151d"
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M4 3 18.5 14 11 15 8.2 21Z"
+          fill="none"
+          stroke="white"
+          strokeOpacity="0.9"
+          strokeWidth="0.8"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </span>
+  ) : null
 
   return (
     <aside
@@ -764,15 +846,18 @@ export function PainelLateral({
               DENTRO_DO_TAURI ? (
                 <NavegadorDoPainel key={recarga} url={url} />
               ) : (
-                <iframe
-                  key={recarga}
-                  ref={moldura}
-                  onLoad={() => aplicarRolagem(rolagemDaIA.current)}
-                  title="Navegador do Painel Dev"
-                  src={url}
-                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                  className="min-h-0 w-full flex-1 border-0 bg-white"
-                />
+                <div className="relative min-h-0 w-full flex-1 overflow-hidden bg-white">
+                  <iframe
+                    key={recarga}
+                    ref={moldura}
+                    onLoad={() => aplicarRolagem(rolagemDaIA.current)}
+                    title="Navegador do Painel Dev"
+                    src={url}
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    className="absolute inset-0 h-full w-full border-0 bg-white"
+                  />
+                  {marcadorDePonteiro}
+                </div>
               )
             ) : (
               <p className="px-3 py-3 text-[12.5px] leading-relaxed text-koda-fg/40">
