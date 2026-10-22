@@ -936,7 +936,7 @@ class HostProvider(OpenAICompatibleProvider):
     def _messages(self, turns: list[ChatTurn], options: ChatOptions) -> list[dict[str, Any]]:
         return [
             {"role": "system", "content": system_prompt(options)},
-            *(conteudo_do_turno(turn, incluir_raciocinio=True) for turn in turns),
+            *(conteudo_do_turno(turn) for turn in turns),
         ]
 
     def _historico_para_pedido(
@@ -945,7 +945,14 @@ class HostProvider(OpenAICompatibleProvider):
         # Conversas antigas não guardavam o campo. O host aceita uma marca vazia quando
         # há ferramentas; preserve o texto original quando ele estiver disponível.
         if not tools:
-            return messages
+            if not any("reasoning_content" in message for message in messages):
+                return messages
+            # O campo é parte do contrato de continuação com ferramentas; fora desse
+            # fluxo, mantenha o payload compatível com provedores que o rejeitam.
+            return [
+                {chave: valor for chave, valor in message.items() if chave != "reasoning_content"}
+                for message in messages
+            ]
         return [
             {**message, "reasoning_content": ""}
             if message.get("role") == "assistant" and message.get("reasoning_content") is None

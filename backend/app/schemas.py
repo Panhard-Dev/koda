@@ -158,13 +158,11 @@ class TodoItem(BaseModel):
 
 
 class Message(BaseModel):
-    # Provider state stays local; never include it in API/model_dump responses.
-    reasoning_content: str | None = Field(default=None, exclude=True, repr=False)
     id: str
     role: Role
     text: str
     #: Dado interno do provedor, sem exposição pela API da conversa.
-    reasoning_content: str | None = Field(default=None, exclude=True)
+    reasoning_content: str | None = Field(default=None, exclude=True, repr=False)
     attachments: list[AttachmentInfo] = Field(default_factory=list)
     """Os anexos da mensagem, com os metadados que a tela mostra (nome, tipo, tamanho).
 
