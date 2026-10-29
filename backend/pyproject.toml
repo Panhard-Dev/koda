@@ -12,4 +12,9 @@ dependencies = [
     "pydantic-settings>=2.5",
     "python-multipart>=0.0.32",
     "pypdf>=6.19.0",
+    "numpy>=2.1",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+video = ["faster-whisper>=1.2"]

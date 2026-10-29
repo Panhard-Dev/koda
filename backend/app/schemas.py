@@ -67,11 +67,12 @@ class ChatRequest(BaseModel):
     o nome não serve — `read_file` só enxerga o workspace, e o anexo não está lá.
     """
     conversation_id: str | None = None
+    approved_plan_id: str | None = Field(default=None, max_length=64)
     """Ferramentas nesta mensagem: `None` segue a configuração do servidor."""
     tools: bool | None = None
     """Teto de passos do modo agente (o padrão vem da configuração)."""
     max_steps: int | None = Field(default=None, ge=0, le=10_000)
-    """Teto de passos desta mensagem; 0 = sem teto. `None` usa o padrão da configuração."""
+    """0/None usam o orçamento do servidor; um valor positivo pode reduzir esse orçamento."""
     """Fuso do cliente em minutos (como `Date.getTimezoneOffset()`), para o uso contar no dia local."""
     tz_offset_minutes: int = 0
 
@@ -129,6 +130,8 @@ class ToolStepOut(BaseModel):
     duration_ms: int = 0
     call_id: str = ""
     ok: bool = True
+    executed: bool = False
+    status: str = "blocked"
     """A chamada como o modelo a escreveu, em texto (ver `contracts.turn.ToolStep`)."""
     raw_arguments: str = ""
     """De qual servidor MCP e de qual ferramenta é o passo (`{"servidor", "ferramenta"}`).
@@ -161,6 +164,7 @@ class Message(BaseModel):
     id: str
     role: Role
     text: str
+    verification: dict[str, Any] = Field(default_factory=dict)
     #: Dado interno do provedor, sem exposição pela API da conversa.
     reasoning_content: str | None = Field(default=None, exclude=True, repr=False)
     attachments: list[AttachmentInfo] = Field(default_factory=list)

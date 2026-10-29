@@ -19,6 +19,8 @@ O que vale para toda chamada:
 from __future__ import annotations
 
 import time
+import json
+import logging
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -137,7 +139,7 @@ class ClienteNuvem:
         """GET que nunca levanta: qualquer problema vira `None`."""
         if not self.ativo:
             return None
-        cabecalhos = {"Accept": "application/json", "User-Agent": USER_AGENT}
+        cabecalhos = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": USER_AGENT}
         if self.token:
             cabecalhos["Authorization"] = f"Bearer {self.token}"
         try:
@@ -146,13 +148,22 @@ class ClienteNuvem:
                 follow_redirects=False,
                 transport=self.transport,
             ) as cliente:
-                resposta = await cliente.get(f"{self.base}{caminho}", params=params, headers=cabecalhos)
-            if resposta.status_code != 200:
-                return None
-            if len(resposta.content) > LIMITE_CORPO:
-                return None
-            dados = resposta.json()
-        except (httpx.HTTPError, ValueError):
+                async with cliente.stream("GET", f"{self.base}{caminho}", params=params, headers=cabecalhos) as resposta:
+                    if resposta.status_code != 200:
+                        logging.getLogger(__name__).warning("cloud_response_rejected status=%s", resposta.status_code)
+                        return None
+                    if resposta.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
+                        logging.getLogger(__name__).warning("cloud_response_rejected reason=encoding")
+                        return None
+                    corpo = bytearray()
+                    async for chunk in resposta.aiter_bytes(chunk_size=16_384):
+                        if len(corpo) + len(chunk) > LIMITE_CORPO:
+                            logging.getLogger(__name__).warning("cloud_response_rejected reason=size_limit")
+                            return None
+                        corpo.extend(chunk)
+                    dados = json.loads(corpo)
+        except (httpx.HTTPError, ValueError) as exc:
+            logging.getLogger(__name__).warning("cloud_request_failed kind=%s", type(exc).__name__)
             return None
         return dados if isinstance(dados, dict) else None
 

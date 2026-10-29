@@ -27,6 +27,9 @@
 ; Os nomes das macros são os que o template do Tauri procura (`NSIS_HOOK_POSTINSTALL`).
 ; Trocar qualquer um deles faz o gancho deixar de rodar sem erro nenhum de compilação.
 
+; Atualize este número junto com host/c-host.exe. O build confere a igualdade.
+!define KODA_HOST_BYTES 8113664
+
 !macro NSIS_HOOK_PREINSTALL
   ; ---------------------------------------------------------------------------
   ; O Koda aberto segura os arquivos da instalação anterior.
@@ -160,20 +163,42 @@
 
     koda_exe_liberado:
 
-    ; ---------------------------------------------------------------------------
-    ; Limpa o cache da versão anterior.
-    ;
-    ; O WebView2 guarda o app velho em %LOCALAPPDATA%\app.koda.desktop (perfil do
-    ; Chromium: cache, Service Worker, código antigo). Atualizar por cima sem
-    ; limpar deixa resquício da versão anterior aparecendo na nova.
-    ;
-    ; O que NÃO mora aqui: conversas, banco e `mcps.json` ficam em
-    ; %APPDATA%\app.koda.desktop\data — outro diretório, intacto.
-    RMDir /r "$LOCALAPPDATA\app.koda.desktop"
+    ; O app pode ter fechado e o host antigo continuar preso. Se o host não estiver
+    ; gravável, abortar antes de extrair impede uma instalação com frontend novo e
+    ; serviço de modelos velho, que se parece com uma falha aleatória de 429.
+    ${If} ${FileExists} "$INSTDIR\host\c-host.exe"
+      ClearErrors
+      FileOpen $R6 "$INSTDIR\host\c-host.exe" a
+      ${If} ${Errors}
+        MessageBox MB_ICONSTOP|MB_OK \
+          "O c-host.exe antigo ainda está em uso. Feche o Koda e execute a atualização de novo."
+        Abort
+      ${EndIf}
+      FileClose $R6
+    ${EndIf}
+
+    ; O perfil WebView2 em %LOCALAPPDATA%\app.koda.desktop contém também Local Storage:
+    ; é ali que a sessão da conta e o token de renovação sobrevivem à reabertura.
+    ; Uma atualização troca os arquivos em $INSTDIR e preserva o perfil inteiro.
+    ; Apagar esse diretório aqui obrigava a entrar na conta em toda versão nova.
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; Confere o arquivo realmente instalado, não apenas a linha File do script NSIS.
+  ; Se uma atualização preservar o host antigo, não declarar sucesso.
+  ClearErrors
+  FileOpen $R6 "$INSTDIR\host\c-host.exe" r
+  ${If} ${Errors}
+    MessageBox MB_ICONSTOP|MB_OK "O serviço de modelos não foi instalado. Execute a instalação de novo."
+    Abort
+  ${EndIf}
+  FileSeek $R6 0 END $R5
+  FileClose $R6
+  ${If} $R5 != ${KODA_HOST_BYTES}
+    MessageBox MB_ICONSTOP|MB_OK "O serviço de modelos ficou com uma versão antiga. Execute a instalação de novo."
+    Abort
+  ${EndIf}
   ; ---------------------------------------------------------------------------
   ; Python e Node no sistema, só o que precisar.
   ;

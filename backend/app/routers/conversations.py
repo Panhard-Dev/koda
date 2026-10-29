@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db import Database
+from .. import anexos
 from ..deps import call, database
 from ..repository import (
     delete_conversation,
@@ -69,3 +70,4 @@ async def destroy(conversation_id: str, request: Request) -> None:
     removed = await call(_delete, database(request), conversation_id)
     if not removed:
         raise HTTPException(status_code=404, detail="conversa não encontrada")
+    await call(anexos.reconciliar, request.app.state.settings)

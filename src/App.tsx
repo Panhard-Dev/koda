@@ -26,6 +26,7 @@ import { separarCompactacoes } from './compactacao'
 import type { Compactacao as AvisoDeCompactacao } from './compactacao'
 import WorkingLine from './components/WorkingLine'
 import ReconnectingLine from './components/ReconnectingLine'
+import { LOGO_DO_PROVEDOR } from './logos-provedores'
 import { SUBS_POR_RODADA } from './components/Subs'
 import type { SessaoDeSub } from './components/Subs'
 import {
@@ -37,8 +38,10 @@ import type { SettingsSection } from './components/SettingsScreen'
 import ProjectPicker from './components/ProjectPicker'
 import PainelLateral from './components/PainelLateral'
 import BarraLateralCamera from './components/BarraLateralCamera'
-import { findModel } from './models'
+import { findModel, modelMenu } from './models'
 import { lerModeloSalvo, salvarModelo } from './modelo-salvo'
+import { atualizarModelosCom400, lerModelosCom400 } from './modelos-com-400'
+import { guardarModelosBloqueados, lerModelosBloqueados } from './modelos-bloqueados'
 import { EFFORT_PADRAO } from './effort'
 import type { RemoteModel } from './models'
 import { dayStart, dayKey, monthStart, weekStart } from './plan'
@@ -75,6 +78,8 @@ import {
   listConversations,
   listMcps,
   listModels,
+  modelosDoProvedor,
+  provedoresDeLogin,
   listPermissions,
   listProjects,
   listSkills,
@@ -84,6 +89,7 @@ import {
   setPermissionMode as salvarModoPermissao,
   statusDoDownload,
   streamChat,
+  decidirPlano,
   openProject,
   toggleMcp,
   toggleSkill,
@@ -295,7 +301,7 @@ function aplicarEventoDoSub(sessao: SessaoDeSub, evento: EventoDeSub): SessaoDeS
  * `resume` não é uma mensagem — é a ação do botão do cartão de tarefa não concluída. Por
  * isso ele não vira bolha na conversa (ver `handleSend`).
  */
-type PayloadDeEnvio = SendPayload & { resume?: boolean }
+type PayloadDeEnvio = SendPayload & { resume?: boolean; approved_plan_id?: string }
 
 /**
  * Um pedaço da resposta viva: o que o modelo pensou, o que ele falou, ou uma ferramenta
@@ -595,49 +601,6 @@ function AvisoDeAtualizacao({
 }
 
 /**
- * A caixinha do canto: o aviso de que a conversa caiu para o servidor local.
- *
- * É o caso comum e não pede nada de ninguém — a própria tela está tentando de novo, e o
- * aviso só existe para a resposta que chegar agora não parecer a de verdade.
- *
- * A versão anterior tinha um segundo modo, "sessão morta", com um botão de entrar de novo.
- * Ele saiu: quando o painel recusa a conta, o app agora **fecha a porta na hora** — quem
- * foi barrado volta para o login, com o motivo escrito lá. Manter este cartão para esse caso
- * seria um caminho que nunca mais acontece, e um mecanismo parado se lê como se funcionasse.
- */
-function AvisoDaSessao() {
-  return (
-    <div className="msg-in fixed right-6 bottom-6 z-40" role="status">
-      <div
-        className={[
-          'w-60 rounded-2xl p-4 backdrop-blur-2xl backdrop-saturate-150',
-          'bg-koda-surface/55 bg-gradient-to-b from-koda-fg/6 to-transparent',
-          'ring-1 ring-koda-fg/12',
-          'shadow-[0_28px_60px_-24px_var(--koda-shadow)]',
-        ].join(' ')}
-      >
-        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-koda-accent/15">
-          <KodaLogo className="h-4 w-auto" />
-        </span>
-
-        <p className="mt-3 text-[13.5px] leading-5 font-semibold text-koda-fg">
-          Reconectando ao serviço de modelos
-        </p>
-        <p className="mt-1 text-[12.5px] leading-5 text-koda-fg/50">
-          Enquanto isso a resposta sai do servidor local: sem modelo de verdade e sem
-          ferramentas. Tentando de novo sozinho.
-        </p>
-
-        <p className="mt-3 flex items-center gap-2 text-[12px] text-koda-fg/40">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-koda-accent" strokeWidth={1.8} />
-          tentando agora
-        </p>
-      </div>
-    </div>
-  )
-}
-
-/**
  * O que a janela mostra enquanto a sessão é conferida ou o backend inicia.
  *
  * Com sessão e backend prontos esta tela passa voando. Se a API Python demorar, ela
@@ -929,7 +892,9 @@ function App() {
   const [tentativaDeSessao, setTentativaDeSessao] = useState(0)
   const [remoteUsage, setRemoteUsage] = useState<ApiUsage | null>(null)
   /** Catálogo do provedor (o serviço lista os modelos dele em /v1/models). */
-  const [remoteModels, setRemoteModels] = useState<RemoteModel[]>([])
+  /** null = ainda sem resposta; [] = o host respondeu sem catálogo, então não oferecer o espelho. */
+  const [remoteModels, setRemoteModels] = useState<RemoteModel[] | null>(null)
+  const [modelosCom400, setModelosCom400] = useState<string[]>(lerModelosCom400)
   /**
    * Slugs que o **painel** tirou desta conta.
    *
@@ -937,7 +902,9 @@ function App() {
    * cadastrou e desligou — um modelo que ele nem conhece continua valendo, porque o dono do
    * catálogo é o host e o painel só tem o direito de riscar o que ele mesmo escreveu.
    */
-  const [modelosBloqueados, setModelosBloqueados] = useState<string[]>([])
+  const [modelosBloqueados, setModelosBloqueados] = useState<string[]>(() =>
+    lerModelosBloqueados(conta?.id),
+  )
   /** Skills instaladas (o backend lê `.agents/skills` do projeto e da máquina). */
   const [skills, setSkills] = useState<ApiSkill[]>([])
   /** Servidores MCP configurados (o Koda ainda não conecta nenhum de verdade). */
@@ -1262,16 +1229,104 @@ function App() {
    * lista, e um modelo que dá 400 como primeiro mandaria toda resposta nova para o erro.
    * O filtro fica **neste** ponto para o resto do app ver o mesmo recorte do menu.
    *
-   * Só o **400** tira o modelo: é o host dizendo que não tem mais aquele. 429, 401 e 500
-   * deixam o modelo na lista — ele existe, e a etiqueta ao lado do nome diz o que houve.
+   * Um 400 confirmado continua excluído quando o catálogo falha ou volta sem status; uma
+   * resposta 200 do mesmo modelo o libera de novo. 429, 401 e 500 não mudam essa decisão.
    */
   const modelosVisiveis = useMemo(
     () =>
-      remoteModels.filter(
-        (item) => !modelosBloqueados.includes(item.value) && item.status !== 400,
+      (remoteModels ?? []).filter(
+        (item) =>
+          !modelosBloqueados.includes(item.value) &&
+          !modelosCom400.includes(item.value) &&
+          item.status !== 400,
       ),
-    [remoteModels, modelosBloqueados],
+    [remoteModels, modelosBloqueados, modelosCom400],
   )
+  const modelosForaDoMenu = useMemo(
+    () => [...new Set([...modelosBloqueados, ...modelosCom400])],
+    [modelosBloqueados, modelosCom400],
+  )
+
+  /**
+   * O catálogo que o seletor usa.
+   *
+   * `[]` é resposta do host dizendo «não tenho nada» (é o que acontece sem a sessão da
+   * conta no host), e o menu tratava isso como lista vazia — daí o «Nenhum modelo
+   * disponível» com o serviço no ar. Aqui lista vazia volta a ser `null`, que é o sinal de
+   * «use o espelho da casa», e o seletor nunca fica sem nada.
+   */
+  const catalogoDoMenu = remoteModels && remoteModels.length > 0 ? remoteModels : null
+
+  /**
+   * Os modelos dos provedores em que a pessoa entrou, agrupados por provedor.
+   *
+   * Ficam **separados** do catálogo do host de propósito: são de outra conta e de outro
+   * caminho (o token do Koda), não do serviço que serve o chat. No seletor eles aparecem
+   * como grupos próprios — «Codex», «Gemini» —, que é como ele pediu.
+   *
+   * A lista é pedida uma vez por sessão: entrar num provedor é evento raro, e o menu não
+   * pode ficar batendo no backend a cada abertura.
+   */
+  const [gruposLogados, setGruposLogados] = useState<ReturnType<typeof modelMenu>>([])
+  useEffect(() => {
+    // `backend` entra na dependência de propósito: no arranque a sessão fica «dentro» antes
+    // de o serviço local responder, e uma consulta que falha ali deixava o menu sem os
+    // provedores para sempre. Com o backend na lista, a busca roda de novo quando ele sobe —
+    // e o intervalo cobre o caso de a pessoa entrar num provedor com o app já aberto.
+    if (sessao !== 'dentro' || backend === null) return
+    let cancelado = false
+    let consultando = false
+    const buscar = () => {
+      if (consultando) return
+      consultando = true
+      void (async () => {
+        try {
+          const lista = await provedoresDeLogin()
+          const conectados = lista.filter((item) => item.conectado)
+          const grupos = await Promise.all(
+            conectados.map(async (provedor) => {
+              const resultado = await modelosDoProvedor(provedor.id)
+              if (resultado.modelos.length === 0) return null
+              return {
+                value: `provedor-${provedor.id}`,
+                label: provedor.nome,
+                icon: (
+                  <img
+                    src={LOGO_DO_PROVEDOR[provedor.id]}
+                    alt=""
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 object-contain"
+                  />
+                ),
+                // O valor carrega o provedor (`provedor:<id>:<modelo>`): é o que permite ao
+                // backend saber de quem é o modelo **sem** depender de cache — e é o que
+                // impede esse id de vazar para o host, que só conhece o catálogo dele.
+                options: resultado.modelos.map((modelo) => ({
+                  value: `provedor:${provedor.id}:${modelo}`,
+                  label: resultado.nomes?.[modelo] ?? modelo,
+                })),
+              } as ReturnType<typeof modelMenu>[number]
+            }),
+          )
+          if (!cancelado) {
+            setGruposLogados(
+              grupos.filter((item): item is NonNullable<typeof item> => item !== null),
+            )
+          }
+        } catch {
+          // Serviço local fora do ar ou provedor sem lista: o menu fica com o catálogo.
+        } finally {
+          consultando = false
+        }
+      })()
+    }
+    buscar()
+    const timer = window.setInterval(buscar, 8_000)
+    return () => {
+      cancelado = true
+      window.clearInterval(timer)
+    }
+  }, [sessao, backend])
 
   /** O teto que o backend aplica à conversa — o denominador do anel. */
   const janelaDoContexto = useMemo(() => {
@@ -1429,6 +1484,10 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    setModelosBloqueados(lerModelosBloqueados(conta?.id))
+  }, [conta?.id])
+
   // A conta logada **é** a credencial dos modelos: o app não guarda chave de API nenhuma.
   // O front manda a sessão ao backend, o backend a apresenta ao host, e o host pergunta ao
   // painel se ela vale — daí o modelo só responder para quem está logado. Sair limpa a
@@ -1556,6 +1615,9 @@ function App() {
       try {
         const estado = await definirSessaoDoHost(credencial.token, conta)
         if (cancelado) return
+        const conversasDaConta = await listConversations()
+        if (cancelado) return
+        setHistory(conversasDaConta.map(fromApiSummary))
         // O backend reescolheu o provider agora: a tela fica sabendo na hora. É o que faz
         // o aviso de "sem os modelos da conta" aparecer e desaparecer no mesmo segundo.
         setBackend((atual) =>
@@ -1678,6 +1740,7 @@ function App() {
       // modelo que o painel tirou. O plano entra pela mesma porta, e pela mesma razão.
       if (resultado.estado === 'viva') {
         setModelosBloqueados(resultado.bloqueados)
+        guardarModelosBloqueados(conta?.id, resultado.bloqueados)
         setPlanoDaConta(resultado.plano)
         setCreditosAvulsos(resultado.creditosAvulsos)
       }
@@ -1715,14 +1778,24 @@ function App() {
    * modelo que não está mais na lista — e é justamente nesse quadro que a mensagem seguinte
    * sairia nele.
    *
-   * Lista vazia (host calado) não invalida nada: sem catálogo não há o que conferir, e a
-   * escolha da pessoa continua valendo.
+   * Sem catálogo, usa o espelho local já descontando os 400 confirmados. Se o host listou
+   * modelos mas todos foram recusados, não há modelo ativo nem envio até algum responder.
    */
   const modeloAtivo = useMemo(() => {
-    if (modelosVisiveis.length === 0) return model
-    if (modelosVisiveis.some((item) => item.value === model)) return model
-    return modelosVisiveis[0]?.value ?? model
-  }, [modelosVisiveis, model])
+    const doHost = catalogoDoMenu !== null
+      ? modelosVisiveis.map((item) => item.value)
+      : modelMenu(null, modelosForaDoMenu).flatMap((grupo) =>
+          (grupo.options ?? []).map((item) => item.value),
+        )
+    // Os modelos das contas logadas também são escolha válida: eles aparecem no menu, então
+    // precisam contar como «disponível» — senão o seletor abria neles e o rótulo continuava
+    // dizendo «nenhum modelo».
+    const dosProvedores = gruposLogados.flatMap((grupo) =>
+      (grupo.options ?? []).map((item) => item.value),
+    )
+    const disponiveis = [...new Set([...doHost, ...dosProvedores])]
+    return disponiveis.includes(model) ? model : (disponiveis[0] ?? '')
+  }, [catalogoDoMenu, modelosVisiveis, modelosForaDoMenu, gruposLogados, model])
 
   /**
    * Um modelo bloqueado não volta pela porta de trás.
@@ -1767,6 +1840,7 @@ function App() {
         setRemoteUsage(usage)
         setHistory(conversations.map(fromApiSummary))
         setRemoteModels(models)
+        setModelosCom400(atualizarModelosCom400(models))
         setSkills(skills)
         setMcps(mcps)
         setAgents(agents)
@@ -1792,6 +1866,30 @@ function App() {
       if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [sessao, backend, tentativaManualBackend])
+
+  // O backend pode responder antes do host de modelos. Um catálogo vazio nessa primeira
+  // leitura não autoriza mostrar a lista fixa para sempre: insiste até o host publicar algo.
+  useEffect(() => {
+    if (sessao !== 'dentro' || backend === null || remoteModels?.length !== 0) return
+    let cancelado = false
+    let consultando = false
+    const timer = window.setInterval(() => {
+      if (consultando) return
+      consultando = true
+      void listModels()
+        .then((models) => {
+          if (cancelado || models.length === 0) return
+          setRemoteModels(models)
+          setModelosCom400(atualizarModelosCom400(models))
+        })
+        .catch(() => {})
+        .finally(() => { consultando = false })
+    }, 5_000)
+    return () => {
+      cancelado = true
+      window.clearTimeout(timer)
+    }
+  }, [sessao, backend, remoteModels])
 
   // Contagem local, usada quando não há backend (e como base do modo offline).
   const usageCounts = useMemo(() => {
@@ -2246,18 +2344,20 @@ function App() {
    */
   useEffect(() => {
     const aoDecidir = (evento: Event) => {
-      const aceito = (evento as CustomEvent<{ aceito?: boolean }>).detail?.aceito !== false
-      const anterior = ultimoPayloadRef.current
-      const payload: PayloadDeEnvio = {
-        text: aceito ? 'Plano aceito, pode começar.' : 'Desisti do plano, não faça nada.',
-        attachments: anterior?.attachments ?? [],
-        model: anterior?.model ?? model,
-        reasoning: anterior?.reasoning ?? true,
-        web: anterior?.web ?? false,
-        effort: anterior?.effort ?? EFFORT_PADRAO,
-        project_path: anterior?.project_path ?? null,
-      }
-      void handleSend(payload)
+      const detail = (evento as CustomEvent<{ aceito?: boolean; planId?: string; onResult?: (ok: boolean) => void }>).detail
+      if (!detail?.planId) return
+      void decidirPlano(detail.planId, detail.aceito === false ? 'reject' : 'approve')
+        .then(({ execution }) => {
+          if (execution && execution.conversation_id === conversationIdRef.current) {
+            detail.onResult?.(true)
+            return handleSend({ ...execution,
+              text: '', attachments: [], resume: true })
+          }
+          detail.onResult?.(!execution)
+        }).catch((error: unknown) => {
+          detail.onResult?.(false)
+          console.warn('[koda] decisão do plano recusada', error)
+        })
     }
     window.addEventListener('koda-plano', aoDecidir)
     return () => window.removeEventListener('koda-plano', aoDecidir)
@@ -2342,6 +2442,7 @@ function App() {
         setRemoteUsage(usage)
         setHistory(conversations.map(fromApiSummary))
         setRemoteModels(models)
+        setModelosCom400(atualizarModelosCom400(models))
         setSkills(skills)
         setMcps(mcps)
         setAgents(agents)
@@ -2450,6 +2551,7 @@ function App() {
       conversation_id: conversationIdRef.current,
       tz_offset_minutes: new Date().getTimezoneOffset(),
       resume: retomando ? true : payload.resume,
+      approved_plan_id: retomando ? undefined : payload.approved_plan_id,
     })
 
     /**
@@ -2986,7 +3088,9 @@ function App() {
             monthly: remoteUsage ? janelaDoServidor(remoteUsage.monthly) : usageCounts.monthly,
             // Os rótulos do catálogo da casa são strings; o tipo do menu aceita JSX
             // por causa dos contadores do submenu de skills.
-            model: findModel(modeloAtivo, modelosVisiveis).label as string,
+            model: modeloAtivo
+              ? (findModel(modeloAtivo, modelosVisiveis).label as string)
+              : 'Nenhum modelo disponível',
             project:
               projects.find((item) => item.id === projectId)?.nome ?? 'Nenhum projeto',
           }}
@@ -3006,8 +3110,8 @@ function App() {
           onProjectChange={trocarProjeto}
           model={modeloAtivo}
           onModelChange={escolherModelo}
-          remoteModels={modelosVisiveis}
-          modelosBloqueados={modelosBloqueados}
+          remoteModels={catalogoDoMenu}
+          modelosBloqueados={modelosForaDoMenu}
           skills={skills}
           mcps={mcps}
           onAddSkill={handleAddSkill}
@@ -3329,8 +3433,9 @@ function App() {
               onDecidirPermissao={responderPermissao}
               model={modeloAtivo}
               onModelChange={escolherModelo}
-              remoteModels={modelosVisiveis}
-              modelosBloqueados={modelosBloqueados}
+              remoteModels={catalogoDoMenu}
+              modelosBloqueados={modelosForaDoMenu}
+              provedoresLogados={gruposLogados}
               contextoPorModelo={contextoPorModelo}
               contextoJanela={janelaDoContexto}
               moedas={saldoDeMoedas}
@@ -3338,11 +3443,7 @@ function App() {
               skills={skills}
               mcps={mcps}
             />
-            {/* A sessão que não vale mais vem antes de qualquer novidade: uma conversa
-                respondida pelo servidor local é mais urgente que uma versão nova. */}
-            {semModeloDaConta ? (
-              <AvisoDaSessao />
-            ) : versaoNova ? (
+            {versaoNova ? (
               <AvisoDeAtualizacao
                 versao={versaoNova}
                 link={linkDownload}

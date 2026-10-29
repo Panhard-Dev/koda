@@ -539,12 +539,14 @@ def _esquema(bruto: dict[str, Any]) -> dict[str, Any]:
     validação fica do lado do servidor, que é quem sabe o que aceita.
     """
     if not isinstance(bruto, dict) or not bruto:
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {"opcional": {"type": "string", "description": "Opcional; ignorado pela ferramenta."}}}
     esquema = dict(bruto)
     if esquema.get("type") != "object" and "properties" not in esquema:
         esquema = {"type": "object", "properties": {}, **esquema}
     esquema.setdefault("type", "object")
     esquema.setdefault("properties", {})
+    if not esquema["properties"]:
+        esquema["properties"] = {"opcional": {"type": "string", "description": "Opcional; ignorado pela ferramenta."}}
     return esquema
 
 

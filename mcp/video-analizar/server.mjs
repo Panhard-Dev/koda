@@ -48,10 +48,15 @@ const log = (...partes) => process.stderr.write(`[video-analizar] ${partes.join(
  */
 const MARCADOR_QUADRO = 'KODA_QUADRO:'
 
-/** O python do venv do backend — o que tem faster-whisper instalado. */
+/** O Python do backend, com as mesmas bibliotecas de vídeo usadas pelo app. */
 function python() {
   const candidatos = [
     process.env.KODA_PYTHON,
+    // No instalado o runtime mora em `backend/python`, sem `.venv`.
+    join(BACKEND, 'python', 'python.exe'),
+    // No checkout o runtime pode ter sido montado antes do empacotamento. Priorize-o
+    // sobre um `.venv` copiado de outra máquina, cujo launcher ainda existe mas não roda.
+    join(RAIZ, 'src-tauri', 'runtime', 'backend', 'python', 'python.exe'),
     join(BACKEND, '.venv', 'Scripts', 'python.exe'),
     join(BACKEND, '.venv', 'bin', 'python'),
     'python',
@@ -71,7 +76,10 @@ function python() {
  */
 function rodarMotor(pedido) {
   return new Promise((pronta, falha) => {
-    const filho = spawn(python(), [MOTOR], { cwd: BACKEND })
+    const filho = spawn(python(), [MOTOR], {
+      cwd: BACKEND,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    })
     let saida = ''
     let erro = ''
     filho.stdout.on('data', (pedaco) => {

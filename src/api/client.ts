@@ -6,6 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import type { Effort } from '../effort'
 
 import {
   ESPERA_DO_PRIMEIRO_BYTE_MS,
@@ -37,10 +38,24 @@ export let apiUrl = BASE_FIXA
  * navegador (dev) vem de `VITE_API_TOKEN`, o mesmo valor que o backend imprime ao subir.
  */
 let tokenDaExecucao: string | null = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? null
+let sessaoDaConta: string | null = null
+let versaoDaSessao = 0
+// Identificador por janela: um login não troca a identidade de streams de outra janela.
+const janelaDaExecucao = (() => {
+  const fallback = crypto.randomUUID()
+  let id: string = fallback
+  try {
+    id = sessionStorage.getItem('koda-window') ?? fallback
+    sessionStorage.setItem('koda-window', id)
+  } catch { /* Navegadores que bloqueiam storage ainda mantêm a sessão em memória. */ }
+  return id
+})()
 
 /** O cabeçalho de acesso, ou nada quando ainda não há token (dev sem `VITE_API_TOKEN`). */
 export function cabecalhoDeAcesso(): Record<string, string> {
-  return tokenDaExecucao ? { authorization: `Bearer ${tokenDaExecucao}` } : {}
+  return { 'x-koda-window': janelaDaExecucao,
+    ...(sessaoDaConta ? { 'x-koda-session': sessaoDaConta } : {}),
+    ...(tokenDaExecucao ? { authorization: `Bearer ${tokenDaExecucao}` } : {}) }
 }
 
 /** Estamos dentro do app desktop? Só lá existe `invoke`. */
@@ -384,11 +399,12 @@ export type ApiAccount = {
 }
 
 export type ChatPayload = {
+  approved_plan_id?: string
   text: string
   model: string
   reasoning: boolean
   /** Esforço de raciocínio do seletor ao lado do modelo (`auto` = quem decide é o Reasoning). */
-  effort: string
+  effort: Effort
   web: boolean
   /** Caminho completo da pasta escolhida no prompt box (projeto). */
   project_path: string | null
@@ -755,7 +771,7 @@ export const fetchAccount = () => request<ApiAccount>('/api/account')
  * ele já não atende — o `liz-4` saiu do ar e continuava no seletor, onde só dava 400 até
  * alguém recarregar o app.
  */
-export const listModels = () => request<ApiModel[]>('/api/models/testados')
+export const listModels = () => request<ApiModel[]>('/api/models')
 
 /** Como a folha melhora o prompt (o dono pediu cada modo por um motivo). */
 export type ModoDoPrompt = 'criar' | 'base' | 'fala' | 'estrutura' | 'grafia'
@@ -1164,6 +1180,11 @@ export const answerApproval = (id: string, decisao: DecisaoPermissao) =>
     body: JSON.stringify({ id, decisao }),
   })
 
+export const decidirPlano = (id: string, decision: 'approve' | 'reject') =>
+  request<{ ok: boolean; execution: ChatPayload | null }>('/api/chat/plan/decision', {
+    method: 'POST', body: JSON.stringify({ id, decision }),
+  })
+
 type StreamData = {
   start: { conversation_id: string; at: number; tools: boolean }
   delta: { text: string }
@@ -1433,6 +1454,7 @@ export async function definirSessaoDoHost(
   token: string | null,
   conta?: { nome?: string | null; email?: string | null } | null,
 ): Promise<EstadoDoHost> {
+  const versao = ++versaoDaSessao
   await prepararAcesso()
   const response = await fetch(`${apiUrl}/api/host/sessao`, {
     method: token ? 'POST' : 'DELETE',
@@ -1442,5 +1464,115 @@ export async function definirSessaoDoHost(
       : {}),
   })
   if (!response.ok) throw new ApiError(response.status, '/api/host/sessao')
+  if (versao === versaoDaSessao) sessaoDaConta = token
   return (await response.json()) as EstadoDoHost
 }
+
+/**
+ * Um provedor que entra por **login** — o retrato que o backend faz do login local.
+ *
+ * `conectado` não é «está tudo bem»: é «existe credencial do CLI nesta máquina». Quem diz
+ * se ela presta é o fornecedor, na primeira chamada — e é por isso que existe o `testar`,
+ * que confere o que dá para conferir sem rede (arquivo, conta, validade, refresh).
+ */
+export type ApiContaDoProvedor = {
+  id: string
+  conta: string | null
+  expiraEm: string | null
+  esgotadaAte: string | null
+  motivo: string | null
+  atual: boolean
+}
+
+export type ApiProvedor = {
+  id: string
+  nome: string
+  sigla: string
+  cli: string
+  login: string | null
+  cliInstalado: boolean
+  conectado: boolean
+  arquivo: string | null
+  conta: string | null
+  /** O plano que o provedor informa (o Codex diz `plus`/`pro`/`free` no id_token). */
+  plano: string | null
+  /** Até quando o plano vale, quando o provedor diz. */
+  planoAte: string | null
+  /** Todas as contas empilhadas deste provedor, na ordem do rodízio. */
+  contas: ApiContaDoProvedor[]
+  expiraEm: string | null
+  expirado: boolean | null
+  renova: boolean
+  detalhe: string
+}
+
+export const provedoresDeLogin = () => request<ApiProvedor[]>('/api/provedores')
+
+export const testarProvedor = (id: string) =>
+  request<{ ok: boolean; detalhe: string; estado?: ApiProvedor }>(
+    `/api/provedores/${encodeURIComponent(id)}/testar`,
+    { method: 'POST' },
+  )
+
+export const modelosDoProvedor = (id: string) =>
+  request<{
+    modelos: string[]
+    nomes?: Record<string, string>
+    fonte: string | null
+    motivo: string
+  }>(`/api/provedores/${encodeURIComponent(id)}/modelos`)
+
+/** O que `entrar` devolve: um fluxo para seguir, ou a explicação de por que não há. */
+export type InicioDeLogin = {
+  tipo: 'pkce' | 'device' | 'cookie' | 'cli' | 'nada'
+  url?: string
+  codigo?: string
+  estado?: string
+  mensagem?: string
+}
+
+export type EstadoDoLogin = {
+  estado: 'aguardando' | 'concluido' | 'erro' | 'parado'
+  detalhe?: string
+  conta?: string | null
+  url?: string
+  codigo?: string
+}
+
+/** Pergunta ao fornecedor se a conta logada alcança este modelo. */
+export const testarModeloDoProvedor = (id: string, modelo: string) =>
+  request<{ ok: boolean; detalhe: string }>(
+    `/api/provedores/${encodeURIComponent(id)}/modelos/${encodeURIComponent(modelo)}/testar`,
+    { method: 'POST' },
+  )
+
+export const entrarNoProvedor = (id: string) =>
+  request<InicioDeLogin>(`/api/provedores/${encodeURIComponent(id)}/entrar`, { method: 'POST' })
+
+/** Termina o login pelo código colado — o caminho de quem não volta sozinho. */
+export const concluirLoginComCodigo = (id: string, codigo: string) =>
+  request<{ ok: boolean; conta?: string | null; mensagem?: string }>(
+    `/api/provedores/${encodeURIComponent(id)}/entrar/codigo`,
+    { method: 'POST', body: JSON.stringify({ codigo }) },
+  )
+
+export const estadoDoLoginDoProvedor = (id: string) =>
+  request<EstadoDoLogin>(`/api/provedores/${encodeURIComponent(id)}/entrar`)
+
+export const cancelarLoginDoProvedor = (id: string) =>
+  request<{ estado: string }>(`/api/provedores/${encodeURIComponent(id)}/entrar`, {
+    method: 'DELETE',
+  })
+
+export const sairDoProvedor = (id: string, conta?: string) =>
+  request<{ ok: boolean }>(
+    `/api/provedores/${encodeURIComponent(id)}/sair${conta ? `?conta=${encodeURIComponent(conta)}` : ''}`,
+    { method: 'POST' },
+  )
+
+/** Testa **uma** conta: manda uma mensagem curta e devolve o que ela respondeu. */
+export const testarContaDoProvedor = (id: string, conta: string) =>
+  request<{ ok: boolean; detalhe: string; esgotadaAte?: string | null; modelo?: string }>(
+    `/api/provedores/${encodeURIComponent(id)}/contas/${encodeURIComponent(conta)}/testar`,
+    { method: 'POST' },
+  )

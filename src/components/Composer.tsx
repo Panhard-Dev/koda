@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useMemo, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, ClipboardEvent, DragEvent, ReactNode } from 'react'
 import {
   ALargeSmall,
@@ -323,7 +323,8 @@ export function Composer({
   onDecidirPermissao,
   model = MODELO_PADRAO,
   onModelChange,
-  remoteModels = [],
+  remoteModels = null,
+  provedoresLogados = [],
   modelosBloqueados = [],
   contextoPorModelo = {},
   contextoJanela = null,
@@ -365,7 +366,9 @@ export function Composer({
   model?: string
   onModelChange?: (value: string) => void
   /** Modelos que vieram do backend, além dos da casa. */
-  remoteModels?: RemoteModel[]
+  remoteModels?: RemoteModel[] | null
+  /** Grupos de modelos dos provedores em que a pessoa entrou (Codex, Gemini…), no seletor. */
+  provedoresLogados?: MenuOption[]
   /**
    * Modelos que o painel tirou desta conta (desativados, ou desligados por exceção).
    * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
@@ -547,8 +550,17 @@ export function Composer({
    * fila e sai quando a resposta em curso terminar. O que continua segurando o envio é
    * o anexo subindo — mandar a mensagem sem o arquivo pronto seria perder o arquivo.
    */
-  const canSend = !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
-  const activeModel = findModel(model, remoteModels)
+  const canSend = Boolean(model) && !subindoAnexo && (message.trim().length > 0 || attachments.length > 0)
+  const activeModel = useMemo(() => {
+    const doHost = findModel(model, remoteModels ?? [])
+    if (doHost.label !== model) return doHost
+    // Modelo de conta: o rótulo mora no grupo do provedor, não no catálogo do host.
+    for (const grupo of provedoresLogados) {
+      const achado = (grupo.options ?? []).find((opcao) => opcao.value === model)
+      if (achado) return { value: achado.value, label: achado.label, icon: achado.icon }
+    }
+    return doHost
+  }, [model, remoteModels, provedoresLogados])
   const effort = effortDoModelo(efforts, model)
   const ativo = projects.find((item) => item.id === projectId) ?? null
   const projetoLabel = ativo ? ativo.nome : 'Selecionar projeto'
@@ -1431,7 +1443,10 @@ export function Composer({
               )}
             </Menu>
             <Menu
-              options={comMedidor(modelMenu(remoteModels, modelosBloqueados))}
+              options={comMedidor([
+                ...modelMenu(remoteModels, modelosBloqueados),
+                ...provedoresLogados,
+              ])}
               value={model}
               onSelect={(value) => onModelChange?.(value)}
               align="end"
@@ -1440,7 +1455,7 @@ export function Composer({
               triggerClassName="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] text-koda-fg/50 transition-colors duration-150 hover:bg-koda-fg/8 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
             >
               <span className="text-koda-fg/60">{activeModel.icon}</span>
-              <span className="hidden sm:inline">{activeModel.label}</span>
+              <span className="hidden sm:inline">{model ? activeModel.label : 'Nenhum modelo disponível'}</span>
               {/* O contexto do modelo escolhido, ao lado do nome dele. */}
               <ContextRing
                 usado={contextoPorModelo[model] ?? 0}

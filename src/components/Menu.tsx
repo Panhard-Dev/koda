@@ -173,6 +173,7 @@ export function Menu({
       <button
         ref={triggerRef}
         type="button"
+        disabled={options.length === 0}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}

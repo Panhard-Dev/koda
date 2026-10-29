@@ -7,11 +7,18 @@ threads — as rotas assíncronas chamam o repositório via `asyncio.to_thread`.
 from __future__ import annotations
 
 import sqlite3
+import json
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
+from . import provider_state
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS account_permissions (
+  owner_account_id TEXT PRIMARY KEY,
+  approval_mode TEXT NOT NULL CHECK(approval_mode IN ('plan','manual','default','auto','livre'))
+);
 CREATE TABLE IF NOT EXISTS conversations (
   id          TEXT PRIMARY KEY,
   title       TEXT NOT NULL,
@@ -111,6 +118,25 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_criado ON attachments(criado_em);
+
+CREATE TABLE IF NOT EXISTS task_plans (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  owner_account_id TEXT NOT NULL,
+  window_id TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','superseded','running','completed','interrupted')),
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_plans_conversation ON task_plans(conversation_id, status);
+CREATE TABLE IF NOT EXISTS message_attachments (
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  PRIMARY KEY(message_id, attachment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment ON message_attachments(attachment_id);
 """
 
 
@@ -122,15 +148,41 @@ class Database:
         """Cria a pasta, o arquivo e o esquema (idempotente)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version < 3 and conn.execute("SELECT 1 FROM sqlite_master WHERE name='conversations'").fetchone():
+                backup = self.path.with_name(self.path.name + f".pre-audit-{time.time_ns()}.bak")
+                with closing(sqlite3.connect(backup)) as destination:
+                    conn.backup(destination)
             conn.executescript(SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")
             self._migrar(conn)
+            if version < 3:
+                conn.execute("PRAGMA user_version=3")
 
     @staticmethod
     def _migrar(conn: sqlite3.Connection) -> None:
         """Bancos antigos ganham as colunas novas sem perder o que já têm."""
+        plan_schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='task_plans'").fetchone()[0]
+        if "'completed'" not in plan_schema:
+            conn.execute("ALTER TABLE task_plans RENAME TO task_plans_v2")
+            definition = SCHEMA[SCHEMA.index('CREATE TABLE IF NOT EXISTS task_plans ('):]
+            conn.execute(definition.split(';', 1)[0])
+            conn.execute("INSERT INTO task_plans SELECT * FROM task_plans_v2")
+            conn.execute("DROP TABLE task_plans_v2")
+            conn.execute("CREATE INDEX idx_task_plans_conversation ON task_plans(conversation_id, status)")
         colunas = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "verification" not in colunas:
+            conn.execute("ALTER TABLE messages ADD COLUMN verification TEXT NOT NULL DEFAULT '{}'")
         if "reasoning_content" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT")
+        # Estado privado serve à continuidade recente, não é arquivo permanente.
+        conn.execute("UPDATE messages SET reasoning_content=NULL WHERE at<?",
+                     (int(time.time() * 1000) - 7 * 86400 * 1000,))
+        # Migra o estado legado em texto cru; falha de proteção descarta só esse estado
+        # privado, sem apagar mensagem, resposta ou evidência das ferramentas.
+        for row in conn.execute("SELECT id, reasoning_content FROM messages WHERE reasoning_content IS NOT NULL AND reasoning_content NOT LIKE 'dpapi-v1:%'").fetchall():
+            conn.execute("UPDATE messages SET reasoning_content=? WHERE id=?",
+                         (provider_state.proteger(row["reasoning_content"]), row["id"]))
         if "steps" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN steps TEXT NOT NULL DEFAULT '[]'")
         if "tokens" not in colunas:
@@ -171,7 +223,7 @@ class Database:
         # de quem eram, e chutar a conta de hoje carimbaria o gasto de outra pessoa nela.
         if "conta" not in colunas:
             conn.execute("ALTER TABLE messages ADD COLUMN conta TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conta ON messages(conta, at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conta ON messages(conta, at)")
 
         # O resumo da compactação, na conversa. Conversa antiga nasce sem resumo e com zero
         # mensagens cobertas — que é exatamente o estado dela: nada foi resumido ainda.
@@ -184,6 +236,45 @@ class Database:
             conn.execute(
                 "ALTER TABLE conversations ADD COLUMN resumo_mensagens INTEGER NOT NULL DEFAULT 0"
             )
+        if "owner_account_id" not in colunas_conversa:
+            conn.execute("ALTER TABLE conversations ADD COLUMN owner_account_id TEXT")
+            # Só migra quando TODAS as mensagens identificam a mesma conta.
+            conn.execute("""UPDATE conversations SET owner_account_id = (
+                SELECT MIN(lower(trim(conta))) FROM messages WHERE conversation_id = conversations.id
+            ) WHERE id IN (SELECT conversation_id FROM messages GROUP BY conversation_id
+                HAVING COUNT(*) = COUNT(NULLIF(trim(conta), ''))
+                   AND COUNT(DISTINCT lower(trim(conta))) = 1)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_account_id, updated_at)")
+        attachment_columns = {row["name"] for row in conn.execute("PRAGMA table_info(attachments)")}
+        if "owner_account_id" not in attachment_columns:
+            conn.execute("ALTER TABLE attachments ADD COLUMN owner_account_id TEXT")
+            owners: dict[str, set[str | None]] = {}
+            for row in conn.execute("SELECT m.attachments, c.owner_account_id FROM messages m JOIN conversations c ON c.id=m.conversation_id"):
+                try:
+                    items = json.loads(row["attachments"])
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict) and isinstance(item.get("id"), str):
+                        owners.setdefault(item["id"], set()).add(row["owner_account_id"])
+            for attachment_id, accounts in owners.items():
+                if len(accounts) == 1 and None not in accounts:
+                    conn.execute("UPDATE attachments SET owner_account_id=? WHERE id=?", (next(iter(accounts)), attachment_id))
+        if "state" not in attachment_columns:
+            conn.execute("ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'ready'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(owner_account_id, state)")
+        permission_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approval_rules)")}
+        if "owner_account_id" not in permission_columns:
+            conn.execute("ALTER TABLE approval_rules ADD COLUMN owner_account_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_approval_owner ON approval_rules(owner_account_id, kind, scope)")
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+            conn.execute("""INSERT OR IGNORE INTO message_attachments (message_id, attachment_id)
+                SELECT m.id, a.id FROM messages m JOIN conversations c ON c.id=m.conversation_id,
+                  json_each(CASE WHEN json_valid(m.attachments) THEN m.attachments ELSE '[]' END) j
+                JOIN attachments a ON a.id=CASE WHEN j.type='object' THEN json_extract(j.value, '$.id') ELSE NULL END
+                WHERE a.owner_account_id=c.owner_account_id""")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

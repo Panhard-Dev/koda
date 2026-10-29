@@ -53,7 +53,10 @@ async def metadados(anexo_id: str, request: Request) -> AttachmentInfo:
 @router.delete("/attachments/{anexo_id}")
 async def remover(anexo_id: str, request: Request) -> dict[str, bool]:
     """Remove o anexo do store (o usuário tirou o chip antes de enviar)."""
-    removido = await asyncio.to_thread(_store(request).remover, anexo_id)
+    try:
+        removido = await asyncio.to_thread(_store(request).remover, anexo_id)
+    except anexos.AnexoError as erro:
+        raise HTTPException(409, str(erro)) from erro
     if not removido:
         raise HTTPException(status_code=404, detail="esse anexo não existe mais")
     return {"ok": True}

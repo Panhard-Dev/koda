@@ -233,12 +233,13 @@ function grupoDaFamilia(chave: string, label: string, opcoes: MenuOption[], avis
  * mantêm o modelo na lista, em silêncio: ele existe, e o número é da sonda, não da pessoa.
  * `status` ausente não exclui ninguém: host calado não prova que o modelo sumiu.
  */
-export function modelMenu(items: RemoteModel[] = [], bloqueados: readonly string[] = []): MenuOption[] {
+export function modelMenu(items: RemoteModel[] | null = null, bloqueados: readonly string[] = []): MenuOption[] {
   const liberado = (value: string) => !bloqueados.includes(value)
 
-  // Sem catálogo do backend, o espelho é o da casa — já na ordem das famílias (MODEL_MENU).
+  // Só null significa que ainda não houve resposta: usa o espelho da casa (MODEL_MENU).
+  // [] é resposta vazia do host e deixa o menu vazio até a próxima consulta.
   // Grupo que ficasse vazio pelos bloqueios sai da lista: cabeçalho sem item é um beco.
-  if (items.length === 0) {
+  if (items === null) {
     return MODEL_MENU.map((categoria) =>
       grupoDaFamilia(
         categoria.value.replace('categoria-', ''),

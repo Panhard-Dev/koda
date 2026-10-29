@@ -37,7 +37,8 @@ class ToolCall:
             "function": {"name": self.name, "arguments": self.raw_arguments or "{}"},
         }
         if self.extra:
-            mensagem.update(self.extra)
+            # Metadados do provider não podem reescrever id, função ou argumentos.
+            mensagem = {**self.extra, **mensagem}
         return mensagem
 @dataclass(slots=True)
 class StepResult:
@@ -74,6 +75,8 @@ class ToolStep:
     duration_ms: int
     call_id: str = ""
     ok: bool = True
+    executed: bool = False
+    status: str = "blocked"
     #: A chamada **como o modelo a escreveu**, em texto. `arguments` é essa mesma chamada já
     #: desserializada, e é ela que a ferramenta recebe. Este campo existe para os casos em que
     #: não há o que desserializar: JSON cortado no meio (`finish_reason: "length"`) chega como
@@ -96,6 +99,8 @@ class ToolStep:
             "duration_ms": self.duration_ms,
             "call_id": self.call_id,
             "ok": self.ok,
+            "executed": self.executed,
+            "status": self.status,
             "raw_arguments": self.raw_arguments,
             "mcp": self.mcp,
         }

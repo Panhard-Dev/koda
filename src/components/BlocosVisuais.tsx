@@ -2247,6 +2247,7 @@ function etapasDoPlano(bruto: unknown): Passo[] {
  * em mono com balão no mouse — é o que quem lê confere primeiro.
  */
 function Plano({
+  planId,
   titulo,
   deQue,
   praQue,
@@ -2255,6 +2256,7 @@ function Plano({
   mudancas,
   resultado,
 }: {
+  planId?: string
   titulo: string
   deQue?: string
   praQue?: string
@@ -2277,11 +2279,20 @@ function Plano({
    * que a vitrine precisa.
    */
   const [decisao, setDecisao] = useState<'fazer' | 'desistir' | null>(null)
+  const [decidindo, setDecidindo] = useState(false)
+  const [erroDecisao, setErroDecisao] = useState(false)
 
   const decidir = (aceito: boolean) => {
-    if (decisao) return
-    setDecisao(aceito ? 'fazer' : 'desistir')
-    window.dispatchEvent(new CustomEvent('koda-plano', { detail: { aceito } }))
+    if (decisao || decidindo || !planId) return
+    setDecidindo(true)
+    setErroDecisao(false)
+    window.dispatchEvent(new CustomEvent('koda-plano', { detail: { aceito, planId,
+      onResult: (ok: boolean) => {
+        setDecidindo(false)
+        setErroDecisao(!ok)
+        if (ok) setDecisao(aceito ? 'fazer' : 'desistir')
+      },
+    } }))
   }
 
   /** Uma das três explicações curtas — a cor é a identidade da seção. */
@@ -2368,10 +2379,14 @@ function Plano({
 
       {decisao === null ? (
         <div className="mt-1 flex items-center justify-end gap-2 border-t border-koda-fg/8 pt-3">
-          <p className="mr-auto text-[11.5px] text-koda-fg/45">pode começar?</p>
+          <p className="mr-auto text-[11.5px] text-koda-fg/45">
+            {!planId ? 'Plano antigo: peça um plano atualizado.' : erroDecisao
+              ? 'Não foi possível confirmar a decisão.' : decidindo ? 'Confirmando…' : 'pode começar?'}
+          </p>
           <button
             type="button"
             onClick={() => decidir(false)}
+            disabled={!planId || decidindo}
             className="rounded-xl px-3 py-1.5 text-[12.5px] font-medium text-koda-fg/60 ring-1 ring-koda-fg/12 transition-colors hover:bg-koda-fg/6 hover:text-koda-fg/85"
           >
             Desistir
@@ -2379,6 +2394,7 @@ function Plano({
           <button
             type="button"
             onClick={() => decidir(true)}
+            disabled={!planId || decidindo}
             className="rounded-xl bg-koda-accent-strong px-3.5 py-1.5 text-[12.5px] font-medium text-white ring-1 ring-transparent transition-colors hover:bg-koda-accent-strong/85"
           >
             Fazer
@@ -2859,6 +2875,7 @@ function Desenho({
       }
       return (
         <Plano
+          planId={texto(dados.plan_id) || undefined}
           titulo={titulo}
           deQue={deQue}
           praQue={praQue}

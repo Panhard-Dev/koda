@@ -130,24 +130,10 @@ class Settings(BaseSettings):
     proteção contra o modelo ser convencido por uma página lida na web a mexer em
     algo do sistema. O `shell`/`terminal` continua podendo tudo — é o que ele é.
     """
-    max_steps: int = 0
-    """Teto de passos do modelo por tarefa. **0 = sem teto**, como o projeto de origem.
-
-    Ele não tem teto de turno por padrão, e a razão é conhecida: teto
-    fixo trunca tarefa grande no meio, em silêncio. Este número já foi 12 e depois 100, e
-    100 não é "tarefa grande": montar um projeto, refatorar um módulo ou rodar uma bateria
-    de testes passa disso no meio de trabalho legítimo. Quem impede um loop sem fim é o
-    botão de parar, o teto de tempo da tarefa (`tool_timeout_s`) e o contador de respostas
-    vazias do loop — não a contagem de passos.
-    """
-    tool_timeout_s: int = 0
-    """Orçamento de tempo da tarefa inteira, em segundos (0 = **sem limite**).
-
-    Era 1800 s (meia hora), e uma tarefa grande de verdade estoura isso: o agente fechava
-    com "o tempo da tarefa acabou antes de terminar" no meio do trabalho. O dono foi
-    explícito: a tarefa vai até acabar, não importa o tamanho. O que impede um loop sem fim
-    é o botão de parar, o contador de respostas vazias e o de provedor fora do ar.
-    """
+    max_steps: int = Field(default=500, ge=1, le=10_000)
+    """Chamadas de modelo por tarefa; o limite produz parada parcial retomável."""
+    tool_timeout_s: int = Field(default=7200, ge=60, le=86_400)
+    """Orçamento de tempo por rodada (segundos). Retomar abre uma nova rodada."""
     # --- Tetos de saída das ferramentas (os mesmos do projeto de origem) --------------
     # A referência de comportamento do Koda é esse projeto, e estes são os números dele:
     # `tools/tool_output_limits.py` publica max_bytes 50_000, max_lines 2_000 e
@@ -185,13 +171,8 @@ class Settings(BaseSettings):
     comando_olhada_s: int = 240
     """De quanto em quanto tempo um comando longo devolve a palavra ao modelo."""
 
-    max_tool_calls: int = 0
-    """Teto de chamadas de ferramenta por tarefa. **0 = sem teto**, como o projeto de origem.
-
-    Mesma razão do `max_steps`: tarefa grande faz dezenas de chamadas legítimas, e parar no
-    meio por contagem é o modelo ficando sem como terminar o que começou. Configure um valor
-    positivo só quando quiser um teto explícito numa instalação.
-    """
+    max_tool_calls: int = Field(default=1000, ge=1, le=10_000)
+    """Orçamento de execuções de ferramenta por tarefa."""
     tool_call_timeout_s: int = 120
     """Tempo máximo de uma chamada de ferramenta, em segundos (0 = sem teto explícito).
 
@@ -225,11 +206,27 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:21128/v1",
         validation_alias=AliasChoices("HOST_URL", "KODA_HOST_URL"),
     )
+    host_fallback_url: str = Field(
+        default="http://127.0.0.1:21129/v1",
+        validation_alias=AliasChoices("KODA_HOST_FALLBACK_URL", "KODAHOST_URL"),
+    )
+    """Segundo host OpenAI-compatível, usado somente quando o principal falha.
+
+    O `kodahost1.exe` atende nesta porta quando está autorizado. Ele não recebe tráfego
+    normal enquanto o `c-host.exe` estiver saudável: entra apenas para queda de rede,
+    timeout, 5xx ou cota (HTTP 429). Deixe vazio para desligar o failover.
+    """
     host_model: str = Field(
-        default="liz-4",
+        default="liz-4-5-super",
         validation_alias=AliasChoices("HOST_MODEL", "KODA_HOST_MODEL"),
     )
-    """Modelo padrão do serviço, para id que ele não reconheça (ou vazio)."""
+    """Modelo padrão do serviço, para id que ele não reconheça (ou vazio).
+
+    Era `liz-4` até 23/10/2026: o host trocou o id por `liz-4-5-super` em 16/10 e
+    passou a **recusar** a grafia antiga (`400 model_not_found`, "rejected a model
+    spelling that is not branded"). Todo pedido com id vazio ou desconhecido caía
+    no padrão e voltava com erro — medido contra o host real.
+    """
 
     host_modelos_com_visao: str = Field(
         default="liz-4-5-super,liz-3-flash,liz-mini-1-3,koda-1,layze-2,liz-nano,nable-4-mini-preview",
@@ -268,6 +265,15 @@ class Settings(BaseSettings):
     não olha o cabeçalho. Sem nada aqui o `Authorization` simplesmente não vai, então o
     padrão continua funcionando com o host aberto; com o host fechado, isto é o que faz o
     agente voltar a ter ferramentas em vez de cair no provider local.
+    """
+
+    dynamic_key_file: Path | None = None
+    """Onde mora a senha dinâmica do dia (`koda-host-dinamica.json`).
+
+    O shell do app passa este caminho ao subir o `c-host` (`SERVE_LIZ_DYNAMIC_KEY_FILE`) e
+    o backend escreve o JSON que o painel entregou no mesmo lugar — os dois precisam
+    concordar, senão o host lê um arquivo que ninguém escreve. Vazio = ao lado do banco,
+    na pasta de dados do app. Ver `host_dinamica.py`.
     """
 
     # --- Nuvem (Koda Cloud) ---
@@ -315,6 +321,14 @@ class Settings(BaseSettings):
             raise ValueError("KODA_CLOUD_URL precisa ser HTTPS")
         return limpo
 
+    @field_validator("max_steps", "tool_timeout_s", "max_tool_calls", mode="before")
+    @classmethod
+    def _migrar_orcamentos_sem_teto(cls, value, info):
+        # Configurações já distribuídas usavam 0; abrir a versão nova não pode falhar.
+        if value in (0, "0"):
+            return {"max_steps": 500, "tool_timeout_s": 7200, "max_tool_calls": 1000}[info.field_name]
+        return value
+
     @property
     def cloud_download_permitidos(self) -> list[str]:
         return [item.strip().lower() for item in self.cloud_download_hosts.split(",") if item.strip()]
@@ -326,8 +340,8 @@ class Settings(BaseSettings):
     def aceita_imagem(self, model: str) -> bool:
         """O modelo enxerga imagem? Decide se o anexo de imagem vai **no corpo** do pedido.
 
-        Compara pelo id do catálogo do host (`liz-4`). Um id vazio cai no modelo padrão do
-        host, que é o que o provider vai usar de verdade.
+        Compara pelo id do catálogo do host (`liz-4-5-super`). Um id vazio cai no modelo
+        padrão do host, que é o que o provider vai usar de verdade.
         """
         alvo = model or self.host_model
         return alvo in {item.strip() for item in self.host_modelos_com_visao.split(",") if item.strip()}

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from typing import Any
@@ -42,6 +44,23 @@ TRANSITORIOS = {408, 409, 425, 429, 500, 502, 503, 504}
 #: martelando com backoff por dezenas de segundos antes de desistir. Falha de configuração tem
 #: de falhar rápido e dizer o que está errado.
 TRANSITORIOS_PROXY = TRANSITORIOS
+
+
+def _retry_after_segundos(valor: str | None) -> float | None:
+    """Interpreta Retry-After sem aceitar esperas negativas ou ilimitadas."""
+    if not valor:
+        return None
+    try:
+        segundos = float(valor)
+    except ValueError:
+        try:
+            data = parsedate_to_datetime(valor)
+            segundos = (data - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not 0 < segundos <= 120:
+        return None
+    return segundos
 
 #: Por quanto tempo o catálogo de esforços do host fica em memória, em segundos. Sem
 #: expiração, um catálogo lido quando o host ainda não tinha subido ficava `{}` **para
@@ -333,9 +352,9 @@ class OpenAICompatibleProvider:
     ) -> list[dict[str, Any]]:
         return messages
 
-    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None) -> ProviderError:
+    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None, retry_after: str | None = None) -> ProviderError:
         mensagem = f"O provedor respondeu {status}{_medidas_do_pedido(payload)}: {detalhe.strip() or 'corpo da resposta vazio'}"
-        return TransientProviderError(mensagem) if status in TRANSITORIOS else ProviderError(mensagem)
+        return TransientProviderError(mensagem, _retry_after_segundos(retry_after)) if status in TRANSITORIOS else ProviderError(mensagem)
 
     async def esforco(self, reasoning: bool, modelo: str, escolha: str | None = None) -> str:
         """`reasoning_effort` da mensagem (só quem manda o campo usa).
@@ -350,6 +369,7 @@ class OpenAICompatibleProvider:
     # ------------------------------------------------------------ streaming
 
     async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
+        _recusar_modelo_de_conta(options.model)
         modelo = self.resolve_model(options.model)
         payload: dict[str, Any] = {
             "model": modelo,
@@ -409,7 +429,7 @@ class OpenAICompatibleProvider:
                                 payload["reasoning_effort"] = proximo
                                 ajustes += 1
                                 continue
-                        raise self._erro(response.status_code, detalhe, payload)
+                        raise self._erro(response.status_code, detalhe, payload, response.headers.get("retry-after"))
 
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -521,7 +541,7 @@ class OpenAICompatibleProvider:
             raise TransientProviderError(_descrever_erro_de_rede(error)) from error
 
         if response.status_code >= 400:
-            raise self._erro(response.status_code, response.text, payload)
+            raise self._erro(response.status_code, response.text, payload, response.headers.get("retry-after"))
 
         try:
             dados = response.json()
@@ -647,7 +667,7 @@ class OpenAICompatibleProvider:
                                 payload["reasoning_effort"] = proximo
                                 ajustes += 1
                                 continue
-                        raise self._erro(response.status_code, detalhe, payload)
+                        raise self._erro(response.status_code, detalhe, payload, response.headers.get("retry-after"))
 
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -764,6 +784,21 @@ class OpenAICompatibleProvider:
         )
 
 
+def _conta_para(settings: Settings, modelo: str | None):
+    """Se o modelo é de uma conta logada, devolve o provedor dela; senão `None`.
+
+    O seletor manda `provedor:<id>:<modelo>` — o dono vem no próprio valor, sem depender de
+    cache (o cache só existe depois de alguém abrir a lista, e era por isso que o id vazava
+    para o host e voltava como `model_not_found`).
+    """
+    from .conta import ContaProvider, dono
+
+    achado = dono(modelo or "")
+    if achado is None:
+        return None
+    return ContaProvider(settings, achado[0])
+
+
 class HostProvider(OpenAICompatibleProvider):
     """O provider do serviço de modelos oficial (Liz): a mesma API da OpenAI, do outro lado.
 
@@ -780,7 +815,7 @@ class HostProvider(OpenAICompatibleProvider):
     name = "host"
     manda_esforco = True
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, _reserva: bool = False) -> None:
         super().__init__(settings, base_url=settings.host_url, model=settings.host_model)
         # A credencial **não** fica guardada aqui: ela é lida a cada pedido (ver `headers`),
         # porque a sessão da conta chega depois da subida do processo.
@@ -789,6 +824,106 @@ class HostProvider(OpenAICompatibleProvider):
         #: Piso de raciocínio por modelo, do mesmo `/v1/models` (ver `sobe_ate_o_piso`).
         self._pisos: dict[str, str] = {}
         self._esforcos_em = 0.0
+        # O segundo processo é deliberadamente uma reserva, não um balanceador. Assim as
+        # contas do kodahost só são consumidas quando o c-host caiu ou devolveu cota.
+        reserva = settings.host_fallback_url.strip().rstrip("/")
+        principal = settings.host_url.strip().rstrip("/")
+        self._fallback: HostProvider | None = None
+        self._fallback_until = 0.0
+        if not _reserva and reserva and reserva != principal:
+            self._fallback = HostProvider.__new__(HostProvider)
+            OpenAICompatibleProvider.__init__(
+                self._fallback, settings, base_url=reserva, model=settings.host_model
+            )
+            self._fallback.ready = True
+            self._fallback._esforcos = None
+            self._fallback._pisos = {}
+            self._fallback._esforcos_em = 0.0
+            self._fallback._fallback = None
+            self._fallback._fallback_until = 0.0
+
+    def _usar_reserva(self) -> bool:
+        return self._fallback is not None and time.monotonic() < self._fallback_until
+
+    def _marcar_falha_do_principal(self) -> None:
+        # Se um stream cair depois de emitir texto, o chamador reinicia o passo.
+        # Nessa nova tentativa, use a reserva em vez de repetir no host quebrado.
+        self._fallback_until = time.monotonic() + 30.0
+
+    async def step(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str = ""
+    ) -> StepResult:
+        """Executa um passo e só então passa para o kodahost quando for recuperável."""
+        da_conta = _conta_para(self.settings, model)
+        if da_conta is not None:
+            return await da_conta.step(messages, tools, model)
+        if self._usar_reserva():
+            return await self._fallback.step(messages, tools, model)
+        try:
+            return await super().step(messages, tools, model)
+        except TransientProviderError:
+            if self._fallback is None:
+                raise
+            self._marcar_falha_do_principal()
+            return await self._fallback.step(messages, tools, model)
+
+    async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
+        """Troca de host antes do primeiro delta; depois dele nunca duplica resposta."""
+        da_conta = _conta_para(self.settings, options.model)
+        if da_conta is not None:
+            async for pedaco in da_conta.stream(turns, options):
+                yield pedaco
+            return
+        if self._usar_reserva():
+            async for pedaco in self._fallback.stream(turns, options):
+                yield pedaco
+            return
+        emitiu = False
+        try:
+            async for pedaco in super().stream(turns, options):
+                emitiu = True
+                yield pedaco
+            return
+        except TransientProviderError:
+            if self._fallback is not None:
+                self._marcar_falha_do_principal()
+            if emitiu or self._fallback is None:
+                raise
+        async for pedaco in self._fallback.stream(turns, options):
+            yield pedaco
+
+    async def step_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str = "",
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        """Mesma garantia no fluxo de agente, inclusive para 429 do host principal."""
+        # O caminho com ferramentas passa por aqui, não pelo `step`. O modelo de conta é
+        # respondido pelo provedor dela; o resto segue para o host.
+        da_conta = _conta_para(self.settings, model)
+        if da_conta is not None:
+            yield await da_conta.step(messages, tools, model)
+            return
+        if self._usar_reserva():
+            async for pedaco in self._fallback.step_streaming(messages, tools, model, reasoning, effort):
+                yield pedaco
+            return
+        emitiu = False
+        try:
+            async for pedaco in super().step_streaming(messages, tools, model, reasoning, effort):
+                emitiu = True
+                yield pedaco
+            return
+        except TransientProviderError:
+            if self._fallback is not None:
+                self._marcar_falha_do_principal()
+            if emitiu or self._fallback is None:
+                raise
+        async for pedaco in self._fallback.step_streaming(messages, tools, model, reasoning, effort):
+            yield pedaco
 
     def headers(self) -> dict[str, str]:
         """O que vai em todo pedido ao host: a sessão da conta, ou a chave de serviço.
@@ -960,10 +1095,10 @@ class HostProvider(OpenAICompatibleProvider):
             for message in messages
         ]
 
-    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None) -> ProviderError:
+    def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None, retry_after: str | None = None) -> ProviderError:
         motivo = _motivo_do_host(detalhe)
         if status in TRANSITORIOS_PROXY:
-            return TransientProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}")
+            return TransientProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}", _retry_after_segundos(retry_after))
         return ProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}")
 
 

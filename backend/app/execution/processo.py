@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from ..limits import LIMITES, cortar_cabeca_e_cauda
 from .tempo import (
+    HOST_EXECUTION_ALLOWED,
     _CANCELAMENTO_DA_FERRAMENTA,
     _PRAZO_DA_FERRAMENTA,
     _restante_da_ferramenta,
@@ -171,9 +172,13 @@ def _ambiente_do_comando(extra: dict[str, str] | None = None) -> dict[str, str]:
     `npm`. O resultado era o modelo recebendo "não está instalado nesta máquina" para um
     programa que existe.
     """
-    ambiente = {**os.environ, "PATH": _path_com_programas()}
+    # Credenciais do próprio Koda nunca são herdadas por código executado pelo agente.
+    def internal(key: str) -> bool:
+        return key.upper() == 'HOST_KEY' or key.upper().startswith(('KODA_', 'SERVE_LIZ_'))
+    ambiente = {key: value for key, value in os.environ.items() if not internal(key)}
+    ambiente["PATH"] = _path_com_programas()
     if extra:
-        ambiente.update(extra)
+        ambiente.update({key: value for key, value in extra.items() if not internal(key)})
     return ambiente
 def _which(programa: str) -> str | None:
     """`shutil.which` no PATH **aumentado** — o mesmo que o shell enxerga."""
@@ -201,6 +206,8 @@ def _kwargs_de_processo(
     `stdin=DEVNULL` é obrigatório num agente automático: com o stdin herdado, um comando que
     pede entrada fica pendurado esperando algo que nunca vem (o modo dev herda o terminal).
     """
+    if not HOST_EXECUTION_ALLOWED.get():
+        raise PermissionError('este agente não tem capacidade de executar processos no host')
     return {
         "shell": shell,
         "cwd": str(workspace),
@@ -726,10 +733,12 @@ def _comecar(
     _RODANDO[identificador] = rodando
     return rodando
 def _acompanhar(
-    identificador: str, tempo: int, espera_maxima: float | None = None
+    identificador: str, tempo: int, espera_maxima: float | None = None, *, dono: str | None = None
 ) -> str:
     """Espera mais um tanto por um comando que já estava rodando."""
     rodando = _RODANDO.get(identificador)
+    if rodando is not None and dono is not None and rodando.dono != dono:
+        return "ERRO: comando não encontrado nesta tarefa."
     if rodando is None:
         return (
             f"ERRO: não há comando rodando com id {identificador!r} — ele já terminou ou o "
@@ -763,7 +772,10 @@ def _acompanhar(
             "acompanhado ou cancelado.\n" + relatorio
         )
     return relatorio
-def _parar(identificador: str) -> str:
+def _parar(identificador: str, *, dono: str | None = None) -> str:
+    rodando = _RODANDO.get(identificador)
+    if rodando is not None and dono is not None and rodando.dono != dono:
+        return "ERRO: comando não encontrado nesta tarefa."
     rodando = _RODANDO.pop(identificador, None)
     if rodando is None:
         return f"ERRO: não há comando rodando com id {identificador!r}."

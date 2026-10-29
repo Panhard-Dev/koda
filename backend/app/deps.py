@@ -21,7 +21,9 @@ def database(request: Request) -> Database:
 
 
 def provider(request: Request) -> Provider:
-    return request.app.state.provider
+    from .host_auth import contexto_atual
+    providers = getattr(request.app.state, "providers", {})
+    return providers.get(contexto_atual().window, request.app.state.provider)
 
 
 def nuvem(request: Request) -> ServicoNuvem:
