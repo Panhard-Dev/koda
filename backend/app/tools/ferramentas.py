@@ -44,6 +44,7 @@ from .registry import (
     canonico,
 )
 from ..execution import processo, tempo
+from ..execution import paths as safe_paths
 from ..execution.processo import (
     ComandoRodando,
     encerrar_do_dono,
@@ -507,7 +508,7 @@ def _ler_trecho(
     acumulado = 0
     total = 0
     excedeu = False
-    with rota.open("r", encoding="utf-8", errors="replace") as arquivo:
+    with safe_paths.open_read(rota, errors="replace") as arquivo:
         for numero, linha in enumerate(arquivo, 1):
             total = numero
             if numero < inicio:
@@ -534,8 +535,9 @@ def _texto_do_pdf(rota: Path) -> str | None:
     except ImportError:  # pragma: no cover — pypdf é dependência declarada
         return None
     try:
-        leitor = PdfReader(str(rota))
-        paginas = [(pagina.extract_text() or "").strip() for pagina in leitor.pages]
+        with safe_paths.open_read(rota, binary=True) as source:
+            leitor = PdfReader(source)
+            paginas = [(pagina.extract_text() or "").strip() for pagina in leitor.pages]
     except Exception:
         # PDF quebrado, criptografado ou fora do que o pypdf entende: não é erro do agente,
         # é um anexo que não dá para ler como texto. Quem responde é `_ler_anexo`.
@@ -618,7 +620,7 @@ def _escrever_atomico(rota: Path, texto: str) -> None:
     rota.parent.mkdir(parents=True, exist_ok=True)
     temporario = rota.with_name(f".{rota.name}.koda-{uuid.uuid4().hex[:8]}.tmp")
     try:
-        with temporario.open("w", encoding="utf-8", newline="") as arquivo:
+        with temporario.open("x", encoding="utf-8", newline="") as arquivo:
             arquivo.write(texto)
             arquivo.flush()
             os.fsync(arquivo.fileno())
@@ -640,7 +642,7 @@ def _ler_para_comparar(rota: Path) -> str | None:
     try:
         if not rota.is_file():
             return None
-        return rota.read_text(encoding="utf-8", errors="replace")
+        return safe_paths.read_text(rota, encoding="utf-8", errors="replace")
     except OSError:
         return None
 
@@ -1184,9 +1186,10 @@ def classificar(
             "escopos": {"comando": programa.lower() or ESCOPO_QUALQUER},
             "titulo": "Rodar comando",
             "resumo": comando or "(comando vazio)",
-            "explicacao": f"Rodar este comando no terminal, dentro de {pasta}.",
+            "explicacao": (f"Iniciar este comando em {pasta}, com as permissões da sua conta. "
+                           "O comando pode acessar arquivos fora do projeto e a rede."),
             "lembrar": f"rodar {programa} nesta máquina",
-            "risco": "alto" if COMANDO_PERIGOSO.search(comando) else "medio",
+            "risco": "alto",
         }
 
     if nome == "code_interpreter":
@@ -1698,7 +1701,7 @@ def _aplicar_patch(
         if not hunks:
             continue
         try:
-            atual = rota.read_text(encoding="utf-8", errors="replace") if rota.exists() else ""
+            atual = safe_paths.read_text(rota, encoding="utf-8", errors="replace") if rota.exists() else ""
         except OSError as exc:
             return f"ERRO ao ler {rota}: {exc}"
         final, problema = _aplicar_hunks(atual, hunks)
@@ -1716,11 +1719,11 @@ def _aplicar_patch(
     try:
         for rota, texto in prontos:
             originais[rota] = (
-                rota.read_text(encoding="utf-8", errors="replace") if rota.exists() else None
+                safe_paths.read_text(rota, encoding="utf-8", errors="replace") if rota.exists() else None
             )
             rota.parent.mkdir(parents=True, exist_ok=True)
             temporario = rota.with_name(f".{rota.name}.koda-{uuid.uuid4().hex[:8]}.tmp")
-            with temporario.open("w", encoding="utf-8", newline="") as arquivo:
+            with temporario.open("x", encoding="utf-8", newline="") as arquivo:
                 arquivo.write(texto)
                 arquivo.flush()
                 os.fsync(arquivo.fileno())
@@ -1787,17 +1790,37 @@ def executar(
     token_cancelamento = _CANCELAMENTO_DA_FERRAMENTA.set(cancelamento)
     try:
         _verificar_cancelamento()
-        return _executar_impl(
-            nome,
-            argumentos,
-            workspace,
-            negadas,
-            acesso_livre=acesso_livre,
-            dono=dono,
-            anexos=anexos,
-            skills=skills,
-            chamada=chamada,
-        )
+        canonical = canonico(nome)
+        normalized = _sinonimos(argumentos or {})
+        targets = alvos(canonical, normalized)
+        if canonical == 'apply_patch':
+            targets = _arquivos_do_diff(str(normalized.get('diff') or normalized.get('patch') or ''))
+        if canonical in {canonico(item) for item in (negadas or ())}:
+            return f"ERRO: ferramenta desativada por KODA_TOOLS_DENY: {canonical}"
+        for target in targets:
+            if not acesso_livre and not _dentro_do_workspace(workspace, _resolver(workspace, target)):
+                return f"ERRO: caminho fora da pasta de trabalho: {target}"
+        with safe_paths.PathGuard() as guard:
+            for index, target in enumerate(targets):
+                path = _resolver(workspace, target)
+                create_parent = canonical in {'write_file','create_directory','download_file','apply_patch'} or (
+                    canonical in {'move_file','copy_file'} and index == 1)
+                guard.parents(path, create=create_parent)
+                if path.exists() and canonical not in {'delete_file','delete_directory','move_file','rename_file','copy_file',
+                                                      'write_file','edit_file','str_replace_editor','apply_patch','download_file'}:
+                    guard.entry(path)
+            result = _executar_impl(
+                nome, argumentos, workspace, negadas, acesso_livre=acesso_livre,
+                dono=dono, anexos=anexos, skills=skills, chamada=chamada,
+            )
+            if canonical == 'create_directory' and result.startswith('ok'):
+                for target in targets:
+                    guard.directory(_resolver(workspace, target))
+            return result
+    except (InterruptedError, TimeoutError):
+        raise
+    except OSError as exc:
+        return f"ERRO: operação de arquivo recusada ou interrompida: {type(exc).__name__}: {exc}"
     finally:
         _CANCELAMENTO_DA_FERRAMENTA.reset(token_cancelamento)
         _PRAZO_DA_FERRAMENTA.reset(token)
@@ -1874,671 +1897,752 @@ def _executar_impl(
         if problema:
             return problema
 
-    if nome in ("shell", "terminal"):
-        try:
-            tempo = min(int(argumentos.get("tempo_limite", LIMITES.tempo_comando)), LIMITES.tempo_comando_max)
-        except (TypeError, ValueError):
-            tempo = LIMITES.tempo_comando
-        # Acompanhar/parar vêm antes do comando: quem chama assim já tem um processo
-        # rodando, e `comando` vem vazio de propósito.
-        acompanhar = str(argumentos.get("continuar") or "").strip()
-        if acompanhar:
-            return _acompanhar(
-                acompanhar,
-                tempo,
-                espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
-            )
-        interromper = str(argumentos.get("parar") or "").strip()
-        if interromper:
-            return _parar(interromper)
-        comando = str(argumentos.get("comando", "")).strip()
-        if not comando:
-            return (
-                "ERRO: informe o `comando`, ou o `continuar`/`parar` de um comando que já "
-                "está rodando"
-            )
-        return _rodar(
-            comando,
-            workspace,
-            tempo,
-            dono,
-            espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
-        )
-
-    if nome == "code_interpreter":
-        codigo = str(argumentos.get("codigo", "")).strip()
-        if not codigo:
-            return "ERRO: código vazio"
-        linguagem = str(argumentos.get("linguagem") or "python").strip().lower()
-        # O interpretador é o do Koda, não o do projeto: ele vem embutido no app e é o
-        # mesmo em qualquer máquina. Num projeto JS, `linguagem: node` roda o trecho na
-        # linguagem do projeto — o runner segue sendo o que existe aqui.
-        if linguagem in ("node", "javascript", "js", "mjs", "typescript", "ts"):
-            no = _which("node")
-            if not no:
-                return (
-                    "ERRO: node não está instalado nesta máquina — rode este trecho em "
-                    "Python, ou use o `shell` para o que o projeto já tem (npm, node)."
-                )
-            # Node rodando fora do projeto: os caminhos do projeto vão absolutos no
-            # código, igual ao Python. O arquivo é `.mjs` para `import` funcionar.
-            with tempfile.TemporaryDirectory(prefix="koda-") as pasta:
-                arquivo = Path(pasta) / "snippet.mjs"
-                arquivo.write_text(codigo, encoding="utf-8")
-                return _rodar_lista([no, str(arquivo)], workspace)
-        # Roda fora do projeto: um tmp qualquer, sem sujar a pasta de trabalho.
-        with tempfile.TemporaryDirectory(prefix="koda-") as pasta:
-            arquivo = Path(pasta) / "snippet.py"
-            arquivo.write_text(codigo, encoding="utf-8")
-            # `-X utf8` + PYTHONUTF8/PYTHONIOENCODING: sem isso o Python do Windows escreve
-            # em cp1252 e um `print` com `●`, `→` ou acento derruba o script inteiro com
-            # UnicodeEncodeError — o resultado já estava calculado e a pessoa via um
-            # Traceback no lugar dele (o modelo, então, gastava o passo seguinte só para
-            # descobrir `sys.stdout.reconfigure`).
-            return _rodar_lista(
-                [sys.executable, "-X", "utf8", str(arquivo)],
-                workspace,
-                env={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
-            )
-
-    if nome == "read_attachment":
-        # O anexo da conversa vive no store, não no workspace — a leitura é por id, e o
-        # conteúdo nunca é copiado para a pasta do projeto. `read_file` continua sendo o
-        # único caminho para o disco do projeto; esta ferramenta não aceita caminho.
-        if anexos is None:
-            return (
-                "ERRO: o store de anexos não está disponível nesta execução — "
-                "não dá para ler anexo agora."
-            )
-        anexo_id = str(argumentos.get("id", "") or "").strip()
-        if not anexo_id:
-            return (
-                "ERRO: informe o `id` do anexo (o que aparece no bloco «[anexos desta "
-                "mensagem]»). O nome do arquivo não serve: ele não é caminho nem id."
-            )
-        anexo = anexos.buscar(anexo_id)
-        if anexo is None:
-            return f"ERRO: anexo não encontrado: {anexo_id}"
-        inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
-        limite = _inteiro(argumentos.get("limite"), 0)
-        return _ler_anexo(anexo, inicio, limite)
-
-    if nome == "use_skill":
-        # Uma skill é **instruções**, não execução: esta ferramenta devolve o texto dela
-        # para o modelo seguir. É o que separa skill de MCP — e é o único caminho para as
-        # skills da máquina e as cadastradas, que o `read_file` não alcança (não estão no
-        # workspace / não são arquivo).
-        if skills is None:
-            return (
-                "ERRO: o índice de skills não está disponível nesta execução — "
-                "não dá para carregar a skill agora."
-            )
-        pedido = str(argumentos.get("nome", "") or "").strip()
-        if not pedido:
-            return (
-                "ERRO: informe o `nome` da skill. As disponíveis nesta conversa aparecem no "
-                "prompt de sistema."
-            )
-        try:
-            instrucoes = skills.instrucoes(pedido)
-        except Exception as exc:  # noqa: BLE001 — o store levanta os dois erros de skill
-            disponiveis = ", ".join(skills.nomes()) or "nenhuma"
-            return (
-                f"ERRO: não deu para carregar a skill '{pedido}': {exc}. "
-                f"Skills disponíveis: {disponiveis}."
-            )
-        escopo = skills.escopo_de(pedido) or "desconhecida"
-        return (
-            f"[skill '{pedido}' · origem: {escopo}]\n"
-            "Siga estas instruções no que fizer a seguir:\n\n"
-            f"{instrucoes}"
-        )
-
-    if nome == "read_file":
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        if rota.is_dir():
-            return f"ERRO: {rota} é uma pasta — use list_dir"
-        inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
-        limite = _inteiro(argumentos.get("limite"), 0)
-        pediu_recorte = inicio > 1 or limite > 0
-        try:
-            guardadas, total, excedeu = _ler_trecho(rota, inicio, limite, pediu_recorte)
-        except FileNotFoundError:
-            return f"ERRO: arquivo não encontrado: {rota}"
-        except PermissionError:
-            return f"ERRO: sem permissão para ler {rota}"
-        except OSError as exc:
-            return f"ERRO ao ler {rota}: {exc}"
-        if not any(linha.strip() for linha in guardadas):
-            return "(arquivo vazio)"
-        if pediu_recorte:
-            if inicio > total:
-                return f"ERRO: {rota} tem {total} linha(s) — `inicio={inicio}` passa do fim"
-            fim = inicio + len(guardadas) - 1
-            recorte = "\n".join(linha.rstrip("\r\n") for linha in guardadas)
-            aviso = ""
-            if fim < total:
-                # O modelo pediu um pedaço: dizer **o que ficou de fora** é o que evita ele
-                # achar que viu o arquivo inteiro e voltar a ler do começo — era o "lê os
-                # mesmos arquivos várias e várias vezes" que o dono viu.
-                aviso = (
-                    f"\n...[faltam as linhas {fim + 1}-{total}: leia com "
-                    f'inicio={fim + 1} se precisar do resto]'
-                )
-            return _limitar(f"({rota}: linhas {inicio}-{fim} de {total})\n{recorte}{aviso}")
-        texto = "".join(guardadas)
-        if excedeu:
-            # Arquivo gigante: o teto de leitura evita carregar 500 MB na memória só para
-            # descartar quase tudo no `_limitar` no fim. O aviso vem **depois** do corte,
-            # senão ele mesmo seria cortado e o modelo ficaria sem saber como pedir o resto.
-            return _limitar(texto) + (
-                "\n...[arquivo maior que o teto de leitura — use `inicio`/`limite` para "
-                "ler o resto por faixa]"
-            )
-        return _limitar(texto)
-
-    if nome == "write_file":
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        conteudo = str(argumentos.get("conteudo", ""))
-        antes = _ler_para_comparar(rota)
-        try:
-            # Gravação atômica: nada de arquivo pela metade se o processo morrer no meio.
-            _escrever_atomico(rota, conteudo)
-            # Só depois de gravar: anotar antes deixaria o painel mostrando uma mudança que
-            # não aconteceu, caso a gravação falhasse.
-            mudancas.anotar(str(rota), antes, conteudo, "write_file", chamada)
-            return f"ok: {len(conteudo)} caracteres gravados em {rota}"
-        except OSError as exc:
-            return f"ERRO ao gravar {rota}: {exc}"
-
-    if nome in ("edit_file", "str_replace_editor"):
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        antigo = str(argumentos.get("old_string", ""))
-        novo = str(argumentos.get("new_string", ""))
-        if not antigo:
-            return "ERRO: old_string vazio"
-        try:
-            texto = rota.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return f"ERRO: arquivo não encontrado: {rota}"
-        except OSError as exc:
-            return f"ERRO ao ler {rota}: {exc}"
-        ocorrencias = texto.count(antigo)
-        if ocorrencias == 0:
-            return "ERRO: old_string não encontrado no arquivo"
-        if ocorrencias > 1:
-            return f"ERRO: old_string aparece {ocorrencias} vezes; informe um trecho único"
-        final = texto.replace(antigo, novo, 1)
-        _escrever_atomico(rota, final)
-        mudancas.anotar(str(rota), texto, final, "edit_file", chamada)
-        return f"ok: substituição aplicada em {rota}"
-
-    if nome == "list_dir":
-        rota = _resolver(workspace, str(argumentos.get("caminho", ".")))
-        if not rota.exists():
-            return f"ERRO: diretório não existe: {rota}"
-        if rota.is_file():
-            return f"(é um arquivo) {rota.name}"
-        try:
-            tudo = sorted(rota.iterdir())
-            linhas = []
-            for item in tudo[:LIMITES.listagem]:
-                tipo = "[DIR] " if item.is_dir() else "      "
-                tamanho = "" if item.is_dir() else f"  {item.stat().st_size} B"
-                linhas.append(f"{tipo}{item.name}{tamanho}")
-            if len(tudo) > LIMITES.listagem:
-                # Cortar calado faz o modelo achar que viu a pasta inteira e trabalhar com
-                # meia lista na cabeça. Dizer o que ficou de fora é o que ele precisa para
-                # pedir a parte que falta (ou usar `search_files`).
-                linhas.append(
-                    f"...(mostrando {LIMITES.listagem} de {len(tudo)} entradas desta pasta — "
-                    "há mais; use search_files para achar um nome específico)"
-                )
-        except OSError as exc:
-            return f"ERRO ao listar {rota}: {exc}"
-        return _limitar("\n".join(linhas) or "(diretório vazio)")
-
-    if nome == "delete_file":
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        try:
-            if rota.is_dir():
-                return "ERRO: use delete apenas em arquivos, não em pastas"
-            rota.unlink()
-            return f"ok: {rota} apagado"
-        except FileNotFoundError:
-            return f"ERRO: arquivo não encontrado: {rota}"
-        except OSError as exc:
-            return f"ERRO ao apagar {rota}: {exc}"
-
-    if nome == "create_directory":
-        caminho = str(argumentos.get("caminho", "")).strip()
-        if not caminho or caminho in (".", "./"):
-            return "ERRO: informe o caminho da pasta a criar"
-        rota = _resolver(workspace, caminho)
-        try:
-            rota.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return f"ERRO ao criar a pasta {rota}: {exc}"
-        return f"ok: pasta criada em {rota}"
-
-    if nome in ("move_file", "copy_file"):
-        origem = _resolver(workspace, str(argumentos.get("origem", "")))
-        destino = _resolver(workspace, str(argumentos.get("destino", "")))
-        if not str(argumentos.get("origem", "")).strip():
-            return "ERRO: informe a origem"
-        if not str(argumentos.get("destino", "")).strip():
-            return "ERRO: informe o destino"
-        if origem.resolve() == destino.resolve():
-            return "ERRO: origem e destino são o mesmo caminho"
-        if not origem.exists():
-            return f"ERRO: a origem não existe: {origem}"
-        if destino.exists():
-            return f"ERRO: o destino já existe: {destino} (escolha outro nome ou apague antes)"
-        try:
-            destino.parent.mkdir(parents=True, exist_ok=True)
-            if nome == "move_file":
-                shutil.move(str(origem), str(destino))
-                return f"ok: {origem} movido para {destino}"
-            if origem.is_dir():
-                shutil.copytree(
-                    origem, destino, ignore=shutil.ignore_patterns(*PASTAS_IGNORADAS)
-                )
-                return f"ok: pasta {origem} copiada para {destino}"
-            shutil.copy2(origem, destino)
-            return f"ok: {origem} copiado para {destino}"
-        except OSError as exc:
-            verbo = "mover" if nome == "move_file" else "copiar"
-            return f"ERRO ao {verbo} {origem}: {exc}"
-
-    if nome == "rename_file":
-        origem = _resolver(workspace, str(argumentos.get("caminho", "")))
-        novo = str(argumentos.get("novo_nome", "")).strip()
-        if not novo:
-            return "ERRO: informe o novo nome"
-        if Path(novo).name != novo or novo in (".", ".."):
-            return (
-                "ERRO: novo_nome é só o nome, sem pasta — para mudar de pasta use move_file"
-            )
-        if not origem.exists():
-            return f"ERRO: não existe: {origem}"
-        destino = origem.with_name(novo)
-        if destino.exists():
-            return f"ERRO: já existe um item chamado {destino}"
-        try:
-            origem.rename(destino)
-        except OSError as exc:
-            return f"ERRO ao renomear {origem}: {exc}"
-        return f"ok: {origem.name} agora é {novo} em {origem.parent}"
-
-    if nome == "delete_directory":
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        trava = _trava_da_pasta(workspace, rota)
-        if trava:
-            return trava
-        if not rota.exists():
-            return f"ERRO: a pasta não existe: {rota}"
-        if not rota.is_dir():
-            return "ERRO: isso é um arquivo — use delete_file"
-        try:
-            shutil.rmtree(rota)
-        except OSError as exc:
-            return f"ERRO ao apagar a pasta {rota}: {exc}"
-        return f"ok: pasta {rota} apagada com tudo o que havia dentro"
-
-    if nome == FERRAMENTA_DO_PLANO:
-        itens = todos_dos_argumentos(argumentos)
-        if not itens:
-            return (
-                "ERRO: a lista veio vazia. Mande `todos` como lista de itens, cada um com "
-                "`texto` (e opcionalmente `feito` e `atual`)."
-            )
-        return lista_em_texto(itens)
-
-    if nome == "search_files":
-        padrao = str(argumentos.get("padrao") or argumentos.get("termo") or "").strip()
-        if not padrao:
-            return "ERRO: informe o padrão (ex.: **/*.py ou *.json)"
-        if ".." in Path(padrao).parts:
-            return "ERRO: o padrão não pode sair da pasta de trabalho (.. recusado)"
-        base = _resolver(workspace, str(argumentos.get("caminho") or "."))
-        if not base.exists():
-            return f"ERRO: pasta não existe: {base}"
-        if not base.is_dir():
-            return f"ERRO: {base} é um arquivo — use read_file"
-        if not _dentro_do_workspace(workspace, base):
-            return (
-                f"ERRO: {base} está fora da pasta de trabalho ({workspace}) — peça "
-                "autorização para trabalhar fora da pasta."
-            )
-        linhas: list[str] = []
-
-        def visitar(item: Path, eh_pasta: bool) -> bool:
-            if not _corresponde_glob(item, base, padrao):
-                return False
-            if not eh_pasta and item.suffix.lower() in EXTENSOES_IGNORADAS:
-                return False
-            if not _dentro_do_workspace(workspace, item):
-                return False
-            try:
-                linhas.append(item.relative_to(workspace).as_posix())
-            except ValueError:
-                linhas.append(item.as_posix())
-            return len(linhas) >= LIMITES.arquivos_busca
-
-        visitados, parada = _percorrer_pasta(base, visitar)
-        corpo = "\n".join(linhas) or "(nenhum arquivo com esse padrão)"
-        if parada == "resultados":
-            corpo += f"\n...(limite de {LIMITES.arquivos_busca} resultados)"
-        elif parada in ("itens", "tempo"):
-            corpo += (
-                f"\n...(busca limitada: {visitados} itens examinados; refine o padrão "
-                "ou indique uma subpasta)"
-            )
-        return _limitar(corpo)
-
-    if nome == "apply_patch":
-        return _aplicar_patch(
-            str(argumentos.get("diff", "")), workspace, acesso_livre, chamada
-        )
-
-    if nome == "git_push":
-        argv = ["git", "push"]
-        remoto = _ref_git(str(argumentos.get("remoto", "")).strip())
-        ramo = _ref_git(str(argumentos.get("ramo", "")).strip())
-        if remoto is None or ramo is None:
-            return (
-                "ERRO: nome de remoto/ramo inválido — use só o nome (origin, main), sem "
-                "espaço, sem `--` e sem caractere de shell."
-            )
-        if remoto and ramo:
-            argv += ["--", remoto, ramo]
-        elif remoto:
-            argv.append(remoto)
-        elif ramo:
-            argv += ["-u", "origin", ramo]
-        return _rodar_lista(argv, workspace, env={"GIT_TERMINAL_PROMPT": "0"})
-
-    if nome == "git_pull":
-        argv = ["git", "pull", "--ff-only"]
-        remoto = _ref_git(str(argumentos.get("remoto", "")).strip())
-        ramo = _ref_git(str(argumentos.get("ramo", "")).strip())
-        if remoto is None or ramo is None:
-            return (
-                "ERRO: nome de remoto/ramo inválido — use só o nome (origin, main), sem "
-                "espaço, sem `--` e sem caractere de shell."
-            )
-        if remoto:
-            argv.append(remoto)
-        if ramo:
-            argv.append(ramo)
-        return _rodar_lista(argv, workspace, env={"GIT_TERMINAL_PROMPT": "0"})
-
-    if nome in ("install_package", "uninstall_package"):
-        pacote = str(argumentos.get("pacote", "")).strip()
-        if not pacote:
-            return "ERRO: informe o pacote"
-        if re.search(r"[;&|<>$`\n\"'\\]", pacote):
-            return f"ERRO: nome de pacote inválido: {pacote}"
-        instalando = nome == "install_package"
-        gerenciador = str(argumentos.get("gerenciador", "")).strip().lower()
-        if gerenciador and gerenciador not in GESTORES:
-            return (
-                f"ERRO: gerenciador desconhecido: {gerenciador}. "
-                f"Use um destes: {', '.join(sorted(GESTORES))}"
-            )
-        escolhido = gerenciador or _gerenciador_do_projeto(workspace)
-        if not escolhido:
-            return (
-                "ERRO: não achei o gerenciador deste projeto (nem package.json, nem "
-                "pyproject.toml, nem Cargo.toml na pasta de trabalho). Informe em "
-                "`gerenciador`: npm, pnpm, yarn, uv, pip ou cargo."
-            )
-        if escolhido != "pip" and _which(escolhido) is None:
-            return f"ERRO: {escolhido} não está instalado nesta máquina"
-        return _rodar(_linha_do_gestor(escolhido, pacote, instalando), workspace, dono=dono)
-
-    if nome == "download_file":
-        url = str(argumentos.get("url", "")).strip()
-        # Mesma trava do `url_reader`: host público, e cada redirect revalidado. Sem isto o
-        # download virava porta de SSRF (localhost, rede interna, metadata da nuvem).
-        recusa = _url_de_rede(url)
-        if recusa:
-            return recusa
-        destino = str(argumentos.get("destino", "")).strip()
-        if not destino:
-            return "ERRO: informe o destino"
-        rota = _resolver(workspace, destino)
-        if rota.is_dir() or destino.endswith(("/", "\\")):
-            nome_remoto = Path(urllib.parse.urlparse(url).path).name or "arquivo.baixado"
-            rota = rota / nome_remoto
-        temporario = rota.with_name(f".{rota.name}.koda-{uuid.uuid4().hex[:8]}.tmp")
-        try:
-            with httpx.Client(
-                timeout=_timeout_httpx(60),
-                headers={"User-Agent": USER_AGENT},
-                follow_redirects=False,
-            ) as cliente:
-                # Redirect resolvido **na mão e em streaming**: validar cada salto sem
-                # carregar o corpo (o `follow_redirects=True` seguia cego para o IP interno,
-                # e ler tudo antes de gravar furava o teto de tamanho).
-                atual = url
-                resposta: httpx.Response | None = None
-                for _ in range(LIMITES.saltos + 1):
-                    pedido = cliente.build_request("GET", atual)
-                    resposta = cliente.send(pedido, stream=True)
-                    destino_do_salto = resposta.headers.get("location")
-                    if not (300 <= resposta.status_code < 400) or not destino_do_salto:
-                        break
-                    proximo = str(httpx.URL(atual).join(destino_do_salto))
-                    resposta.close()
-                    if _url_wiki(proximo):
-                        return (
-                            "ERRO: redirecionamento para Wikipedia/Wikimedia bloqueado: "
-                            f"{proximo}"
-                        )
-                    if not host_publico(proximo):
-                        return (
-                            f"ERRO: {atual} redireciona para {proximo}, que não é um host "
-                            "público. Redirecionamento bloqueado."
-                        )
-                    atual = proximo
-                else:
-                    return (
-                        f"ERRO: {url} redireciona em ciclo (mais de {LIMITES.saltos} saltos)"
-                    )
-                with resposta:
-                    if resposta.status_code >= 400:
-                        return f"ERRO: {url} respondeu {resposta.status_code}"
-                    rota.parent.mkdir(parents=True, exist_ok=True)
-                    total = 0
-                    with temporario.open("wb") as arquivo:
-                        for pedaco in resposta.iter_bytes():
-                            restante = _restante_da_ferramenta()
-                            if restante is not None and restante <= 0:
-                                raise TimeoutError("prazo da chamada de ferramenta excedido")
-                            total += len(pedaco)
-                            if total > LIMITES.rede:
-                                arquivo.close()
-                                temporario.unlink(missing_ok=True)
-                                return (
-                                    "ERRO: o arquivo passa de "
-                                    f"{LIMITES.rede // 1_000_000} MB — baixe fora do Koda"
-                                )
-                            arquivo.write(pedaco)
-                    os.replace(temporario, rota)
-        except TimeoutError:
-            temporario.unlink(missing_ok=True)
-            return f"ERRO: o prazo da chamada para baixar {url} acabou; arquivo parcial descartado."
-        except httpx.HTTPError as exc:
-            temporario.unlink(missing_ok=True)
-            return f"ERRO ao baixar {url}: {exc}"
-        except OSError as exc:
-            temporario.unlink(missing_ok=True)
-            return f"ERRO ao gravar {rota}: {exc}"
-        return f"ok: {total} bytes baixados de {url} para {rota}"
-
-    if nome == "upload_file":
-        url = str(argumentos.get("url", "")).strip()
-        # Envio para host interno é exfiltração para a rede de casa/empresa: mesma trava.
-        recusa = _url_de_rede(url)
-        if recusa:
-            return recusa
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        if not rota.is_file():
-            return f"ERRO: arquivo não encontrado: {rota}"
-        if rota.stat().st_size > LIMITES.rede:
-            return f"ERRO: {rota} passa de {LIMITES.rede // 1_000_000} MB"
-        try:
-            with httpx.Client(timeout=_timeout_httpx(120)) as cliente:
-                resposta = cliente.put(
-                    url,
-                    content=rota.read_bytes(),
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Content-Type": "application/octet-stream",
-                        "X-Koda-Arquivo": rota.name,
-                    },
-                )
-        except httpx.HTTPError as exc:
-            return f"ERRO ao enviar {rota}: {exc}"
-        if not 200 <= resposta.status_code < 300:
-            return (
-                f"ERRO: o servidor respondeu HTTP {resposta.status_code} ao receber "
-                f"{rota.name}; o upload não foi confirmado."
-            )
-        return f"ok: {rota} enviado para {url} — resposta {resposta.status_code}"
-
-    if nome == "get_environment":
-        return _ambiente(workspace)
-
-    if nome in ("search_codebase", "vector_search", "grep", "regex_search"):
-        termo = str(argumentos.get("termo") or argumentos.get("padrao") or "")
-        if not termo:
-            return "ERRO: termo de busca vazio"
-        usar_regex = nome in ("grep", "regex_search") or bool(argumentos.get("regex"))
-        if len(termo) > 500:
-            return "ERRO: termo de busca longo demais (máximo 500 caracteres)"
-        try:
-            padrao = re.compile(termo if usar_regex else re.escape(termo), re.I)
-        except re.error as exc:
-            return f"ERRO: regex inválida: {exc}"
-        achados: list[str] = []
-        inicio = time.monotonic()
-        estado: dict[str, Any] = {"arquivos": 0, "bytes": 0, "motivo": ""}
-
-        def visitar(caminho: Path, eh_pasta: bool) -> bool:
-            if eh_pasta or caminho.suffix.lower() in EXTENSOES_IGNORADAS:
-                return False
-            estado["arquivos"] += 1
-            if estado["arquivos"] > 5_000:
-                estado["motivo"] = "5.000 arquivos"
-                return True
-            try:
-                tamanho = caminho.stat().st_size
-                if tamanho > 2_000_000:
-                    return False
-                if estado["bytes"] + tamanho > LIMITES.bytes_varredura:
-                    estado["motivo"] = f"{LIMITES.bytes_varredura // 1_000_000} MB lidos"
-                    return True
-                estado["bytes"] += tamanho
-                with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
-                    for num, linha in enumerate(arquivo, 1):
-                        if time.monotonic() - inicio > LIMITES.tempo_varredura_s:
-                            estado["motivo"] = f"{LIMITES.tempo_varredura_s:g} s de busca"
-                            return True
-                        if padrao.search(linha[:2_000]):
-                            rel = caminho.relative_to(workspace).as_posix()
-                            achados.append(f"{rel}:{num}: {linha.strip()[:160]}")
-                            if len(achados) >= 80:
-                                estado["motivo"] = "80 resultados"
-                                return True
-            except (OSError, ValueError):
-                return False
-            return False
-
-        visitados, parada = _percorrer_pasta(workspace, visitar)
-        if parada in ("itens", "tempo") and not estado["motivo"]:
-            estado["motivo"] = (
-                f"{visitados} itens examinados" if parada == "itens" else "tempo de busca"
-            )
-        corpo = "\n".join(achados) or "(nenhuma ocorrência)"
-        if estado["motivo"]:
-            corpo += (
-                f"\n...(busca limitada por {estado['motivo']}; refine o termo "
-                "ou indique uma subpasta)"
-            )
-        return _limitar(corpo)
-
-    if nome in ("get_problems", "linter"):
-        rota = _resolver(workspace, str(argumentos.get("caminho", "")))
-        if not rota.is_file():
-            return f"ERRO: arquivo não encontrado: {rota}"
-        if rota.suffix != ".py":
-            return f"(sem linter para {rota.suffix}; apenas .py)"
-        compilado = _rodar_lista(
-            [sys.executable, "-m", "py_compile", str(rota)], workspace, 60
-        )
-        # O código de saída é lido do `exit code:` de verdade, e não de um `in` na string:
-        # procurar "exit code: 0" em qualquer lugar dava falso positivo com saída que só
-        # **mencionasse** a frase.
-        saida = "sintaxe OK" if _codigo_de_saida(compilado) == 0 else compilado
-        try:
-            pyflakes = subprocess.run(
-                [sys.executable, "-m", "pyflakes", str(rota)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_timeout_da_ferramenta(60),
-                stdin=subprocess.DEVNULL,
-                env=_ambiente_do_comando(),
-                **_sem_janela(),
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return _limitar(saida)
-        if pyflakes.returncode == 0 and pyflakes.stdout.strip():
-            saida += "\n--- pyflakes ---\n" + pyflakes.stdout.strip()
-        return _limitar(saida)
-
-    if nome == "web_search":
-        return _web_buscar(str(argumentos.get("consulta", "")))
-
-    if nome in ("url_reader", "browser"):
-        return _web_ler(str(argumentos.get("url", "")))
-
-    if nome == "git_status":
-        return _rodar_lista(["git", "status", "--porcelain", "-b"], workspace)
-
-    if nome == "git_diff":
-        # `git diff HEAD` falha em repositório sem commit nenhum ("unknown revision"): aí o
-        # certo é mostrar o diff da árvore de trabalho contra o índice vazio.
-        if _codigo_de_saida(_rodar_lista(["git", "rev-parse", "--verify", "HEAD"], workspace)) != 0:
-            return _rodar_lista(["git", "diff", "--cached"], workspace)
-        return _rodar_lista(["git", "diff", "HEAD"], workspace)
-
-    if nome == "git_log":
-        quantidade = min(
-            _inteiro(argumentos.get("quantidade") or argumentos.get("limite"), 10), 50
-        )
-        return _rodar_lista(["git", "log", "--oneline", "-n", str(quantidade)], workspace)
-
-    if nome == "git_commit":
-        mensagem = str(argumentos.get("mensagem", "")).strip()
-        if not mensagem:
-            return "ERRO: mensagem de commit vazia"
-        # `git add -A` num projeto sem `.gitignore` varre `.env`, credencial e venv para
-        # dentro do commit. Aqui a varredura é **consciente**: os arquivos sensíveis são
-        # postos de lado e o retorno avisa, em vez de subir segredo em silêncio.
-        adicionado = _git_add_seguro(workspace)
-        if _codigo_de_saida(adicionado) != 0:
-            return adicionado
-        resultado = _rodar_lista(["git", "commit", "-m", mensagem], workspace)
-        if adicionado.startswith("AVISO:"):
-            resultado = adicionado.splitlines()[0] + "\n" + resultado
-        return resultado
-
-    return f"ERRO: ferramenta desconhecida: {nome}"
+    handler = _TOOL_HANDLERS.get(nome)
+    if handler is None:
+        return f"ERRO: ferramenta desconhecida: {nome}"
+    return handler(nome, argumentos, workspace, negadas, acesso_livre=acesso_livre,
+                   dono=dono, anexos=anexos, skills=skills, chamada=chamada)
 
 def resumo(argumentos: dict[str, Any], limite: int = 120) -> str:
     """Argumentos em uma linha, para mostrar na interface."""
     return json.dumps(argumentos, ensure_ascii=False)[:limite]
+
+
+# Handlers explícitos: a política e o prazo são aplicados antes do despacho.
+def _tool_shell(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    try:
+        tempo = min(int(argumentos.get("tempo_limite", LIMITES.tempo_comando)), LIMITES.tempo_comando_max)
+    except (TypeError, ValueError):
+        tempo = LIMITES.tempo_comando
+    # Acompanhar/parar vêm antes do comando: quem chama assim já tem um processo
+    # rodando, e `comando` vem vazio de propósito.
+    acompanhar = str(argumentos.get("continuar") or "").strip()
+    if acompanhar:
+        return _acompanhar(
+            acompanhar,
+            tempo,
+            espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
+            dono=dono,
+        )
+    interromper = str(argumentos.get("parar") or "").strip()
+    if interromper:
+        return _parar(interromper, dono=dono)
+    comando = str(argumentos.get("comando", "")).strip()
+    if not comando:
+        return (
+            "ERRO: informe o `comando`, ou o `continuar`/`parar` de um comando que já "
+            "está rodando"
+        )
+    return _rodar(
+        comando,
+        workspace,
+        tempo,
+        dono,
+        espera_maxima=_timeout_da_ferramenta(LIMITES.intervalo_olhada),
+    )
+
+
+def _tool_code_interpreter(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    codigo = str(argumentos.get("codigo", "")).strip()
+    if not codigo:
+        return "ERRO: código vazio"
+    linguagem = str(argumentos.get("linguagem") or "python").strip().lower()
+    # O interpretador é o do Koda, não o do projeto: ele vem embutido no app e é o
+    # mesmo em qualquer máquina. Num projeto JS, `linguagem: node` roda o trecho na
+    # linguagem do projeto — o runner segue sendo o que existe aqui.
+    if linguagem in ("node", "javascript", "js", "mjs", "typescript", "ts"):
+        no = _which("node")
+        if not no:
+            return (
+                "ERRO: node não está instalado nesta máquina — rode este trecho em "
+                "Python, ou use o `shell` para o que o projeto já tem (npm, node)."
+            )
+        # Node rodando fora do projeto: os caminhos do projeto vão absolutos no
+        # código, igual ao Python. O arquivo é `.mjs` para `import` funcionar.
+        with tempfile.TemporaryDirectory(prefix="koda-") as pasta:
+            arquivo = Path(pasta) / "snippet.mjs"
+            arquivo.write_text(codigo, encoding="utf-8")
+            return _rodar_lista([no, str(arquivo)], workspace)
+    # Roda fora do projeto: um tmp qualquer, sem sujar a pasta de trabalho.
+    with tempfile.TemporaryDirectory(prefix="koda-") as pasta:
+        arquivo = Path(pasta) / "snippet.py"
+        arquivo.write_text(codigo, encoding="utf-8")
+        # `-X utf8` + PYTHONUTF8/PYTHONIOENCODING: sem isso o Python do Windows escreve
+        # em cp1252 e um `print` com `●`, `→` ou acento derruba o script inteiro com
+        # UnicodeEncodeError — o resultado já estava calculado e a pessoa via um
+        # Traceback no lugar dele (o modelo, então, gastava o passo seguinte só para
+        # descobrir `sys.stdout.reconfigure`).
+        return _rodar_lista(
+            [sys.executable, "-X", "utf8", str(arquivo)],
+            workspace,
+            env={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        )
+
+
+def _tool_read_attachment(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    # O anexo da conversa vive no store, não no workspace — a leitura é por id, e o
+    # conteúdo nunca é copiado para a pasta do projeto. `read_file` continua sendo o
+    # único caminho para o disco do projeto; esta ferramenta não aceita caminho.
+    if anexos is None:
+        return (
+            "ERRO: o store de anexos não está disponível nesta execução — "
+            "não dá para ler anexo agora."
+        )
+    anexo_id = str(argumentos.get("id", "") or "").strip()
+    if not anexo_id:
+        return (
+            "ERRO: informe o `id` do anexo (o que aparece no bloco «[anexos desta "
+            "mensagem]»). O nome do arquivo não serve: ele não é caminho nem id."
+        )
+    anexo = anexos.buscar(anexo_id)
+    if anexo is None:
+        return f"ERRO: anexo não encontrado: {anexo_id}"
+    inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
+    limite = _inteiro(argumentos.get("limite"), 0)
+    return _ler_anexo(anexo, inicio, limite)
+
+
+def _tool_use_skill(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    # Uma skill é **instruções**, não execução: esta ferramenta devolve o texto dela
+    # para o modelo seguir. É o que separa skill de MCP — e é o único caminho para as
+    # skills da máquina e as cadastradas, que o `read_file` não alcança (não estão no
+    # workspace / não são arquivo).
+    if skills is None:
+        return (
+            "ERRO: o índice de skills não está disponível nesta execução — "
+            "não dá para carregar a skill agora."
+        )
+    pedido = str(argumentos.get("nome", "") or "").strip()
+    if not pedido:
+        return (
+            "ERRO: informe o `nome` da skill. As disponíveis nesta conversa aparecem no "
+            "prompt de sistema."
+        )
+    try:
+        instrucoes = skills.instrucoes(pedido)
+    except Exception as exc:  # noqa: BLE001 — o store levanta os dois erros de skill
+        disponiveis = ", ".join(skills.nomes()) or "nenhuma"
+        return (
+            f"ERRO: não deu para carregar a skill '{pedido}': {exc}. "
+            f"Skills disponíveis: {disponiveis}."
+        )
+    escopo = skills.escopo_de(pedido) or "desconhecida"
+    return (
+        f"[skill '{pedido}' · origem: {escopo}]\n"
+        "Siga estas instruções no que fizer a seguir:\n\n"
+        f"{instrucoes}"
+    )
+
+
+def _tool_read_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    if rota.is_dir():
+        return f"ERRO: {rota} é uma pasta — use list_dir"
+    inicio = max(1, _inteiro(argumentos.get("inicio"), 1))
+    limite = _inteiro(argumentos.get("limite"), 0)
+    pediu_recorte = inicio > 1 or limite > 0
+    try:
+        guardadas, total, excedeu = _ler_trecho(rota, inicio, limite, pediu_recorte)
+    except FileNotFoundError:
+        return f"ERRO: arquivo não encontrado: {rota}"
+    except PermissionError:
+        return f"ERRO: sem permissão para ler {rota}"
+    except OSError as exc:
+        return f"ERRO ao ler {rota}: {exc}"
+    if not any(linha.strip() for linha in guardadas):
+        return "(arquivo vazio)"
+    if pediu_recorte:
+        if inicio > total:
+            return f"ERRO: {rota} tem {total} linha(s) — `inicio={inicio}` passa do fim"
+        fim = inicio + len(guardadas) - 1
+        recorte = "\n".join(linha.rstrip("\r\n") for linha in guardadas)
+        aviso = ""
+        if fim < total:
+            # O modelo pediu um pedaço: dizer **o que ficou de fora** é o que evita ele
+            # achar que viu o arquivo inteiro e voltar a ler do começo — era o "lê os
+            # mesmos arquivos várias e várias vezes" que o dono viu.
+            aviso = (
+                f"\n...[faltam as linhas {fim + 1}-{total}: leia com "
+                f'inicio={fim + 1} se precisar do resto]'
+            )
+        return _limitar(f"({rota}: linhas {inicio}-{fim} de {total})\n{recorte}{aviso}")
+    texto = "".join(guardadas)
+    if excedeu:
+        # Arquivo gigante: o teto de leitura evita carregar 500 MB na memória só para
+        # descartar quase tudo no `_limitar` no fim. O aviso vem **depois** do corte,
+        # senão ele mesmo seria cortado e o modelo ficaria sem saber como pedir o resto.
+        return _limitar(texto) + (
+            "\n...[arquivo maior que o teto de leitura — use `inicio`/`limite` para "
+            "ler o resto por faixa]"
+        )
+    return _limitar(texto)
+
+
+def _tool_write_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    conteudo = str(argumentos.get("conteudo", ""))
+    antes = _ler_para_comparar(rota)
+    try:
+        # Gravação atômica: nada de arquivo pela metade se o processo morrer no meio.
+        _escrever_atomico(rota, conteudo)
+        # Só depois de gravar: anotar antes deixaria o painel mostrando uma mudança que
+        # não aconteceu, caso a gravação falhasse.
+        mudancas.anotar(str(rota), antes, conteudo, "write_file", chamada)
+        return f"ok: {len(conteudo)} caracteres gravados em {rota}"
+    except OSError as exc:
+        return f"ERRO ao gravar {rota}: {exc}"
+
+
+def _tool_edit_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    antigo = str(argumentos.get("old_string", ""))
+    novo = str(argumentos.get("new_string", ""))
+    if not antigo:
+        return "ERRO: old_string vazio"
+    try:
+        texto = safe_paths.read_text(rota, encoding="utf-8")
+    except FileNotFoundError:
+        return f"ERRO: arquivo não encontrado: {rota}"
+    except OSError as exc:
+        return f"ERRO ao ler {rota}: {exc}"
+    ocorrencias = texto.count(antigo)
+    if ocorrencias == 0:
+        return "ERRO: old_string não encontrado no arquivo"
+    if ocorrencias > 1:
+        return f"ERRO: old_string aparece {ocorrencias} vezes; informe um trecho único"
+    final = texto.replace(antigo, novo, 1)
+    _escrever_atomico(rota, final)
+    mudancas.anotar(str(rota), texto, final, "edit_file", chamada)
+    return f"ok: substituição aplicada em {rota}"
+
+
+def _tool_list_dir(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", ".")))
+    if not rota.exists():
+        return f"ERRO: diretório não existe: {rota}"
+    if rota.is_file():
+        return f"(é um arquivo) {rota.name}"
+    try:
+        tudo = sorted(rota.iterdir())
+        linhas = []
+        for item in tudo[:LIMITES.listagem]:
+            tipo = "[DIR] " if item.is_dir() else "      "
+            tamanho = "" if item.is_dir() else f"  {item.stat().st_size} B"
+            linhas.append(f"{tipo}{item.name}{tamanho}")
+        if len(tudo) > LIMITES.listagem:
+            # Cortar calado faz o modelo achar que viu a pasta inteira e trabalhar com
+            # meia lista na cabeça. Dizer o que ficou de fora é o que ele precisa para
+            # pedir a parte que falta (ou usar `search_files`).
+            linhas.append(
+                f"...(mostrando {LIMITES.listagem} de {len(tudo)} entradas desta pasta — "
+                "há mais; use search_files para achar um nome específico)"
+            )
+    except OSError as exc:
+        return f"ERRO ao listar {rota}: {exc}"
+    return _limitar("\n".join(linhas) or "(diretório vazio)")
+
+
+def _tool_delete_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    try:
+        if rota.is_dir():
+            return "ERRO: use delete apenas em arquivos, não em pastas"
+        rota.unlink()
+        return f"ok: {rota} apagado"
+    except FileNotFoundError:
+        return f"ERRO: arquivo não encontrado: {rota}"
+    except OSError as exc:
+        return f"ERRO ao apagar {rota}: {exc}"
+
+
+def _tool_create_directory(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    caminho = str(argumentos.get("caminho", "")).strip()
+    if not caminho or caminho in (".", "./"):
+        return "ERRO: informe o caminho da pasta a criar"
+    rota = _resolver(workspace, caminho)
+    try:
+        rota.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"ERRO ao criar a pasta {rota}: {exc}"
+    return f"ok: pasta criada em {rota}"
+
+
+def _tool_move_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    origem = _resolver(workspace, str(argumentos.get("origem", "")))
+    destino = _resolver(workspace, str(argumentos.get("destino", "")))
+    if not str(argumentos.get("origem", "")).strip():
+        return "ERRO: informe a origem"
+    if not str(argumentos.get("destino", "")).strip():
+        return "ERRO: informe o destino"
+    if origem.resolve() == destino.resolve():
+        return "ERRO: origem e destino são o mesmo caminho"
+    if not origem.exists():
+        return f"ERRO: a origem não existe: {origem}"
+    if destino.exists():
+        return f"ERRO: o destino já existe: {destino} (escolha outro nome ou apague antes)"
+    try:
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        if nome == "move_file":
+            os.rename(origem, destino)
+            return f"ok: {origem} movido para {destino}"
+        if origem.is_dir():
+            safe_paths.copy_tree(
+                origem, destino, ignore=shutil.ignore_patterns(*PASTAS_IGNORADAS)
+            )
+            return f"ok: pasta {origem} copiada para {destino}"
+        safe_paths.copy_file(origem, destino)
+        return f"ok: {origem} copiado para {destino}"
+    except OSError as exc:
+        verbo = "mover" if nome == "move_file" else "copiar"
+        return f"ERRO ao {verbo} {origem}: {exc}"
+
+
+def _tool_rename_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    origem = _resolver(workspace, str(argumentos.get("caminho", "")))
+    novo = str(argumentos.get("novo_nome", "")).strip()
+    if not novo:
+        return "ERRO: informe o novo nome"
+    if Path(novo).name != novo or novo in (".", ".."):
+        return (
+            "ERRO: novo_nome é só o nome, sem pasta — para mudar de pasta use move_file"
+        )
+    if not origem.exists():
+        return f"ERRO: não existe: {origem}"
+    destino = origem.with_name(novo)
+    if destino.exists():
+        return f"ERRO: já existe um item chamado {destino}"
+    try:
+        origem.rename(destino)
+    except OSError as exc:
+        return f"ERRO ao renomear {origem}: {exc}"
+    return f"ok: {origem.name} agora é {novo} em {origem.parent}"
+
+
+def _tool_delete_directory(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    trava = _trava_da_pasta(workspace, rota)
+    if trava:
+        return trava
+    if not rota.exists():
+        return f"ERRO: a pasta não existe: {rota}"
+    if not rota.is_dir():
+        return "ERRO: isso é um arquivo — use delete_file"
+    try:
+        safe_paths.remove_tree(rota)
+    except OSError as exc:
+        return f"ERRO ao apagar a pasta {rota}: {exc}"
+    return f"ok: pasta {rota} apagada com tudo o que havia dentro"
+
+
+def _tool_plan(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    itens = todos_dos_argumentos(argumentos)
+    if not itens:
+        return (
+            "ERRO: a lista veio vazia. Mande `todos` como lista de itens, cada um com "
+            "`texto` (e opcionalmente `feito` e `atual`)."
+        )
+    return lista_em_texto(itens)
+
+
+def _tool_search_files(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    padrao = str(argumentos.get("padrao") or argumentos.get("termo") or "").strip()
+    if not padrao:
+        return "ERRO: informe o padrão (ex.: **/*.py ou *.json)"
+    if ".." in Path(padrao).parts:
+        return "ERRO: o padrão não pode sair da pasta de trabalho (.. recusado)"
+    base = _resolver(workspace, str(argumentos.get("caminho") or "."))
+    if not base.exists():
+        return f"ERRO: pasta não existe: {base}"
+    if not base.is_dir():
+        return f"ERRO: {base} é um arquivo — use read_file"
+    if not _dentro_do_workspace(workspace, base):
+        return (
+            f"ERRO: {base} está fora da pasta de trabalho ({workspace}) — peça "
+            "autorização para trabalhar fora da pasta."
+        )
+    linhas: list[str] = []
+
+    def visitar(item: Path, eh_pasta: bool) -> bool:
+        if not _corresponde_glob(item, base, padrao):
+            return False
+        if not eh_pasta and item.suffix.lower() in EXTENSOES_IGNORADAS:
+            return False
+        if not _dentro_do_workspace(workspace, item):
+            return False
+        try:
+            linhas.append(item.relative_to(workspace).as_posix())
+        except ValueError:
+            linhas.append(item.as_posix())
+        return len(linhas) >= LIMITES.arquivos_busca
+
+    visitados, parada = _percorrer_pasta(base, visitar)
+    corpo = "\n".join(linhas) or "(nenhum arquivo com esse padrão)"
+    if parada == "resultados":
+        corpo += f"\n...(limite de {LIMITES.arquivos_busca} resultados)"
+    elif parada in ("itens", "tempo"):
+        corpo += (
+            f"\n...(busca limitada: {visitados} itens examinados; refine o padrão "
+            "ou indique uma subpasta)"
+        )
+    return _limitar(corpo)
+
+
+def _tool_apply_patch(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    return _aplicar_patch(
+        str(argumentos.get("diff", "")), workspace, acesso_livre, chamada
+    )
+
+
+def _tool_git_push(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    argv = ["git", "push"]
+    remoto = _ref_git(str(argumentos.get("remoto", "")).strip())
+    ramo = _ref_git(str(argumentos.get("ramo", "")).strip())
+    if remoto is None or ramo is None:
+        return (
+            "ERRO: nome de remoto/ramo inválido — use só o nome (origin, main), sem "
+            "espaço, sem `--` e sem caractere de shell."
+        )
+    if remoto and ramo:
+        argv += ["--", remoto, ramo]
+    elif remoto:
+        argv.append(remoto)
+    elif ramo:
+        argv += ["-u", "origin", ramo]
+    return _rodar_lista(argv, workspace, env={"GIT_TERMINAL_PROMPT": "0"})
+
+
+def _tool_git_pull(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    argv = ["git", "pull", "--ff-only"]
+    remoto = _ref_git(str(argumentos.get("remoto", "")).strip())
+    ramo = _ref_git(str(argumentos.get("ramo", "")).strip())
+    if remoto is None or ramo is None:
+        return (
+            "ERRO: nome de remoto/ramo inválido — use só o nome (origin, main), sem "
+            "espaço, sem `--` e sem caractere de shell."
+        )
+    if remoto:
+        argv.append(remoto)
+    if ramo:
+        argv.append(ramo)
+    return _rodar_lista(argv, workspace, env={"GIT_TERMINAL_PROMPT": "0"})
+
+
+def _tool_install_package(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    pacote = str(argumentos.get("pacote", "")).strip()
+    if not pacote:
+        return "ERRO: informe o pacote"
+    if re.search(r"[;&|<>$`\n\"'\\]", pacote):
+        return f"ERRO: nome de pacote inválido: {pacote}"
+    instalando = nome == "install_package"
+    gerenciador = str(argumentos.get("gerenciador", "")).strip().lower()
+    if gerenciador and gerenciador not in GESTORES:
+        return (
+            f"ERRO: gerenciador desconhecido: {gerenciador}. "
+            f"Use um destes: {', '.join(sorted(GESTORES))}"
+        )
+    escolhido = gerenciador or _gerenciador_do_projeto(workspace)
+    if not escolhido:
+        return (
+            "ERRO: não achei o gerenciador deste projeto (nem package.json, nem "
+            "pyproject.toml, nem Cargo.toml na pasta de trabalho). Informe em "
+            "`gerenciador`: npm, pnpm, yarn, uv, pip ou cargo."
+        )
+    if escolhido != "pip" and _which(escolhido) is None:
+        return f"ERRO: {escolhido} não está instalado nesta máquina"
+    return _rodar(_linha_do_gestor(escolhido, pacote, instalando), workspace, dono=dono)
+
+
+def _tool_download_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    url = str(argumentos.get("url", "")).strip()
+    # Mesma trava do `url_reader`: host público, e cada redirect revalidado. Sem isto o
+    # download virava porta de SSRF (localhost, rede interna, metadata da nuvem).
+    recusa = _url_de_rede(url)
+    if recusa:
+        return recusa
+    destino = str(argumentos.get("destino", "")).strip()
+    if not destino:
+        return "ERRO: informe o destino"
+    rota = _resolver(workspace, destino)
+    if rota.is_dir() or destino.endswith(("/", "\\")):
+        nome_remoto = Path(urllib.parse.urlparse(url).path).name or "arquivo.baixado"
+        rota = rota / nome_remoto
+    temporario = rota.with_name(f".{rota.name}.koda-{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with httpx.Client(
+            timeout=_timeout_httpx(60),
+            headers={"User-Agent": USER_AGENT},
+            follow_redirects=False,
+        ) as cliente:
+            # Redirect resolvido **na mão e em streaming**: validar cada salto sem
+            # carregar o corpo (o `follow_redirects=True` seguia cego para o IP interno,
+            # e ler tudo antes de gravar furava o teto de tamanho).
+            atual = url
+            resposta: httpx.Response | None = None
+            for _ in range(LIMITES.saltos + 1):
+                pedido = cliente.build_request("GET", atual)
+                resposta = cliente.send(pedido, stream=True)
+                destino_do_salto = resposta.headers.get("location")
+                if not (300 <= resposta.status_code < 400) or not destino_do_salto:
+                    break
+                proximo = str(httpx.URL(atual).join(destino_do_salto))
+                resposta.close()
+                if _url_wiki(proximo):
+                    return (
+                        "ERRO: redirecionamento para Wikipedia/Wikimedia bloqueado: "
+                        f"{proximo}"
+                    )
+                if not host_publico(proximo):
+                    return (
+                        f"ERRO: {atual} redireciona para {proximo}, que não é um host "
+                        "público. Redirecionamento bloqueado."
+                    )
+                atual = proximo
+            else:
+                return (
+                    f"ERRO: {url} redireciona em ciclo (mais de {LIMITES.saltos} saltos)"
+                )
+            with resposta:
+                if resposta.status_code >= 400:
+                    return f"ERRO: {url} respondeu {resposta.status_code}"
+                rota.parent.mkdir(parents=True, exist_ok=True)
+                total = 0
+                with temporario.open("xb") as arquivo:
+                    for pedaco in resposta.iter_bytes():
+                        restante = _restante_da_ferramenta()
+                        if restante is not None and restante <= 0:
+                            raise TimeoutError("prazo da chamada de ferramenta excedido")
+                        total += len(pedaco)
+                        if total > LIMITES.rede:
+                            arquivo.close()
+                            temporario.unlink(missing_ok=True)
+                            return (
+                                "ERRO: o arquivo passa de "
+                                f"{LIMITES.rede // 1_000_000} MB — baixe fora do Koda"
+                            )
+                        arquivo.write(pedaco)
+                os.replace(temporario, rota)
+    except TimeoutError:
+        temporario.unlink(missing_ok=True)
+        return f"ERRO: o prazo da chamada para baixar {url} acabou; arquivo parcial descartado."
+    except httpx.HTTPError as exc:
+        temporario.unlink(missing_ok=True)
+        return f"ERRO ao baixar {url}: {exc}"
+    except OSError as exc:
+        temporario.unlink(missing_ok=True)
+        return f"ERRO ao gravar {rota}: {exc}"
+    return f"ok: {total} bytes baixados de {url} para {rota}"
+
+
+def _tool_upload_file(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    url = str(argumentos.get("url", "")).strip()
+    # Envio para host interno é exfiltração para a rede de casa/empresa: mesma trava.
+    recusa = _url_de_rede(url)
+    if recusa:
+        return recusa
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    if not rota.is_file():
+        return f"ERRO: arquivo não encontrado: {rota}"
+    if rota.stat().st_size > LIMITES.rede:
+        return f"ERRO: {rota} passa de {LIMITES.rede // 1_000_000} MB"
+    try:
+        with httpx.Client(timeout=_timeout_httpx(120)) as cliente:
+            resposta = cliente.put(
+                url,
+                content=safe_paths.read_bytes(rota),
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Content-Type": "application/octet-stream",
+                    "X-Koda-Arquivo": rota.name,
+                },
+            )
+    except httpx.HTTPError as exc:
+        return f"ERRO ao enviar {rota}: {exc}"
+    if not 200 <= resposta.status_code < 300:
+        return (
+            f"ERRO: o servidor respondeu HTTP {resposta.status_code} ao receber "
+            f"{rota.name}; o upload não foi confirmado."
+        )
+    return f"ok: {rota} enviado para {url} — resposta {resposta.status_code}"
+
+
+def _tool_get_environment(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    return _ambiente(workspace)
+
+
+def _tool_search_codebase(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    termo = str(argumentos.get("termo") or argumentos.get("padrao") or "")
+    if not termo:
+        return "ERRO: termo de busca vazio"
+    usar_regex = nome in ("grep", "regex_search") or bool(argumentos.get("regex"))
+    if len(termo) > 500:
+        return "ERRO: termo de busca longo demais (máximo 500 caracteres)"
+    try:
+        padrao = re.compile(termo if usar_regex else re.escape(termo), re.I)
+    except re.error as exc:
+        return f"ERRO: regex inválida: {exc}"
+    achados: list[str] = []
+    inicio = time.monotonic()
+    estado: dict[str, Any] = {"arquivos": 0, "bytes": 0, "motivo": ""}
+
+    def visitar(caminho: Path, eh_pasta: bool) -> bool:
+        if eh_pasta or caminho.suffix.lower() in EXTENSOES_IGNORADAS:
+            return False
+        estado["arquivos"] += 1
+        if estado["arquivos"] > 5_000:
+            estado["motivo"] = "5.000 arquivos"
+            return True
+        try:
+            tamanho = caminho.stat().st_size
+            if tamanho > 2_000_000:
+                return False
+            if estado["bytes"] + tamanho > LIMITES.bytes_varredura:
+                estado["motivo"] = f"{LIMITES.bytes_varredura // 1_000_000} MB lidos"
+                return True
+            estado["bytes"] += tamanho
+            with safe_paths.open_read(caminho, errors="replace") as arquivo:
+                for num, linha in enumerate(arquivo, 1):
+                    if time.monotonic() - inicio > LIMITES.tempo_varredura_s:
+                        estado["motivo"] = f"{LIMITES.tempo_varredura_s:g} s de busca"
+                        return True
+                    if padrao.search(linha[:2_000]):
+                        rel = caminho.relative_to(workspace).as_posix()
+                        achados.append(f"{rel}:{num}: {linha.strip()[:160]}")
+                        if len(achados) >= 80:
+                            estado["motivo"] = "80 resultados"
+                            return True
+        except (OSError, ValueError):
+            return False
+        return False
+
+    visitados, parada = _percorrer_pasta(workspace, visitar)
+    if parada in ("itens", "tempo") and not estado["motivo"]:
+        estado["motivo"] = (
+            f"{visitados} itens examinados" if parada == "itens" else "tempo de busca"
+        )
+    corpo = "\n".join(achados) or "(nenhuma ocorrência)"
+    if estado["motivo"]:
+        corpo += (
+            f"\n...(busca limitada por {estado['motivo']}; refine o termo "
+            "ou indique uma subpasta)"
+        )
+    return _limitar(corpo)
+
+
+def _tool_get_problems(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    rota = _resolver(workspace, str(argumentos.get("caminho", "")))
+    if not rota.is_file():
+        return f"ERRO: arquivo não encontrado: {rota}"
+    if rota.suffix != ".py":
+        return f"(sem linter para {rota.suffix}; apenas .py)"
+    try:
+        compile(safe_paths.read_bytes(rota), str(rota), "exec", dont_inherit=True)
+        compilado = "exit code: 0\nsintaxe OK"
+    except (SyntaxError, ValueError) as exc:
+        compilado = f"exit code: 1\n{type(exc).__name__}: {exc}"
+    # O código de saída é lido do `exit code:` de verdade, e não de um `in` na string:
+    # procurar "exit code: 0" em qualquer lugar dava falso positivo com saída que só
+    # **mencionasse** a frase.
+    saida = "sintaxe OK" if _codigo_de_saida(compilado) == 0 else compilado
+    try:
+        pyflakes = subprocess.run(
+            [sys.executable, "-I", "-m", "pyflakes", str(rota)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_timeout_da_ferramenta(60),
+            stdin=subprocess.DEVNULL,
+            env=_ambiente_do_comando(),
+            **_sem_janela(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return _limitar(saida)
+    if pyflakes.returncode == 0 and pyflakes.stdout.strip():
+        saida += "\n--- pyflakes ---\n" + pyflakes.stdout.strip()
+    return _limitar(saida)
+
+
+def _tool_web_search(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    return _web_buscar(str(argumentos.get("consulta", "")))
+
+
+def _tool_url_reader(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    return _web_ler(str(argumentos.get("url", "")))
+
+
+def _tool_git_status(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    return _rodar_lista(["git", "status", "--porcelain", "-b"], workspace)
+
+
+def _tool_git_diff(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    # `git diff HEAD` falha em repositório sem commit nenhum ("unknown revision"): aí o
+    # certo é mostrar o diff da árvore de trabalho contra o índice vazio.
+    if _codigo_de_saida(_rodar_lista(["git", "rev-parse", "--verify", "HEAD"], workspace)) != 0:
+        return _rodar_lista(["git", "diff", "--cached"], workspace)
+    return _rodar_lista(["git", "diff", "HEAD"], workspace)
+
+
+def _tool_git_log(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    quantidade = min(
+        _inteiro(argumentos.get("quantidade") or argumentos.get("limite"), 10), 50
+    )
+    return _rodar_lista(["git", "log", "--oneline", "-n", str(quantidade)], workspace)
+
+
+def _tool_git_commit(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    mensagem = str(argumentos.get("mensagem", "")).strip()
+    if not mensagem:
+        return "ERRO: mensagem de commit vazia"
+    # `git add -A` num projeto sem `.gitignore` varre `.env`, credencial e venv para
+    # dentro do commit. Aqui a varredura é **consciente**: os arquivos sensíveis são
+    # postos de lado e o retorno avisa, em vez de subir segredo em silêncio.
+    adicionado = _git_add_seguro(workspace)
+    if _codigo_de_saida(adicionado) != 0:
+        return adicionado
+    resultado = _rodar_lista(["git", "commit", "-m", mensagem], workspace)
+    if adicionado.startswith("AVISO:"):
+        resultado = adicionado.splitlines()[0] + "\n" + resultado
+    return resultado
+
+
+_TOOL_HANDLERS = {
+    'shell': _tool_shell,
+    'terminal': _tool_shell,
+    'code_interpreter': _tool_code_interpreter,
+    'read_attachment': _tool_read_attachment,
+    'use_skill': _tool_use_skill,
+    'read_file': _tool_read_file,
+    'write_file': _tool_write_file,
+    'edit_file': _tool_edit_file,
+    'str_replace_editor': _tool_edit_file,
+    'list_dir': _tool_list_dir,
+    'delete_file': _tool_delete_file,
+    'create_directory': _tool_create_directory,
+    'move_file': _tool_move_file,
+    'copy_file': _tool_move_file,
+    'rename_file': _tool_rename_file,
+    'delete_directory': _tool_delete_directory,
+    FERRAMENTA_DO_PLANO: _tool_plan,
+    'search_files': _tool_search_files,
+    'apply_patch': _tool_apply_patch,
+    'git_push': _tool_git_push,
+    'git_pull': _tool_git_pull,
+    'install_package': _tool_install_package,
+    'uninstall_package': _tool_install_package,
+    'download_file': _tool_download_file,
+    'upload_file': _tool_upload_file,
+    'get_environment': _tool_get_environment,
+    'search_codebase': _tool_search_codebase,
+    'vector_search': _tool_search_codebase,
+    'grep': _tool_search_codebase,
+    'regex_search': _tool_search_codebase,
+    'get_problems': _tool_get_problems,
+    'linter': _tool_get_problems,
+    'web_search': _tool_web_search,
+    'url_reader': _tool_url_reader,
+    'browser': _tool_url_reader,
+    'git_status': _tool_git_status,
+    'git_diff': _tool_git_diff,
+    'git_log': _tool_git_log,
+    'git_commit': _tool_git_commit,
+}

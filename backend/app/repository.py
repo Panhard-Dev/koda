@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .plan import ACCOUNT_DEFAULTS
+from .host_auth import proprietario
+from . import provider_state
 from .schemas import (
     Account,
     AttachmentInfo,
@@ -71,6 +73,10 @@ def _carregar_anexos(valor: object) -> list[AttachmentInfo]:
 
 def _row_to_message(row: sqlite3.Row) -> Message:
     colunas = row.keys()
+    try:
+        verification = json.loads(row['verification']) if 'verification' in colunas else {}
+    except (ValueError, TypeError):
+        verification = {}
     passos = [
         ToolStepOut.model_validate(item)
         for item in _carregar_json(row["steps"] if "steps" in colunas else "[]", [])
@@ -83,9 +89,10 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     ]
     return Message(
         id=row["id"],
-        reasoning_content=row["reasoning_content"] if "reasoning_content" in colunas else None,
+        reasoning_content=provider_state.abrir(row["reasoning_content"]) if "reasoning_content" in colunas else None,
         role=row["role"],
         text=row["text"],
+        verification=verification if isinstance(verification, dict) else {},
         attachments=_carregar_anexos(row["attachments"]),
         model=row["model"],
         elapsed_ms=row["elapsed_ms"],
@@ -116,15 +123,17 @@ def ensure_conversation(
     """Devolve o id da conversa, criando uma quando não vier nenhuma."""
     if conversation_id:
         exists = conn.execute(
-            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            "SELECT owner_account_id FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
         if exists:
+            if exists["owner_account_id"] != proprietario():
+                raise PermissionError("conversa não encontrada")
             return conversation_id
 
     target = conversation_id or new_id()
     conn.execute(
-        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        (target, _title_from(first_text), now_ms, now_ms),
+        "INSERT INTO conversations (id, title, created_at, updated_at, owner_account_id) VALUES (?, ?, ?, ?, ?)",
+        (target, _title_from(first_text), now_ms, now_ms, proprietario()),
     )
     return target
 
@@ -141,13 +150,18 @@ def append_message(
     tempo do dia e as moedas eram da máquina, e trocar de conta no mesmo PC continuava
     mostrando o que a conta anterior tinha gasto.
     """
+    _exigir_dono(conn, conversation_id)
+    for attachment in message.attachments:
+        if attachment.id and not conn.execute("SELECT 1 FROM attachments WHERE id=? AND owner_account_id=? AND state='ready'",
+                                              (attachment.id, proprietario())).fetchone():
+            raise PermissionError("anexo não encontrado")
     conn.execute(
         """
         INSERT INTO messages
           (id, conversation_id, role, text, attachments, model, elapsed_ms, tokens,
            tokens_total, contexto, at, steps, todos, incompleto, motivo, pendentes, executou,
-           retomavel, conta, reasoning_content)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           retomavel, conta, reasoning_content, verification)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message.id,
@@ -175,9 +189,14 @@ def append_message(
             message.executou,
             1 if message.retomavel else 0,
             conta,
-            message.reasoning_content,
+            provider_state.proteger(message.reasoning_content),
+            json.dumps(message.verification, ensure_ascii=False),
         ),
     )
+    for attachment in message.attachments:
+        if attachment.id:
+            conn.execute("INSERT OR IGNORE INTO message_attachments (message_id, attachment_id) VALUES (?,?)",
+                         (message.id, attachment.id))
     conn.execute(
         "UPDATE conversations SET updated_at = ? WHERE id = ?",
         (message.at, conversation_id),
@@ -191,7 +210,7 @@ def resumo_da_conversa(conn: sqlite3.Connection, conversation_id: str) -> tuple[
     resumido ainda».
     """
     row = conn.execute(
-        "SELECT resumo, resumo_mensagens FROM conversations WHERE id = ?", (conversation_id,)
+        "SELECT resumo, resumo_mensagens FROM conversations WHERE id = ? AND owner_account_id = ?", (conversation_id, proprietario())
     ).fetchone()
     if row is None:
         return ("", 0)
@@ -209,8 +228,8 @@ def salvar_resumo(
     `cobertas`, então o que já virou resumo não volta a virar.
     """
     conn.execute(
-        "UPDATE conversations SET resumo = ?, resumo_mensagens = ? WHERE id = ?",
-        (resumo or None, int(cobertas), conversation_id),
+        "UPDATE conversations SET resumo = ?, resumo_mensagens = ? WHERE id = ? AND owner_account_id = ? AND resumo_mensagens <= ?",
+        (resumo or None, int(cobertas), conversation_id, proprietario(), int(cobertas)),
     )
 
 
@@ -224,10 +243,11 @@ def list_conversations(conn: sqlite3.Connection, limit: int = 30) -> list[Conver
                (SELECT m.text FROM messages m WHERE m.conversation_id = c.id
                  ORDER BY m.at DESC, m.rowid DESC LIMIT 1) AS last_text
         FROM conversations c
+        WHERE c.owner_account_id = ?
         ORDER BY c.updated_at DESC
         LIMIT ?
         """,
-        (limit,),
+        (proprietario(), limit),
     ).fetchall()
 
     return [
@@ -244,7 +264,7 @@ def list_conversations(conn: sqlite3.Connection, limit: int = 30) -> list[Conver
 
 def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> Conversation | None:
     row = conn.execute(
-        "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+        "SELECT * FROM conversations WHERE id = ? AND owner_account_id = ?", (conversation_id, proprietario())
     ).fetchone()
     if row is None:
         return None
@@ -277,6 +297,7 @@ def mensagens_da_conversa(
     primeiro token**, a cada mensagem. Aqui o banco devolve só o que vai ser usado, e o
     índice `idx_messages_conversation` faz o pulo das primeiras ser barato.
     """
+    _exigir_dono(conn, conversation_id)
     rows = conn.execute(
         "SELECT * FROM messages WHERE conversation_id = ? ORDER BY at ASC, rowid ASC "
         "LIMIT -1 OFFSET ?",
@@ -293,6 +314,7 @@ def mensagens_da_tarefa_atual(
     A retomada precisa do registro das ferramentas da tarefa em curso. Esse registro pode
     estar fora da janela de contexto viva, então o índice `resumo_mensagens` não serve aqui.
     """
+    _exigir_dono(conn, conversation_id)
     rows = conn.execute(
         "SELECT * FROM messages WHERE conversation_id = ? AND rowid >= COALESCE("
         "(SELECT rowid FROM messages WHERE conversation_id = ? AND role = 'user' "
@@ -303,13 +325,47 @@ def mensagens_da_tarefa_atual(
 
 
 def delete_conversation(conn: sqlite3.Connection, conversation_id: str) -> bool:
-    cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    candidates = [row[0] for row in conn.execute("""SELECT ma.attachment_id FROM message_attachments ma
+        JOIN messages m ON m.id=ma.message_id JOIN conversations c ON c.id=m.conversation_id
+        WHERE c.id=? AND c.owner_account_id=?""", (conversation_id, proprietario()))]
+    cursor = conn.execute("DELETE FROM conversations WHERE id = ? AND owner_account_id = ?", (conversation_id, proprietario()))
+    for attachment_id in candidates:
+        conn.execute("""UPDATE attachments SET state='deletion_pending' WHERE id=? AND owner_account_id=?
+            AND NOT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=attachments.id)""",
+                     (attachment_id, proprietario()))
     return cursor.rowcount > 0
 
 
 def clear_conversations(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM messages")
-    conn.execute("DELETE FROM conversations")
+    ids = [row[0] for row in conn.execute("SELECT id FROM conversations WHERE owner_account_id=?", (proprietario(),))]
+    for conversation_id in ids:
+        delete_conversation(conn, conversation_id)
+
+
+def _exigir_dono(conn: sqlite3.Connection, conversation_id: str) -> None:
+    if not conn.execute("SELECT 1 FROM conversations WHERE id=? AND owner_account_id=?",
+                        (conversation_id, proprietario())).fetchone():
+        raise PermissionError("conversa não encontrada")
+
+
+def vincular_legado_verificado(conn: sqlite3.Connection, email: str, account_id: str, created_at: str) -> None:
+    """Vincula somente metadados legados consistentes a uma identidade validada na nuvem.
+
+    A criação da conta precisa preceder os dados. Recriar um endereço de e-mail não dá
+    acesso ao histórico da antiga conta que usava aquele endereço.
+    """
+    try:
+        created_ms = int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp() * 1000)
+    except (ValueError, TypeError, AttributeError):
+        return
+    owner = "account:" + account_id
+    conn.execute("""UPDATE conversations SET owner_account_id=?
+        WHERE owner_account_id=? AND created_at>=?
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=conversations.id
+             AND (m.conta IS NULL OR lower(trim(m.conta))!=? OR m.at<?))""",
+        (owner, email, created_ms, email, created_ms))
+    conn.execute("""UPDATE attachments SET owner_account_id=? WHERE owner_account_id=?
+        AND criado_em>=?""", (owner, email, created_ms))
 
 
 def _window_start_ms(now_ms: int, tz_offset_minutes: int, window: str) -> int:

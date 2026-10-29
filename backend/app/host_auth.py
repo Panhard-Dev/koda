@@ -21,6 +21,48 @@ minutos, então uma renovação por ciclo basta).
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from contextvars import ContextVar
+from dataclasses import dataclass
+from threading import RLock
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    window: str = "desktop"
+    token: str | None = None
+    nome: str | None = None
+    email: str | None = None
+    account_id: str | None = None
+
+
+_context: ContextVar[RequestContext | None] = ContextVar("koda_request", default=None)
+_sessions: dict[str, RequestContext] = {}
+_lock = RLock()
+
+
+def capturar(window: str) -> RequestContext:
+    with _lock:
+        return _sessions.get(window, RequestContext(window=window))
+
+
+def vincular(context: RequestContext):
+    return _context.set(context)
+
+
+def desvincular(token) -> None:
+    _context.reset(token)
+
+
+def contexto_atual() -> RequestContext:
+    return _context.get() or RequestContext(token=_sessao, nome=(_conta or (None, None))[0],
+                                          email=(_conta or (None, None))[1])
+
+
+def proprietario() -> str:
+    # Conta validada pela nuvem. Dados locais sem conta pertencem ao perfil local;
+    # linhas legadas ambíguas permanecem NULL e não ficam visíveis por acidente.
+    context = contexto_atual()
+    return ("account:" + context.account_id) if context.account_id else (context.email or "local:desktop")
 
 if TYPE_CHECKING:  # pragma: no cover - só para o tipo
     from .config import Settings
@@ -31,7 +73,8 @@ _conta: tuple[str | None, str | None] | None = None
 
 
 def definir(
-    token: str | None, *, nome: str | None = None, email: str | None = None
+    token: str | None, *, nome: str | None = None, email: str | None = None,
+    account_id: str | None = None,
 ) -> None:
     """Guarda a sessão atual: a credencial e quem ela identifica.
 
@@ -41,6 +84,16 @@ def definir(
     """
     global _sessao, _conta
     limpo = (token or "").strip()
+    current = _context.get()
+    if current is not None:
+        updated = RequestContext(window=current.window, token=limpo or None,
+                                 nome=(nome or "").strip() or None if limpo else None,
+                                 email=(email or "").strip().casefold() or None if limpo else None,
+                                 account_id=account_id if limpo else None)
+        with _lock:
+            _sessions[current.window] = updated
+        _context.set(updated)
+        return
     _sessao = limpo or None
     if _sessao is None:
         _conta = None
@@ -50,7 +103,7 @@ def definir(
 
 def atual() -> str | None:
     """A sessão em vigor, ou `None` quando não há conta logada."""
-    return _sessao
+    return contexto_atual().token
 
 
 def limpar() -> None:
@@ -64,9 +117,8 @@ def rotulo_da_conta() -> str | None:
     conta (ou sem nome e e-mail informados) devolve `None`, e o prompt não ganha linha
     nenhuma sobre identidade.
     """
-    if _conta is None:
-        return None
-    nome, email = _conta
+    context = contexto_atual()
+    nome, email = context.nome, context.email
     if nome and email:
         return f"{nome} ({email})"
     return nome or email
@@ -80,15 +132,19 @@ def email_da_conta() -> str | None:
     `None` quando não há conta (ou o front não informou o e-mail) — quem grava o uso marca
     a linha como «conta desconhecida», e a leitura por conta simplesmente não a alcança.
     """
-    return _conta[1] if _conta else None
+    return contexto_atual().email
 
 
 def credencial(settings: Settings) -> str:
     """O que apresentar ao host, em uma linha.
 
-    A sessão da conta manda: é ela que prova quem está logado, e é o caminho normal do
-    app. A chave de serviço (`KODA_HOST_KEY`) fica como alternativa de quem opera a
-    máquina — ela não existe no código nem no instalador, só no ambiente de quem a
-    configurou. Sem nada, devolve vazio e o `Authorization` não vai.
+    A **senha dinâmica do dia** manda quando existe: o painel entregou, o host
+    autoriza localmente, e nada disso depende de o painel estar de pé agora. Sem
+    ela (ninguém logado, painel não entregou, ou já expirou), vale a sessão da
+    conta — o caminho normal, que o painel revalida a cada chave nova. A chave
+    de serviço (`KODA_HOST_KEY`) fica como alternativa de quem opera a máquina.
+    Sem nada, devolve vazio e o `Authorization` não vai.
     """
-    return (atual() or settings.host_key or "").strip()
+    from . import host_dinamica  # import tardio: host_dinamica usa host_auth
+
+    return (host_dinamica.vigente(settings) or atual() or settings.host_key or "").strip()

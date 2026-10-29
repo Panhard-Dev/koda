@@ -1,9 +1,10 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ArrowUp, Bot, ChevronDown, ListTodo, LoaderCircle, Square } from 'lucide-react'
 import { answerApproval, fraseDeFalha, listModels, streamChat } from '../api/client'
 import type { ApiModel, ApiProject, ApiTodo, ToolStep } from '../api/client'
 import { EFFORT_PADRAO } from '../effort'
 import { MODEL_LABELS, MODELO_PADRAO, modelMenu } from '../models'
+import { atualizarModelosCom400, lerModelosCom400 } from '../modelos-com-400'
 import BolhaUsuario from './BolhaUsuario'
 import FalaDoModelo from './FalaDoModelo'
 import KodaLogo from './KodaLogo'
@@ -186,6 +187,7 @@ export default function Subs({
 }) {
   const { modelo, rascunho, falas, ocupado, segundos, catalogo, todos, aba } =
     useSyncExternalStore(assinar, ler)
+  const [modelosCom400, setModelosCom400] = useState<string[]>(lerModelosCom400)
   const listaRef = useRef<HTMLDivElement>(null)
 
   /**
@@ -206,13 +208,57 @@ export default function Subs({
     if (estado.catalogo) return
     void (async () => {
       try {
-        mudar({ catalogo: await listModels() })
+        const modelos = await listModels()
+        const recusados = atualizarModelosCom400(modelos)
+        setModelosCom400(recusados)
+        const disponiveis = modelMenu(modelos, recusados).flatMap((grupo) =>
+          (grupo.options ?? []).map((item) => item.value),
+        )
+        mudar({
+          catalogo: modelos,
+          modelo: disponiveis.includes(estado.modelo) ? estado.modelo : (disponiveis[0] ?? ''),
+        })
       } catch {
-        // Sem catálogo fica o da casa (`MODEL_MENU`), que é o espelho de emergência.
-        mudar({ catalogo: [] })
+        // A consulta falhou; aguarda a próxima tentativa sem oferecer modelos não testados.
+        const disponiveis = modelMenu([], lerModelosCom400()).flatMap((grupo) =>
+          (grupo.options ?? []).map((item) => item.value),
+        )
+        mudar({
+          catalogo: [],
+          modelo: disponiveis.includes(estado.modelo) ? estado.modelo : (disponiveis[0] ?? ''),
+        })
       }
     })()
   }, [])
+
+  useEffect(() => {
+    if (catalogo?.length !== 0) return
+    let cancelado = false
+    let consultando = false
+    const timer = window.setInterval(() => {
+      if (consultando) return
+      consultando = true
+      void listModels()
+        .then((modelos) => {
+          if (cancelado || modelos.length === 0) return
+          const recusados = atualizarModelosCom400(modelos)
+          setModelosCom400(recusados)
+          const disponiveis = modelMenu(modelos, recusados).flatMap((grupo) =>
+            (grupo.options ?? []).map((item) => item.value),
+          )
+          mudar({
+            catalogo: modelos,
+            modelo: disponiveis.includes(estado.modelo) ? estado.modelo : (disponiveis[0] ?? ''),
+          })
+        })
+        .catch(() => {})
+        .finally(() => { consultando = false })
+    }, 5_000)
+    return () => {
+      cancelado = true
+      window.clearInterval(timer)
+    }
+  }, [catalogo])
 
   // O relógio da linha de trabalho: um indicador parado não convence ninguém de que ainda
   // tem alguém trabalhando.
@@ -243,6 +289,7 @@ export default function Subs({
   const enviar = async (resume = false) => {
     const texto = estado.rascunho.trim()
     if (estado.ocupado) return
+    if (!estado.modelo) return
     if (!resume && !texto) return
 
     const resposta = falaVazia('assistant')
@@ -479,7 +526,7 @@ export default function Subs({
           {/* O `Menu` já desenha o `<button>` do gatilho: o que vai aqui é o conteúdo dele, e
               a cara vem no `triggerClassName`. */}
           <Menu
-            options={modelMenu(catalogo ?? [], [])}
+            options={modelMenu(catalogo, modelosCom400)}
             value={modelo}
             onSelect={(valor) => mudar({ modelo: valor })}
             direction="up"
@@ -489,7 +536,7 @@ export default function Subs({
             triggerClassName="flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-[12.5px] text-koda-fg/70 ring-1 ring-koda-fg/10 transition-colors duration-150 hover:bg-koda-fg/8 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
           >
             <KodaLogo className="h-3.5 w-auto shrink-0" color="currentColor" />
-            <span className="max-w-[150px] truncate">{rotuloDoModelo}</span>
+            <span className="max-w-[150px] truncate">{modelo ? rotuloDoModelo : 'Nenhum modelo disponível'}</span>
             <ChevronDown className="h-3 w-3 shrink-0" strokeWidth={2} />
           </Menu>
 
@@ -508,7 +555,7 @@ export default function Subs({
               type="button"
               aria-label="Enviar"
               title="Enviar"
-              disabled={!rascunho.trim()}
+              disabled={!rascunho.trim() || !modelo}
               onClick={() => void enviar()}
               className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-koda-accent-strong text-white transition-opacity duration-150 hover:opacity-90 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none disabled:cursor-default disabled:opacity-35"
             >

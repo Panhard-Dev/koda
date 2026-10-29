@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from contextvars import ContextVar
 from threading import Event
+from functools import wraps
 
 import httpx
 
@@ -19,6 +20,21 @@ _PRAZO_DA_FERRAMENTA: ContextVar[float | None] = ContextVar(
 _CANCELAMENTO_DA_FERRAMENTA: ContextVar[Event | None] = ContextVar(
     "cancelamento_da_ferramenta", default=None
 )
+
+# Capacidade imposta pelo chamador, nunca pelo texto de ferramenta/skill.
+HOST_EXECUTION_ALLOWED: ContextVar[bool] = ContextVar('host_execution_allowed', default=True)
+
+
+def without_host_processes(function):
+    """Uma tarefa de leitura não ganha processos através de ferramenta alternativa."""
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        binding = HOST_EXECUTION_ALLOWED.set(False)
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            HOST_EXECUTION_ALLOWED.reset(binding)
+    return wrapped
 
 
 def _restante_da_ferramenta() -> float | None:

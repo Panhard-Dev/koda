@@ -1,0 +1,128 @@
+{
+  "_nota": "Fluxos de login por provedor. As constantes (client id, endpoints, escopos) são as que o 9router usa nesta máquina — extraídas de %APPDATA%/npm/node_modules/9router/app/.next-cli-build — e as do Google batem com o magpie (internal/provider/google.go). Nenhum segredo real aqui: são clientes públicos de app instalado, os mesmos que os CLIs oficiais carregam.",
+  "anthropic": {
+    "tipo": "pkce",
+    "authorize": "https://claude.ai/oauth/authorize",
+    "token": "https://api.anthropic.com/v1/oauth/token",
+    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    "scopes": [
+      "org:create_api_key",
+      "user:profile",
+      "user:inference"
+    ],
+    "extra": {
+      "code": "true"
+    },
+    "porta": 0,
+    "caminho": "/callback",
+    "token_body": "json",
+    "refresh_body": "json"
+  },
+  "openai": {
+    "tipo": "pkce",
+    "authorize": "https://auth.openai.com/oauth/authorize",
+    "token": "https://auth.openai.com/oauth/token",
+    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+    "scopes": "openid profile email offline_access api.connectors.read api.connectors.invoke",
+    "extra": {
+      "id_token_add_organizations": "true",
+      "codex_cli_simplified_flow": "true",
+      "originator": "codex_cli_rs"
+    },
+    "porta": 1455,
+    "caminho": "/auth/callback",
+    "token_body": "form",
+    "refresh_body": "json",
+    "refresh_scope": "openid profile email"
+  },
+  "google": {
+    "tipo": "pkce",
+    "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
+    "token": "https://oauth2.googleapis.com/token",
+    "client_id": "",
+    "client_secret": "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",
+    "scopes": [
+      "https://www.googleapis.com/auth/cloud-platform",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile"
+    ],
+    "extra": {
+      "access_type": "offline",
+      "prompt": "consent"
+    },
+    "porta": 0,
+    "caminho": "/oauth2callback",
+    "token_body": "form",
+    "refresh_body": "form"
+  },
+  "antigravity": {
+    "tipo": "pkce",
+    "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
+    "token": "https://oauth2.googleapis.com/token",
+    "client_id": "",
+    "client_secret": "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",
+    "scopes": [
+      "https://www.googleapis.com/auth/cloud-platform",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+      "https://www.googleapis.com/auth/cclog",
+      "https://www.googleapis.com/auth/experimentsandconfigs"
+    ],
+    "extra": {
+      "access_type": "offline",
+      "prompt": "consent"
+    },
+    "porta": 0,
+    "caminho": "/oauth2callback",
+    "token_body": "form",
+    "refresh_body": "form"
+  },
+  "github": {
+    "tipo": "device",
+    "device": "https://github.com/login/device/code",
+    "token": "https://github.com/login/oauth/access_token",
+    "client_id": "Iv1.b507a08c87ecfe98",
+    "scopes": "read:user",
+    "userinfo": "https://api.github.com/user",
+    "token_body": "form"
+  },
+  "xai": {
+    "tipo": "device",
+    "device": "https://auth.x.ai/oauth2/device/code",
+    "token": "https://auth.x.ai/oauth2/token",
+    "client_id": "b1a00492-073a-47ea-816f-4c329264a828",
+    "scopes": "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+    "token_body": "form"
+  },
+  "kiro": {
+    "tipo": "aws_sso",
+    "oidc": "https://oidc.us-east-1.amazonaws.com",
+    "start_url": "https://view.awsapps.com/start",
+    "client_name": "kiro-oauth-client",
+    "scopes": [
+      "codewhisperer:completions",
+      "codewhisperer:analysis",
+      "codewhisperer:conversations"
+    ],
+    "grant_types": [
+      "urn:ietf:params:oauth:grant-type:device_code",
+      "refresh_token"
+    ]
+  },
+  "qoder": {
+    "tipo": "qoder",
+    "login": "https://qoder.com/device/selectAccounts",
+    "openapi": "https://openapi.qoder.sh",
+    "client_id": "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+    "refresh_url": "https://center.qoder.sh/algo/api/v3/user/refresh_token",
+    "userinfo": "https://openapi.qoder.sh/api/v1/userinfo"
+  },
+  "qoder-cn": {
+    "tipo": "qoder",
+    "login": "https://qoder.com.cn/device/selectAccounts",
+    "openapi": "https://openapi.qoder.com.cn",
+    "client_id": "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+    "refresh_url": "https://gateway.qoder.com.cn/algo/api/v3/user/refresh_token",
+    "userinfo": "https://openapi.qoder.com.cn/api/v1/userinfo"
+  }
+}

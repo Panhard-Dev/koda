@@ -16,18 +16,26 @@ O token não é gravado em disco nem volta em resposta; o que responde é o esta
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+import httpx
 
-from .. import host_auth
-from ..deps import call
+from .. import host_auth, host_dinamica
+from ..deps import call, provider
 from ..providers import build_provider
 from ..schemas import HostSessao, HostSessaoEstado
+from ..repository import vincular_legado_verificado
 
 router = APIRouter(prefix="/host", tags=["host"])
 
 
+def _vincular_legado(request: Request, account: dict) -> None:
+    with request.app.state.db.connect() as conn:
+        vincular_legado_verificado(conn, str(account["email"]).strip().casefold(),
+                                  str(account["id"]), account.get("criada_em", ""))
+
+
 async def _estado(request: Request) -> HostSessaoEstado:
-    engine = request.app.state.provider
+    engine = provider(request)
     return HostSessaoEstado(
         autenticado=host_auth.atual() is not None,
         conta=host_auth.rotulo_da_conta(),
@@ -47,7 +55,10 @@ async def _reescolher(request: Request) -> HostSessaoEstado:
     Em thread porque a sonda do host é bloqueante (um `GET /models` com timeout de alguns
     segundos): no event loop isso travaria a resposta da própria tela.
     """
-    request.app.state.provider = await call(build_provider, request.app.state.settings)
+    providers = getattr(request.app.state, "providers", None)
+    if providers is None:
+        providers = request.app.state.providers = {}
+    providers[host_auth.contexto_atual().window] = await call(build_provider, request.app.state.settings)
     return await _estado(request)
 
 
@@ -58,8 +69,37 @@ async def definir_sessao(payload: HostSessao, request: Request) -> HostSessaoEst
     O front chama isto depois de entrar e a cada renovação (o token de acesso vence em
     minutos). Token vazio limpa a credencial — é o que acontece ao sair da conta —, e aí o
     nome e o e-mail vão embora com ela.
+
+    É aqui também que a **senha dinâmica do dia** chega: com sessão válida, o backend
+    busca a senha no painel e grava o JSON que o `c-host` lê. Sem sessão, o arquivo é
+    apagado — a credencial dinâmica não sobrevive a quem sai da conta.
     """
-    host_auth.definir(payload.token, nome=payload.nome, email=payload.email)
+    token = (payload.token or "").strip()
+    settings = request.app.state.settings
+    if token:
+        if not settings.cloud_url:
+            raise HTTPException(503, "serviço de identidade indisponível")
+        try:
+            async with httpx.AsyncClient(timeout=settings.cloud_timeout_s, follow_redirects=False) as client:
+                response = await client.get(settings.cloud_url.rstrip("/") + "/api/account/me",
+                                            headers={"Authorization": f"Bearer {token}"})
+            if response.status_code != 200:
+                raise HTTPException(401, "sessão não validada")
+            account = response.json()["conta"]
+            email = str(account["email"]).strip().casefold()
+            if not email or not account.get("id"):
+                raise ValueError("identidade incompleta")
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(503, "não foi possível validar a sessão") from exc
+        host_auth.definir(token, nome=account.get("nome"), email=email, account_id=str(account["id"]))
+        await call(_vincular_legado, request, account)
+        # A senha do dia não pode travar a escolha do provider: se o painel
+        # não entregar agora, a sessão continua valendo e a próxima renovação
+        # tenta de novo.
+        await call(host_dinamica.atualizar, settings, token)
+    else:
+        host_auth.limpar()
+        await call(host_dinamica.esquecer, settings)
     return await _reescolher(request)
 
 
@@ -67,4 +107,5 @@ async def definir_sessao(payload: HostSessao, request: Request) -> HostSessaoEst
 async def encerrar_sessao(request: Request) -> HostSessaoEstado:
     """Sai da sessão: o host volta a recusar, e o provider volta a ser o sem ferramentas."""
     host_auth.limpar()
+    await call(host_dinamica.esquecer, request.app.state.settings)
     return await _reescolher(request)

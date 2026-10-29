@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Iterator
+from ..host_auth import proprietario
 
 #: Acima disto não há diff por linha — só a contagem de arquivo alterado.
 #:
@@ -86,11 +87,11 @@ class Evento:
     depois: str | None
 
 
-_guardadas: dict[str, Mudanca] = {}
+_guardadas: dict[tuple[str, str], Mudanca] = {}
 #: O que cada chamada mudou, pelo id dela. É por aqui que o cartão da ferramenta na conversa
 #: se acha. Cresce com o trabalho da execução e só é esvaziado por `limpar()` — é o preço de
 #: cada cartão poder mostrar o próprio diff em vez do acumulado do arquivo.
-_por_chamada: dict[str, list[Evento]] = {}
+_por_chamada: dict[tuple[str, str], list[Evento]] = {}
 #: As ferramentas rodam em thread (`asyncio.to_thread`): sem a trava, duas escritas ao mesmo
 #: tempo no mesmo arquivo perderiam uma das duas.
 _trava = threading.Lock()
@@ -113,7 +114,7 @@ def anotar(
     `chamada` é o id da chamada da ferramenta. Com ele, a escrita também entra no registro
     **por chamada**, que é o que deixa cada cartão da conversa mostrar o próprio diff.
     """
-    chave = _chave(caminho)
+    chave = (proprietario(), _chave(caminho))
     mais, menos = _contagem(antes, depois)
     with _trava:
         existente = _guardadas.get(chave)
@@ -135,7 +136,7 @@ def anotar(
             existente.menos = menos
             existente.vezes += 1
         if chamada:
-            _por_chamada.setdefault(chamada, []).append(
+            _por_chamada.setdefault((proprietario(), chamada), []).append(
                 Evento(caminho=caminho, ferramenta=ferramenta, antes=antes, depois=depois)
             )
 
@@ -147,14 +148,14 @@ def listar() -> list[dict[str, object]]:
     todo arquivo alterado a cada sondagem seria caro para nada.
     """
     with _trava:
-        itens = sorted(_guardadas.values(), key=lambda item: item.caminho.lower())
+        itens = sorted((item for (owner, _), item in _guardadas.items() if owner == proprietario()), key=lambda item: item.caminho.lower())
         return [_resumo(item) for item in itens]
 
 
 def de(caminho: str) -> dict[str, object] | None:
     """O retrato de um arquivo: o resumo mais as linhas marcadas. `None` se não mudou."""
     with _trava:
-        mudanca = _guardadas.get(_chave(caminho))
+        mudanca = _guardadas.get((proprietario(), _chave(caminho)))
         if mudanca is None:
             return None
         retrato = _resumo(mudanca)
@@ -174,7 +175,7 @@ def da_chamada(chamada: str) -> list[dict[str, object]]:
     if not chamada:
         return []
     with _trava:
-        eventos = list(_por_chamada.get(chamada, ()))
+        eventos = list(_por_chamada.get((proprietario(), chamada), ()))
     saida: list[dict[str, object]] = []
     for evento in eventos:
         # Fora da trava: o diff é a parte cara, e montá-lo segurando o cadeado travaria a
@@ -196,10 +197,19 @@ def limpar() -> int:
     arquivo (a aba Código) quanto o por chamada (os cartões da conversa).
     """
     with _trava:
-        quantas = len(_guardadas)
-        _guardadas.clear()
-        _por_chamada.clear()
+        owner = proprietario()
+        owned = [key for key in _guardadas if key[0] == owner]
+        quantas = len(owned)
+        for key in owned:
+            del _guardadas[key]
+        for key in [key for key in _por_chamada if key[0] == owner]:
+            del _por_chamada[key]
     return quantas
+
+
+def caminhos_da_chamada(chamada: str) -> list[str]:
+    with _trava:
+        return [event.caminho for event in _por_chamada.get((proprietario(), chamada), ())]
 
 
 def linhas_do_diff(antes: str | None, depois: str | None) -> list[dict[str, object]] | None:

@@ -32,6 +32,14 @@ MODEL_LABELS = {
 }
 
 
+def _conta_para(settings: Any, modelo: str | None):
+    """Modelo `provedor:<id>:<modelo>` tem dono; o resto não."""
+    from .conta import ContaProvider, dono
+
+    achado = dono(modelo or "")
+    return ContaProvider(settings, achado[0]) if achado else None
+
+
 class LocalProvider:
     name = "local"
     ready = True
@@ -89,6 +97,13 @@ class LocalProvider:
         return "\n\n".join(part for part in blocks if part)
 
     async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
+        # Modelo de conta responde pela conta, mesmo com o host fora do ar: o `local` é o
+        # último recurso do host, não um veto ao que não depende dele.
+        da_conta = _conta_para(self.settings, options.model)
+        if da_conta is not None:
+            async for pedaco in da_conta.stream(turns, options):
+                yield pedaco
+            return
         for index, word in enumerate(self._reply(turns, options).split(" ")):
             yield Piece(word if index == 0 else f" {word}")
             if self.delay:
@@ -97,6 +112,9 @@ class LocalProvider:
     async def step(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str = ""
     ) -> Any:
+        da_conta = _conta_para(self.settings, model)
+        if da_conta is not None:
+            return await da_conta.step(messages, tools, model)
         """O agente **não** roda no provider local — e falha com erro, não com crash.
 
         O local existe para o chat avulso não ficar mudo (sessão caindo, host sumido). O

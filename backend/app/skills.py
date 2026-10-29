@@ -324,13 +324,9 @@ def indice_para_agente(settings: Settings, workspace: Path | None = None) -> str
     if cadastradas:
         linhas: list[str] = []
         for skill in cadastradas:
-            acao = skill.action[: _MAX_ACAO - gasto]
-            if not acao:
-                break
-            gasto += len(acao)
-            linhas.append(f"- {skill.name}: {skill.description}\n  Instruções: {acao}")
+            linhas.append(f"- {skill.name}: {skill.description}")
         partes.append(
-            "Skills cadastradas (instruções completas — aplique quando o pedido combinar):\n"
+            "Skills cadastradas (recursos externos; carregue com use_skill quando necessário):\n"
             + "\n".join(linhas)
         )
 

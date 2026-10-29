@@ -40,6 +40,7 @@ import sqlite3
 import time
 
 from ..repository import new_id
+from ..host_auth import proprietario
 
 MODOS = ("plan", "manual", "default", "auto", "livre")
 
@@ -90,7 +91,8 @@ ROTULO = {
 
 
 def modo(conn: sqlite3.Connection) -> str:
-    linha = conn.execute("SELECT approval_mode FROM app_settings WHERE id = 1").fetchone()
+    linha = conn.execute("SELECT approval_mode FROM account_permissions WHERE owner_account_id = ?",
+                         (proprietario(),)).fetchone()
     valor = str(linha["approval_mode"]) if linha is not None else "default"
     return valor if valor in MODOS else "default"
 
@@ -99,16 +101,16 @@ def definir_modo(conn: sqlite3.Connection, novo: str) -> str:
     if novo not in MODOS:
         raise ValueError(f"modo desconhecido: {novo}")
     conn.execute(
-        "INSERT INTO app_settings (id, approval_mode) VALUES (1, ?)"
-        " ON CONFLICT(id) DO UPDATE SET approval_mode = excluded.approval_mode",
-        (novo,),
+        "INSERT INTO account_permissions (owner_account_id, approval_mode) VALUES (?, ?)"
+        " ON CONFLICT(owner_account_id) DO UPDATE SET approval_mode = excluded.approval_mode",
+        (proprietario(), novo),
     )
     return novo
 
 
 def regras(conn: sqlite3.Connection) -> list[dict[str, object]]:
     linhas = conn.execute(
-        "SELECT * FROM approval_rules ORDER BY created_at DESC"
+        "SELECT * FROM approval_rules WHERE owner_account_id=? ORDER BY created_at DESC", (proprietario(),)
     ).fetchall()
     return [
         {
@@ -129,25 +131,25 @@ def lembrar(conn: sqlite3.Connection, kind: str, escopo: str, decisao: str) -> N
         raise ValueError("decisão ou tipo de ação inválido")
     alvo = (escopo or QUALQUER).strip() or QUALQUER
     conn.execute(
-        "INSERT INTO approval_rules (id, kind, scope, decision, created_at)"
-        " VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO approval_rules (id, kind, scope, decision, created_at, owner_account_id)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
         " ON CONFLICT DO NOTHING",
-        (new_id(), kind, alvo, decisao, int(time.time() * 1000)),
+        (new_id(), kind, alvo, decisao, int(time.time() * 1000), proprietario()),
     )
     # O mesmo alvo não pode valer as duas coisas: a resposta nova manda.
     conn.execute(
-        "DELETE FROM approval_rules WHERE kind = ? AND scope = ? AND decision != ?",
-        (kind, alvo, decisao),
+        "DELETE FROM approval_rules WHERE kind = ? AND scope = ? AND decision != ? AND owner_account_id=?",
+        (kind, alvo, decisao, proprietario()),
     )
 
 
 def esquecer(conn: sqlite3.Connection, regra_id: str) -> bool:
-    cursor = conn.execute("DELETE FROM approval_rules WHERE id = ?", (regra_id,))
+    cursor = conn.execute("DELETE FROM approval_rules WHERE id = ? AND owner_account_id=?", (regra_id, proprietario()))
     return cursor.rowcount > 0
 
 
 def limpar(conn: sqlite3.Connection) -> int:
-    cursor = conn.execute("DELETE FROM approval_rules")
+    cursor = conn.execute("DELETE FROM approval_rules WHERE owner_account_id=?", (proprietario(),))
     return cursor.rowcount
 
 
@@ -155,8 +157,8 @@ def regra(conn: sqlite3.Connection, kind: str, escopo: str) -> str | None:
     """Decisão já tomada para esta ação: a do alvo exato vence a genérica."""
     for alvo in ((escopo or "").strip(), QUALQUER):
         linha = conn.execute(
-            "SELECT decision FROM approval_rules WHERE kind = ? AND scope = ?",
-            (kind, alvo),
+            "SELECT decision FROM approval_rules WHERE kind = ? AND scope = ? AND owner_account_id=? ORDER BY created_at DESC LIMIT 1",
+            (kind, alvo, proprietario()),
         ).fetchone()
         if linha is not None:
             return str(linha["decision"])
@@ -175,6 +177,11 @@ def resolver(conn: sqlite3.Connection, info: dict[str, object], modo_atual: str)
     Um «nunca» já dado vence qualquer «sempre»: negar é mais seguro do que permitir
     quando a chamada cai em duas regras ao mesmo tempo.
     """
+    # Uma proibição explícita continua valendo mesmo quando o modo dispensa perguntas.
+    escopos = info.get("escopos", {})
+    if any(regra(conn, str(kind), str(escopos.get(str(kind), ""))) == "nunca"
+           for kind in info.get("kinds", [])):
+        return "nunca"
     relevantes = kinds_relevantes(info, modo_atual)
     if not relevantes:
         return "seguir"

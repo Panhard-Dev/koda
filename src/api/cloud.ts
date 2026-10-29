@@ -268,13 +268,20 @@ function adotar(dados: RespostaSessao): Conta {
  * guardado com a sessão.
  */
 function acessoEmVigor(): Acesso | null {
-  if (acesso) return acesso
-  const salvo = ler()?.acesso
+  const guardada = ler()
+  if (!guardada) {
+    acesso = null
+    return null
+  }
+  const salvo = guardada.acesso
   if (!salvo || typeof salvo.token !== 'string' || !salvo.token) return null
   const expira = Number(salvo.expira_em) || 0
-  if (expira <= Date.now()) return null
-  acesso = { token: salvo.token, expira_em: expira, prazo_ms: Number(salvo.prazo_ms) || 0 }
-  return acesso
+  // Outra janela pode ter renovado e escrito um token novo no mesmo localStorage.
+  // A cópia em memória não pode continuar apresentando o token anterior ao host.
+  if (!acesso || acesso.token !== salvo.token) {
+    acesso = { token: salvo.token, expira_em: expira, prazo_ms: Number(salvo.prazo_ms) || 0 }
+  }
+  return acesso.expira_em > Date.now() ? acesso : null
 }
 
 /**
@@ -346,7 +353,21 @@ let renovando: Promise<Conta> | null = null
  */
 function renovar(refreshToken: string): Promise<Conta> {
   if (renovando) return renovando
-  const promessa = renovarUmaVez(refreshToken)
+  const executar = async (): Promise<Conta> => {
+    // O token passado pelo chamador pode ter sido girado enquanto ele esperava outra
+    // leitura do perfil ou o bloqueio de outra janela. Só o valor atual vai ao painel.
+    const guardada = ler()
+    if (!guardada) throw new ErroDaConta('missing_token', mensagemDe('missing_token'), 401)
+    if (guardada.refresh_token !== refreshToken && !renovacaoDevida()) {
+      return guardada.conta
+    }
+    return renovarUmaVez(guardada.refresh_token)
+  }
+  // O single-flight acima vale nesta janela; Web Locks serializa também as outras
+  // janelas da mesma origem, que compartilham localStorage mas não esta variável.
+  const promessa = navigator.locks?.request
+    ? navigator.locks.request('koda-conta-refresh', executar)
+    : executar()
   renovando = promessa
   const soltar = () => {
     renovando = null
@@ -405,6 +426,10 @@ export async function sessaoParaOHost(): Promise<SessaoDaConta> {
   try {
     await renovar(guardada.refresh_token)
   } catch (falha) {
+    const atual = ler()
+    if (atual && atual.refresh_token !== guardada.refresh_token) {
+      return { estado: 'sem-rede' }
+    }
     return sessaoMorreu(falha)
       ? {
           estado: 'morta',
@@ -577,6 +602,10 @@ async function renovarEAvalidar(refreshToken: string): Promise<SessaoViva> {
   try {
     await renovar(refreshToken)
   } catch (falha) {
+    // Uma resposta de renovação antiga não decide o destino da credencial que outra
+    // janela já gravou. A próxima sonda verifica a sessão nova.
+    const atual = ler()
+    if (atual && atual.refresh_token !== refreshToken) return { estado: 'sem-rede' }
     return sessaoMorreu(falha)
       ? {
           estado: 'morta',
@@ -584,10 +613,14 @@ async function renovarEAvalidar(refreshToken: string): Promise<SessaoViva> {
         }
       : { estado: 'sem-rede' }
   }
+  const tokenConsultado = acessoEmVigor()?.token
   try {
     return await lerPerfil()
   } catch (falha) {
     if (falha instanceof ErroDaConta && falha.status === 403) {
+      if (tokenConsultado && acessoEmVigor()?.token !== tokenConsultado) {
+        return { estado: 'sem-rede' }
+      }
       limpar()
       return { estado: 'morta', motivo: falha.message }
     }
@@ -622,14 +655,19 @@ export async function verificarSessao(): Promise<SessaoViva> {
   // renovação.
   if (!acessoEmVigor()) return renovarEAvalidar(guardada.refresh_token)
 
+  const tokenConsultado = acessoEmVigor()?.token
   try {
     return await lerPerfil()
   } catch (falha) {
     if (!(falha instanceof ErroDaConta)) return { estado: 'sem-rede' }
     if (falha.status === 403) {
+      if (tokenConsultado && acessoEmVigor()?.token !== tokenConsultado) {
+        return { estado: 'sem-rede' }
+      }
       // Só apaga o que ainda é a sessão desta sonda: uma renovação que correu em paralelo
       // pode ter gravado uma sessão nova, e ela não tem culpa do 403 da anterior.
-      if (ler()?.refresh_token === guardada.refresh_token) limpar()
+      if (ler()?.refresh_token !== guardada.refresh_token) return { estado: 'sem-rede' }
+      limpar()
       return { estado: 'morta', motivo: falha.message }
     }
     if (falha.status === 401) return renovarEAvalidar(guardada.refresh_token)

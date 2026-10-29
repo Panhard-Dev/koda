@@ -38,13 +38,13 @@ export const MODOS_PERMISSAO: ModoDePermissao[] = [
   {
     id: 'auto',
     label: 'Auto',
-    hint: 'Executa sem pedir aprovação; o shell usa as permissões da sua conta e os arquivos ficam no projeto por padrão',
+    hint: 'Executa comandos com acesso da sua conta ao computador; o limite ao projeto vale para as ferramentas de arquivo',
     curto: 'Automático',
   },
   {
     id: 'livre',
     label: 'Livre — arquivos no computador inteiro',
-    hint: 'Sem aprovações; escolha se confia ao Koda acesso a arquivos fora do projeto',
+    hint: 'Executa comandos e acessa arquivos no computador com as permissões da sua conta; sem pedir aprovação',
     curto: 'Livre',
   },
 ]

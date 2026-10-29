@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from .. import host_auth
+from .. import host_auth, host_dinamica
 from ..config import Settings
 from ..limits import LIMITE_DE_REQUISICOES, TetoAtingido
 from . import host_boot
@@ -176,6 +176,10 @@ class ComTeto:
 
 def build_provider(settings: Settings) -> Provider:
     """O provedor desta execução, já atrás do teto de requisições."""
+    # A senha dinâmica do dia, se estiver faltando ou expirada, é buscada aqui
+    # (com espera entre tentativas): assim o app que acabou de abrir já conversa
+    # com o host pela credencial que sobrevive a uma queda do painel.
+    host_dinamica.garantir(settings)
     if settings.provider == "local":
         return ComTeto(LocalProvider(settings))
     if settings.provider == "host":

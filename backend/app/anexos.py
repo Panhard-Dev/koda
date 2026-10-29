@@ -17,11 +17,14 @@ import hashlib
 import re
 import time
 import uuid
+import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
 from .db import Database
+from .host_auth import proprietario
 
 #: Teto de tamanho de um anexo. Maior que isto não é anexo de conversa — é arquivo que
 #: deveria estar no projeto. O erro é dito na cara, não truncado em silêncio.
@@ -253,6 +256,7 @@ class AnexoStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.db = Database(settings.database_path)
+        self.owner = proprietario()
 
     # ------------------------------------------------------------------ escrita
     def guardar(self, nome: str, dados: bytes) -> Anexo:
@@ -262,9 +266,7 @@ class AnexoStore:
         seguro = nome_seguro(nome)
         anexo_id = uuid.uuid4().hex
         destino_dir = pasta(self.settings) / anexo_id
-        destino_dir.mkdir(parents=True, exist_ok=True)
         destino = destino_dir / seguro
-        destino.write_bytes(dados)
         criado = int(time.time() * 1000)
         registro = Anexo(
             id=anexo_id,
@@ -279,8 +281,8 @@ class AnexoStore:
         with self.db.connect() as conn:
             conn.execute(
                 "INSERT INTO attachments "
-                "(id, nome, nome_seguro, caminho, mime, tamanho, sha256, criado_em) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, nome, nome_seguro, caminho, mime, tamanho, sha256, criado_em, owner_account_id, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
                 (
                     registro.id,
                     registro.nome,
@@ -290,26 +292,57 @@ class AnexoStore:
                     registro.tamanho,
                     registro.sha256,
                     registro.criado_em,
+                    self.owner,
                 ),
             )
+        try:
+            destino_dir.mkdir(parents=True, exist_ok=False)
+            temporary = destino_dir / ".upload"
+            with temporary.open("xb") as file:
+                file.write(dados)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, destino)
+            with self.db.connect() as conn:
+                conn.execute("UPDATE attachments SET state='ready' WHERE id=? AND state='pending'", (anexo_id,))
+        except Exception:
+            # O registro pending permite reconciliar mesmo quando a limpeza falhar.
+            logging.getLogger(__name__).exception("attachment_write_failed id=%s", anexo_id)
+            raise
         return registro
 
     def remover(self, anexo_id: str) -> bool:
         """Tira o anexo do índice e apaga o conteúdo do store."""
-        anexo = self.buscar(anexo_id)
-        if anexo is None:
-            return False
         with self.db.connect() as conn:
-            conn.execute("DELETE FROM attachments WHERE id = ?", (anexo_id,))
+            row = conn.execute("SELECT * FROM attachments WHERE id=? AND owner_account_id=?",
+                               (anexo_id, self.owner)).fetchone()
+            if row is None:
+                return False
+            if conn.execute("SELECT 1 FROM message_attachments WHERE attachment_id=?", (anexo_id,)).fetchone():
+                raise AnexoError("esse anexo pertence a uma mensagem; remova a conversa para excluí-lo")
+            anexo = _linha(row)
+            self._validar_caminho(anexo)
+            conn.execute("UPDATE attachments SET state='deletion_pending' WHERE id=?", (anexo_id,))
         # Apaga a pasta inteira do anexo (o arquivo e o diretório com o id).
         try:
             anexo.caminho.unlink(missing_ok=True)
-            anexo.caminho.parent.rmdir()
+            (anexo.caminho.parent / ".upload").unlink(missing_ok=True)
+            if anexo.caminho.parent.exists():
+                anexo.caminho.parent.rmdir()
         except OSError:
-            # Conteúdo já ausente ou pasta compartilhada: o índice já saiu, que é o que
-            # decide se o anexo existe. Não vale derrubar a rota por causa disso.
-            pass
+            logging.getLogger(__name__).warning("attachment_deletion_pending id=%s", anexo_id)
+            raise AnexoError("exclusão pendente: não foi possível remover os bytes do anexo")
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM attachments WHERE id=? AND owner_account_id=?", (anexo_id, self.owner))
         return True
+
+    def _validar_caminho(self, anexo: Anexo) -> None:
+        root = pasta(self.settings).resolve()
+        if (not re.fullmatch(r"[a-f0-9]{32}", anexo.id)
+                or anexo.caminho.parent.is_symlink()
+                or anexo.caminho.is_symlink()
+                or anexo.caminho.resolve().parent != root / anexo.id):
+            raise AnexoError("caminho inválido no store de anexos")
 
     # ------------------------------------------------------------------ leitura
     def buscar(self, anexo_id: str) -> Anexo | None:
@@ -317,9 +350,13 @@ class AnexoStore:
             return None
         with self.db.connect() as conn:
             linha = conn.execute(
-                "SELECT * FROM attachments WHERE id = ?", (anexo_id,)
+                "SELECT * FROM attachments WHERE id = ? AND owner_account_id=? AND state='ready'", (anexo_id, self.owner)
             ).fetchone()
-        return _linha(linha) if linha is not None else None
+        if linha is None:
+            return None
+        anexo = _linha(linha)
+        self._validar_caminho(anexo)
+        return anexo
 
     def buscar_varios(self, ids: list[str]) -> list[Anexo]:
         """Resolve ids → anexos, **na ordem pedida** e sem os desconhecidos."""
@@ -330,8 +367,26 @@ class AnexoStore:
         with self.db.connect() as conn:
             for anexo_id in limpos:
                 linha = conn.execute(
-                    "SELECT * FROM attachments WHERE id = ?", (anexo_id,)
+                    "SELECT * FROM attachments WHERE id = ? AND owner_account_id=? AND state='ready'", (anexo_id, self.owner)
                 ).fetchone()
                 if linha is not None:
                     encontrados[anexo_id] = _linha(linha)
+                    self._validar_caminho(encontrados[anexo_id])
         return [encontrados[i] for i in limpos if i in encontrados]
+
+
+def reconciliar(settings: Settings) -> int:
+    """Retoma exclusões e uploads interrompidos; nunca limpa anexo de uma mensagem viva."""
+    store = AnexoStore(settings)
+    with store.db.connect() as conn:
+        rows = conn.execute("""SELECT id, owner_account_id FROM attachments
+            WHERE owner_account_id IS NOT NULL AND (state='deletion_pending'
+               OR (state='pending' AND criado_em<?))""", (int(time.time() * 1000) - 3_600_000,)).fetchall()
+    removed = 0
+    for row in rows:
+        store.owner = row['owner_account_id']
+        try:
+            removed += int(store.remover(row['id']))
+        except (AnexoError, OSError):
+            logging.getLogger(__name__).warning("attachment_reconciliation_pending id=%s", row['id'])
+    return removed

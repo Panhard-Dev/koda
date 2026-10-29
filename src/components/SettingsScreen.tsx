@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleUser,
   CloudDownload,
+  Cpu,
   Info,
   Loader2,
   Moon,
@@ -28,6 +29,8 @@ import AccountSection from './AccountSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
 import type { Conta as ContaKoda, PlanoDaConta } from '../api/cloud'
 import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
+import { LOGO_DO_PROVEDOR } from '../logos-provedores'
+import provedores9router from '../../backend/app/provedores_9router.json'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
 import { WindowControls } from './WindowControls'
@@ -39,9 +42,26 @@ import { tempoCurto } from '../tempo'
 import { moedasLegiveis } from '../custo'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
-import { baixarAtualizacao, cloudChangelog, cloudUpdate, fraseDeFalha, statusDoDownload } from '../api/client'
+import {
+  baixarAtualizacao,
+  cloudChangelog,
+  cloudUpdate,
+  cancelarLoginDoProvedor,
+  concluirLoginComCodigo,
+  entrarNoProvedor,
+  testarContaDoProvedor,
+  testarModeloDoProvedor,
+  estadoDoLoginDoProvedor,
+  fraseDeFalha,
+  modelosDoProvedor,
+  provedoresDeLogin,
+  sairDoProvedor,
+  statusDoDownload,
+  testarProvedor,
+} from '../api/client'
 import type {
   ApiCloud,
+  ApiProvedor,
   ApiCloudRelease,
   ApiCloudUpdate,
   ApiDownload,
@@ -93,6 +113,7 @@ export type SettingsSection =
   | 'aparencia'
   | 'conta'
   | 'uso'
+  | 'modelos'
   | 'skills'
   | 'agents'
   | 'mcps'
@@ -135,6 +156,14 @@ const SECTIONS: {
     subtitle: 'O que você rodou no Koda, contado na mesma conta.',
   },
   {
+    id: 'modelos',
+    label: 'Modelos e Provedores',
+    icon: <Cpu className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Modelos e Provedores',
+    // Área criada e **vazia** de propósito: o dono pediu o lugar, não o conteúdo.
+    subtitle: '',
+  },
+  {
     id: 'skills',
     label: 'Skills',
     icon: <Puzzle className="h-4 w-4" strokeWidth={1.7} />,
@@ -170,6 +199,21 @@ const SECTIONS: {
     subtitle: 'Informações desta build.',
   },
 ]
+
+/** O mesmo manifesto do backend, gerado do registry e dos fluxos do 9router. */
+const PROVEDORES: {
+  id: string
+  nome: string
+  sigla: string
+  cli: string
+  logo?: string
+}[] = provedores9router.provedores.map((item) => ({
+  id: item.id,
+  nome: item.nome,
+  sigla: item.sigla,
+  cli: item.cli,
+  logo: LOGO_DO_PROVEDOR[item.id] ?? LOGO_DO_PROVEDOR[item.fonteId],
+}))
 
 function Card({
   title,
@@ -355,6 +399,21 @@ function Tag({ children }: { children: ReactNode }) {
       {children}
     </span>
   )
+}
+
+/**
+ * O teto de contexto em texto curto.
+ *
+ * Antes era sempre `tokens / 1000` + « mil », e em 1.000.000 isso virava «1.000 mil
+ * tokens» — que não é número que alguém leia. Acima de um milhão, fala em milhão.
+ */
+function contextoEmTexto(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const milhoes = tokens / 1_000_000
+    const numero = milhoes.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
+    return `${numero} ${milhoes === 1 ? 'milhão' : 'milhões'} de tokens`
+  }
+  return `${(tokens / 1000).toLocaleString('pt-BR')} mil tokens`
 }
 
 function Stat({
@@ -1145,7 +1204,7 @@ export function SettingsScreen({
   initialSection,
   backend,
   cloud = null,
-  remoteModels = [],
+  remoteModels = null,
   modelosBloqueados = [],
   skills = [],
   mcps = [],
@@ -1186,7 +1245,7 @@ export function SettingsScreen({
   /** Seção aberta ao entrar na tela (ex.: Conta, vindo do menu do header). */
   initialSection?: SettingsSection
   /** Modelos que vieram do backend, além dos da casa. */
-  remoteModels?: RemoteModel[]
+  remoteModels?: RemoteModel[] | null
   /**
    * Modelos que o painel tirou desta conta (desativados, ou desligados por exceção).
    * Saem do seletor — inclusive quando a lista que está valendo é a da casa.
@@ -1208,10 +1267,308 @@ export function SettingsScreen({
   onDeleteAgent?: (nome: string) => Promise<void>
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? 'geral')
+  /**
+   * Qual provedor está aberto em Modelos e Provedores — guardado pela **sigla**, que é única
+   * (o nome não é: Google aparece duas vezes, Gemini CLI e Antigravity). `null` = a grade.
+   *
+   * É estado de tela, não de dado: abrir um provedor não carrega nada (nada existe para
+   * carregar). A tela dele é o cabeçalho — marca, nome e a seta de volta — e é o lugar onde
+   * a configuração de cada um vai morar quando houver contrato no backend.
+   */
+  const [provedorAberto, setProvedorAberto] = useState<string | null>(null)
+  /**
+   * O provedor da tela só existe **dentro** da seção Modelos: sair para Conta (ou qualquer
+   * outra) não pode deixar o topo trocado. Quem zera o estado é a troca de seção, no clique
+   * da coluna — e não um efeito observando `section`, que o compilador do React sinaliza como
+   * estado escrito dentro de efeito.
+   */
+  const provedorDaTela =
+    section === 'modelos' && provedorAberto
+      ? (PROVEDORES.find((item) => item.id === provedorAberto) ?? null)
+      : null
+  /**
+   * O retrato que o backend faz dos logins desta máquina — por id de provedor.
+   *
+   * `null` = ainda não perguntou. `{}` = perguntou e o backend não respondeu (a tela mostra
+   * «sem resposta», e não um «desconectado» que seria mentira).
+   */
+  const [estadoDosProvedores, setEstadoDosProvedores] =
+    useState<Record<string, ApiProvedor> | null>(null)
+  const [teste, setTeste] = useState<{ ocupado: boolean; texto: string | null; ok: boolean | null }>(
+    { ocupado: false, texto: null, ok: null },
+  )
+  const [modelos, setModelos] = useState<{
+    ocupado: boolean
+    lista: string[]
+    nomes: Record<string, string>
+    motivo: string | null
+    fonte: string | null
+  }>({ ocupado: false, lista: [], nomes: {}, motivo: null, fonte: null })
+  /**
+   * O login em curso: `aguardando` enquanto o navegador não volta, e o código quando o
+   * fornecedor usa device flow (GitHub) — nesse caso o código é a única coisa que a pessoa
+   * precisa ver, então ele fica na tela junto do link.
+   */
+  const [login, setLogin] = useState<{
+    estado: 'parado' | 'aguardando' | 'concluido' | 'erro'
+    url?: string
+    codigo?: string
+    mensagem?: string
+    tipo?: 'pkce' | 'device' | 'cookie'
+  }>({ estado: 'parado' })
+  /** O código (ou a URL de retorno) que a pessoa cola quando o navegador não volta sozinho. */
+  const [codigoColado, setCodigoColado] = useState('')
+  /** O teste de cada modelo, por id: o resultado é por modelo, não da tela. */
+  const [testeDoModelo, setTesteDoModelo] = useState<
+    Record<string, { ocupado: boolean; ok?: boolean; detalhe?: string }>
+  >({})
+  /** O teste de cada conta empilhada, por id — respondeu, sem cota até quando, ou o erro. */
+  const [testeDaConta, setTesteDaConta] = useState<
+    Record<string, { ocupado: boolean; ok?: boolean; detalhe?: string }>
+  >({})
+
+  /** O retrato do provedor aberto — `null` enquanto a consulta não volta. */
+  const estadoDoAberto = provedorDaTela
+    ? (estadoDosProvedores?.[provedorDaTela.id] ?? null)
+    : null
+
+  // Uma consulta por visita à seção: o login muda no CLI, não na tela. Quem quiser o retrato
+  // fresco usa «Testar», que é o botão que existe para isso.
+  useEffect(() => {
+    if (section !== 'modelos' || estadoDosProvedores !== null) return
+    let cancelado = false
+    void provedoresDeLogin()
+      .then((lista) => {
+        if (cancelado) return
+        setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item])))
+      })
+      .catch(() => {
+        if (!cancelado) setEstadoDosProvedores({})
+      })
+    return () => {
+      cancelado = true
+    }
+  }, [section, estadoDosProvedores])
+
+  /** Troca de seção sempre fecha o provedor aberto — a coluna leva à lista, não à última tela. */
+  const abrirSecao = (id: SettingsSection) => {
+    setProvedorAberto(null)
+    setSection(id)
+  }
+
+  /** Abrir um provedor zera o que era do anterior: teste, lista e recado não são dele. */
+  const abrirProvedor = (id: string) => {
+    setProvedorAberto(id)
+    setTeste({ ocupado: false, texto: null, ok: null })
+    // Já entra em «lendo»: o efeito abaixo busca o catálogo, e o estado de carregamento não
+    // pode ser escrito lá dentro (o compilador do React acusa setState síncrono em efeito).
+    setModelos({ ocupado: true, lista: [], nomes: {}, motivo: null, fonte: null })
+    setLogin({ estado: 'parado' })
+    setCodigoColado('')
+    setTesteDoModelo({})
+  }
+
+  const testarAberto = async () => {
+    if (!provedorDaTela) return
+    setTeste({ ocupado: true, texto: null, ok: null })
+    try {
+      const resultado = await testarProvedor(provedorDaTela.id)
+      setTeste({ ocupado: false, texto: resultado.detalhe, ok: resultado.ok })
+      if (resultado.estado) {
+        setEstadoDosProvedores((atual) => ({ ...(atual ?? {}), [provedorDaTela.id]: resultado.estado! }))
+      }
+    } catch (erro) {
+      setTeste({ ocupado: false, texto: fraseDeFalha(erro), ok: false })
+    }
+  }
+
+  const baixarModelos = async () => {
+    if (!provedorDaTela) return
+    setModelos({ ocupado: true, lista: [], nomes: {}, motivo: null, fonte: null })
+    try {
+      const resultado = await modelosDoProvedor(provedorDaTela.id)
+      setModelos({
+        ocupado: false,
+        lista: resultado.modelos,
+        nomes: resultado.nomes ?? {},
+        motivo: resultado.motivo || null,
+        fonte: resultado.fonte,
+      })
+    } catch (erro) {
+      setModelos({ ocupado: false, lista: [], nomes: {}, motivo: fraseDeFalha(erro), fonte: null })
+    }
+  }
+
+  const entrarAberto = async () => {
+    if (!provedorDaTela) return
+    setLogin({ estado: 'parado' })
+    try {
+      const inicio = await entrarNoProvedor(provedorDaTela.id)
+      if (inicio.estado === 'erro') {
+        setLogin({ estado: 'erro', mensagem: inicio.mensagem || 'Não foi possível iniciar o login.' })
+        return
+      }
+      if (inicio.tipo === 'pkce' || inicio.tipo === 'device' || inicio.tipo === 'cookie') {
+        setLogin({
+          estado: 'aguardando',
+          url: inicio.url,
+          codigo: inicio.codigo,
+          tipo: inicio.tipo,
+          mensagem: inicio.mensagem,
+        })
+        // Abrir a página é o que a pessoa espera do botão; o popup pode ser barrado pelo
+        // navegador, e é por isso que o link também fica na tela.
+        if (inicio.url) window.open(inicio.url, '_blank', 'noopener,noreferrer')
+      } else {
+        setLogin({ estado: 'erro', mensagem: inicio.mensagem })
+      }
+    } catch (erro) {
+      setLogin({ estado: 'erro', mensagem: fraseDeFalha(erro) })
+    }
+  }
+
+  const concluirPeloCodigo = async () => {
+    if (!provedorDaTela || !codigoColado.trim()) return
+    try {
+      const resultado = await concluirLoginComCodigo(provedorDaTela.id, codigoColado.trim())
+      if (resultado.ok) {
+        setLogin({ estado: 'concluido', mensagem: `conectado como ${resultado.conta ?? 'a conta'}` })
+        setCodigoColado('')
+        const lista = await provedoresDeLogin()
+        setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item])))
+      } else {
+        setLogin({ estado: 'erro', mensagem: resultado.mensagem ?? 'o código não valeu' })
+      }
+    } catch (erro) {
+      setLogin({ estado: 'erro', mensagem: fraseDeFalha(erro) })
+    }
+  }
+
+  const recarregarProvedores = async () => {
+    try {
+      const lista = await provedoresDeLogin()
+      setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item])))
+    } catch {
+      // Sem serviço local a tela fica com o último retrato conhecido.
+    }
+  }
+
+  const testarConta = async (contaId: string) => {
+    if (!provedorDaTela) return
+    setTesteDaConta((atual) => ({ ...atual, [contaId]: { ocupado: true } }))
+    try {
+      const resultado = await testarContaDoProvedor(provedorDaTela.id, contaId)
+      setTesteDaConta((atual) => ({
+        ...atual,
+        [contaId]: { ocupado: false, ok: resultado.ok, detalhe: resultado.detalhe },
+      }))
+      await recarregarProvedores()
+    } catch (erro) {
+      setTesteDaConta((atual) => ({
+        ...atual,
+        [contaId]: { ocupado: false, ok: false, detalhe: fraseDeFalha(erro) },
+      }))
+    }
+  }
+
+  const sairDaConta = async (contaId: string) => {
+    if (!provedorDaTela) return
+    try {
+      await sairDoProvedor(provedorDaTela.id, contaId)
+    } catch {
+      // Sair de uma conta que já não existe é resultado, não erro.
+    }
+    setTesteDaConta((atual) => {
+      const copia = { ...atual }
+      delete copia[contaId]
+      return copia
+    })
+    await recarregarProvedores()
+  }
+
+  const testarModelo = async (modelo: string) => {
+    if (!provedorDaTela) return
+    setTesteDoModelo((atual) => ({ ...atual, [modelo]: { ocupado: true } }))
+    try {
+      const resultado = await testarModeloDoProvedor(provedorDaTela.id, modelo)
+      setTesteDoModelo((atual) => ({
+        ...atual,
+        [modelo]: { ocupado: false, ok: resultado.ok, detalhe: resultado.detalhe },
+      }))
+    } catch (erro) {
+      setTesteDoModelo((atual) => ({
+        ...atual,
+        [modelo]: { ocupado: false, ok: false, detalhe: fraseDeFalha(erro) },
+      }))
+    }
+  }
+
+  const cancelarLogin = async () => {
+    if (!provedorDaTela) return
+    try {
+      await cancelarLoginDoProvedor(provedorDaTela.id)
+    } catch {
+      // Cancelar é cortesia: se o backend não responder, o fluxo vence sozinho em 10 min.
+    }
+    setLogin({ estado: 'parado' })
+    setCodigoColado('')
+  }
+
+  // Ao abrir um provedor, o catálogo vem sozinho: a lista é a informação principal da tela, e
+  // obrigar a clicar em «Baixar modelos» para ver o que já está em disco é atrito à toa.
+  useEffect(() => {
+    if (!provedorDaTela) return
+    const id = provedorDaTela.id
+    let cancelado = false
+    void modelosDoProvedor(id)
+      .then((resultado) => {
+        if (cancelado) return
+        setModelos({
+          ocupado: false,
+          lista: resultado.modelos,
+          nomes: resultado.nomes ?? {},
+          motivo: resultado.motivo || null,
+          fonte: resultado.fonte,
+        })
+      })
+      .catch(() => {
+        if (!cancelado) {
+          setModelos({ ocupado: false, lista: [], nomes: {}, motivo: null, fonte: null })
+        }
+      })
+    return () => {
+      cancelado = true
+    }
+  }, [provedorDaTela])
+
+  // Enquanto o navegador não volta, a tela pergunta: quem conclui é o servidor do callback,
+  // e ele não tem como avisar o React.
+  useEffect(() => {
+    if (login.estado !== 'aguardando' || !provedorDaTela) return
+    const id = provedorDaTela.id
+    const timer = window.setInterval(() => {
+      void estadoDoLoginDoProvedor(id)
+        .then((estado) => {
+          if (estado.estado === 'concluido') {
+            setLogin({ estado: 'concluido', mensagem: `conectado como ${estado.conta ?? 'a conta'}` })
+            return provedoresDeLogin().then((lista) =>
+              setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item]))),
+            )
+          }
+          if (estado.estado === 'erro') {
+            setLogin({ estado: 'erro', mensagem: estado.detalhe || 'o login não foi concluído' })
+          }
+        })
+        .catch(() => {
+          setLogin({ estado: 'erro', mensagem: fraseDeFalha(new Error('sem resposta')) })
+        })
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [login.estado, provedorDaTela])
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]
   // Quem está logado aparece pelo nome que está no painel, não por um rótulo fixo.
   const apelido = apelidoDaConta(contaKoda)
-  const activeModel = findModel(model, remoteModels)
+  const activeModel = findModel(model, remoteModels ?? [])
   const activeProject =
     projects.find((item) => item.id === projectId)?.nome ?? 'Nenhum projeto'
 
@@ -1431,7 +1788,7 @@ export function SettingsScreen({
                 key={item.id}
                 type="button"
                 aria-current={active}
-                onClick={() => setSection(item.id)}
+                onClick={() => abrirSecao(item.id)}
                 className={[
                   'flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-[13.5px] font-medium',
                   'transition-colors duration-150 focus-visible:outline-none',
@@ -1452,7 +1809,7 @@ export function SettingsScreen({
         <button
           type="button"
           aria-current={section === 'conta'}
-          onClick={() => setSection('conta')}
+          onClick={() => abrirSecao('conta')}
           className={[
             'mt-auto flex w-full flex-col items-start rounded-xl p-3 text-left',
             'transition-colors duration-150 focus-visible:outline-none',
@@ -1488,14 +1845,46 @@ export function SettingsScreen({
           key={section}
           className={[
             'stagger mx-auto flex flex-col gap-6',
-              // O mapa do ano pede mais largura; a conta fica numa coluna estreita.
-              section === 'uso' ? 'max-w-5xl' : section === 'conta' ? 'max-w-2xl' : 'max-w-3xl',
+              // O mapa do ano pede mais largura; a conta fica numa coluna estreita. A grade
+              // de provedores é de quatro por fileira e também precisa de largura para não
+              // espremer os nomes.
+              section === 'uso' || section === 'modelos' ? 'max-w-5xl' : section === 'conta' ? 'max-w-2xl' : 'max-w-3xl',
             ].join(' ')}
           >
-          <div>
-            <h1 className="text-[22px] font-semibold text-koda-fg">{current.title}</h1>
-            <p className="mt-1 text-[13px] text-koda-fg/45">{current.subtitle}</p>
-          </div>
+          {/*
+           * Com um provedor aberto, o topo **é** a tela dele: a seta de volta e o nome no
+           * lugar do título da seção. Deixar «Modelos e Provedores» em cima e «Codex» embaixo
+           * seriam dois cabeçalhos dizendo a mesma coisa, e a pessoa não saberia qual manda.
+           */}
+          {provedorDaTela ? (
+            <div className="flex flex-col gap-4">
+              <button
+                type="button"
+                onClick={() => setProvedorAberto(null)}
+                className="-ml-1 flex w-fit items-center gap-1.5 rounded-lg px-1.5 py-1 text-[12.5px] font-medium text-koda-fg/55 transition-colors duration-150 hover:bg-koda-fg/6 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.9} />
+                Voltar
+              </button>
+              <div className="flex items-center gap-3.5">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-koda-fg/8">
+                  {provedorDaTela.logo ? <img src={provedorDaTela.logo} alt="" aria-hidden="true" className="h-6 w-6 object-contain" />
+                    : <span aria-hidden="true" className="text-sm font-bold text-koda-fg/65">{provedorDaTela.sigla}</span>}
+                </span>
+                <div className="min-w-0">
+                  <h1 className="truncate text-[22px] font-semibold text-koda-fg">
+                    {provedorDaTela.nome}
+                  </h1>
+                  <p className="mt-1 text-[13px] text-koda-fg/45">{provedorDaTela.cli}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <h1 className="text-[22px] font-semibold text-koda-fg">{current.title}</h1>
+              <p className="mt-1 text-[13px] text-koda-fg/45">{current.subtitle}</p>
+            </div>
+          )}
 
           {section === 'geral' ? (
             <Card
@@ -1536,7 +1925,7 @@ export function SettingsScreen({
                     triggerClassName="flex items-center gap-2 rounded-xl bg-koda-fg/6 px-3 py-2 text-[13px] text-koda-fg/80 transition-colors duration-150 hover:bg-koda-fg/10 hover:text-koda-fg focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
                   >
                     <span className="text-koda-fg/60">{activeModel.icon}</span>
-                    {activeModel.label}
+                    {model ? activeModel.label : 'Nenhum modelo disponível'}
                   </Menu>
                 </div>
 
@@ -1714,6 +2103,293 @@ export function SettingsScreen({
             </>
           ) : null}
 
+          {/*
+           * Um **box por provedor**, soltos na área — sem cartão em volta. Foi o pedido dele
+           * em 26/10/2026, duas vezes: o quadro é a unidade, não a lista dentro de um quadro.
+           * Quatro por fileira («4 x 4 eu falo fileira de 4 box»), e no mouse o box se destaca
+           * — o realce é o que diz «isto é um item», mesmo sem clique nenhum.
+           *
+           * Com um provedor aberto esta grade sai de cena: o topo já virou a tela dele, e o
+           * corpo dela fica vazio de propósito — não há o que configurar enquanto não houver
+           * contrato no backend, e inventar campos seria pior do que o vazio.
+           */}
+          {section === 'modelos' && !provedorDaTela ? (
+            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+              {PROVEDORES.map((provedor) => (
+                <button
+                  key={provedor.id}
+                  type="button"
+                  onClick={() => abrirProvedor(provedor.id)}
+                  className="group flex flex-col gap-3 rounded-2xl bg-koda-panel p-4 text-left ring-1 ring-koda-fg/8 transition-colors duration-150 hover:bg-koda-fg/6 hover:ring-koda-accent/45 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-koda-fg/8 transition-colors duration-150 group-hover:bg-koda-fg/12">
+                    {provedor.logo ? <img src={provedor.logo} alt="" aria-hidden="true" className="h-5 w-5 object-contain" />
+                      : <span aria-hidden="true" className="text-xs font-bold text-koda-fg/60">{provedor.sigla}</span>}
+                  </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="truncate text-[13px] font-medium text-koda-fg/85 transition-colors duration-150 group-hover:text-koda-fg">
+                      {provedor.nome}
+                    </span>
+                    <span className="truncate text-[11px] text-koda-fg/35">{provedor.cli}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {/*
+           * A tela do provedor: o login que já existe nesta máquina, e três ações que fazem
+           * só o que sabem fazer. «Entrar» não inventa um OAuth dentro do Koda — manda rodar
+           * o login do CLI do fornecedor, que é o fluxo oficial dele. «Testar» confere
+           * arquivo, conta e validade, sem rede. «Baixar modelos» lê o catálogo que o CLI
+           * deixou em disco; quando não há, diz por quê em vez de inventar uma lista.
+           */}
+          {section === 'modelos' && provedorDaTela ? (
+            <div className="flex flex-col gap-3">
+              <div className="rounded-2xl bg-koda-panel p-5 ring-1 ring-koda-fg/8">
+                {/*
+                 * As contas **empilhadas**, uma linha cada: é assim que o rodízio aparece
+                 * na tela. «Em uso» é a que responde agora; quando ela estoura a cota, a
+                 * linha passa a dizer até quando e o rodízio segue para a próxima.
+                 */}
+                {(estadoDoAberto?.contas ?? []).length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    {(estadoDoAberto?.contas ?? []).map((conta) => {
+                      const teste = testeDaConta[conta.id]
+                      return (
+                        <div
+                          key={conta.id}
+                          className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl bg-koda-fg/4 px-3 py-2"
+                        >
+                          <span className="min-w-0 flex-1 truncate text-[12.5px] text-koda-fg/85">
+                            {conta.conta ?? 'conta sem nome'}
+                          </span>
+                          {conta.atual ? <Tag>em uso</Tag> : null}
+                          {conta.esgotadaAte && !conta.atual ? null : null}
+                          {conta.esgotadaAte ? (
+                            <Tag>sem cota até {dataCurta(conta.esgotadaAte)}</Tag>
+                          ) : (
+                            <Tag>ok</Tag>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void testarConta(conta.id)}
+                            disabled={teste?.ocupado}
+                            className="flex items-center gap-1 rounded-lg bg-koda-fg/6 px-2 py-1 text-[11.5px] text-koda-fg/75 transition-colors duration-150 hover:bg-koda-fg/12 disabled:opacity-50"
+                          >
+                            {teste?.ocupado ? (
+                              <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                            ) : null}
+                            Testar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void sairDaConta(conta.id)}
+                            className="rounded-lg px-2 py-1 text-[11.5px] text-koda-fg/45 transition-colors duration-150 hover:bg-red-500/12 hover:text-red-400"
+                          >
+                            Sair
+                          </button>
+                          {teste?.detalhe ? (
+                            <p
+                              className={[
+                                'w-full text-[11px] leading-4',
+                                teste.ok ? 'text-emerald-400' : 'text-amber-400/90',
+                              ].join(' ')}
+                            >
+                              {teste.detalhe}
+                            </p>
+                          ) : null}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-[12.5px] leading-5 text-koda-fg/45">
+                    {estadoDosProvedores === null
+                      ? 'lendo as contas desta máquina…'
+                      : 'Nenhuma conta conectada. Use «Entrar» para adicionar a primeira.'}
+                  </p>
+                )}
+
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void entrarAberto()}
+                    className="flex items-center gap-1.5 rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90"
+                  >
+                    <PlugZap className="h-3.5 w-3.5" strokeWidth={2} />
+                    Entrar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void baixarModelos()}
+                    disabled={modelos.ocupado}
+                    className="flex items-center gap-1.5 rounded-xl bg-koda-fg/6 px-3.5 py-1.5 text-[12.5px] font-medium text-koda-fg/80 transition-colors duration-150 hover:bg-koda-fg/10 disabled:opacity-50"
+                  >
+                    {modelos.ocupado ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                    ) : (
+                      <CloudDownload className="h-3.5 w-3.5" strokeWidth={1.9} />
+                    )}
+                    Baixar modelos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void testarAberto()}
+                    disabled={teste.ocupado}
+                    className="flex items-center gap-1.5 rounded-xl bg-koda-fg/6 px-3.5 py-1.5 text-[12.5px] font-medium text-koda-fg/80 transition-colors duration-150 hover:bg-koda-fg/10 disabled:opacity-50"
+                  >
+                    {teste.ocupado ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                    ) : (
+                      <Activity className="h-3.5 w-3.5" strokeWidth={1.9} />
+                    )}
+                    Testar
+                  </button>
+                </div>
+
+                {login.estado === 'aguardando' ? (
+                  <div className="mt-3 rounded-xl bg-koda-fg/4 px-3.5 py-3">
+                    <p className="text-[12px] leading-5 text-koda-fg/60">
+                      {login.codigo
+                        ? 'Digite este código na página que abriu:'
+                        : login.tipo === 'cookie'
+                          ? (login.mensagem || 'Entre na página e cole aqui a credencial da sessão do navegador.')
+                          : 'Termine o login na página que abriu — esta tela se atualiza sozinha.'}
+                    </p>
+                    {login.codigo ? (
+                      <p className="mt-1 font-mono text-[16px] font-semibold tracking-[0.2em] text-koda-fg">
+                        {login.codigo}
+                      </p>
+                    ) : null}
+                    <div className="mt-2 flex items-center gap-4">
+                      {login.url ? (
+                        <a
+                          href={login.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[12px] font-medium text-koda-accent hover:underline"
+                        >
+                          Abrir a página
+                        </a>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => void cancelarLogin()}
+                        className="text-[12px] text-koda-fg/45 transition-colors duration-150 hover:text-koda-fg"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                    {/*
+                     * O Claude mostra o código na página em vez de voltar sozinho, e o Codex
+                     * cai nisso quando a porta 1455 está ocupada. Sem este campo, esses dois
+                     * ficariam sem saída — o navegador termina e a tela continua esperando.
+                     */}
+                    {login.tipo === 'pkce' || login.tipo === 'cookie' ? (
+                      <div className="mt-3 flex items-center gap-2">
+                        <input
+                          value={codigoColado}
+                          onChange={(evento) => setCodigoColado(evento.target.value)}
+                          type={login.tipo === 'cookie' ? 'password' : 'text'}
+                          placeholder={login.tipo === 'cookie' ? 'cole aqui o cookie ou token da sessão' : 'cole aqui o código que a página mostrou'}
+                          className="min-w-0 flex-1 rounded-lg bg-koda-input px-2.5 py-1.5 text-[12px] text-koda-fg ring-1 ring-koda-fg/10 outline-none placeholder:text-koda-fg/30 focus:ring-2 focus:ring-koda-accent"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void concluirPeloCodigo()}
+                          disabled={!codigoColado.trim()}
+                          className="shrink-0 rounded-lg bg-koda-accent px-3 py-1.5 text-[12px] font-semibold text-koda-bg transition-opacity duration-150 hover:opacity-90 disabled:opacity-50"
+                        >
+                          Concluir
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {login.estado === 'concluido' ? (
+                  <p className="mt-3 text-[12px] leading-5 text-emerald-400">{login.mensagem}</p>
+                ) : null}
+                {login.estado === 'erro' && login.mensagem ? (
+                  <p className="mt-3 text-[12px] leading-5 text-amber-400/90">{login.mensagem}</p>
+                ) : null}
+                {teste.texto ? (
+                  <p
+                    className={[
+                      'mt-3 text-[12px] leading-5',
+                      teste.ok ? 'text-emerald-400' : 'text-amber-400/90',
+                    ].join(' ')}
+                  >
+                    {teste.texto}
+                  </p>
+                ) : null}
+              </div>
+
+              {/*
+               * Um box por modelo, quatro por fileira — a lista corrida não deixava ver
+               * nada, e o botão de testar é por modelo (a conta pode alcançar um e não
+               * outro).
+               */}
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-[15px] font-semibold text-koda-fg">Modelos</h2>
+                <span className="text-[11.5px] text-koda-fg/35">
+                  {modelos.lista.length > 0
+                    ? `${modelos.lista.length} · ${modelos.fonte ?? ''}`
+                    : ''}
+                </span>
+              </div>
+
+              {modelos.lista.length > 0 ? (
+                <div className="grid gap-2.5 sm:grid-cols-2 md:grid-cols-4">
+                  {modelos.lista.map((modelo) => {
+                    const teste = testeDoModelo[modelo]
+                    return (
+                      <div
+                        key={modelo}
+                        className="flex flex-col gap-1.5 rounded-xl bg-koda-panel p-3 ring-1 ring-koda-fg/8"
+                      >
+                        <span className="truncate text-[12.5px] font-medium text-koda-fg/90">
+                          {modelos.nomes[modelo] ?? modelo}
+                        </span>
+                        <span className="truncate font-mono text-[10.5px] text-koda-fg/30">
+                          {modelo}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void testarModelo(modelo)}
+                          disabled={teste?.ocupado}
+                          className="mt-1 flex items-center justify-center gap-1.5 rounded-lg bg-koda-fg/6 px-2 py-1 text-[11.5px] font-medium text-koda-fg/75 transition-colors duration-150 hover:bg-koda-fg/12 disabled:opacity-50"
+                        >
+                          {teste?.ocupado ? (
+                            <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                          ) : null}
+                          Testar
+                        </button>
+                        {teste?.detalhe ? (
+                          <p
+                            className={[
+                              'text-[10.5px] leading-4',
+                              teste.ok ? 'text-emerald-400' : 'text-amber-400/90',
+                            ].join(' ')}
+                          >
+                            {teste.detalhe}
+                          </p>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="rounded-xl bg-koda-panel px-4 py-4 text-[12.5px] leading-5 text-koda-fg/40 ring-1 ring-koda-fg/8">
+                  {modelos.ocupado
+                    ? 'lendo o catálogo do provedor…'
+                    : (modelos.motivo ??
+                      'Nenhum modelo listado ainda. Entre no provedor para ver a lista da conta.')}
+                </p>
+              )}
+            </div>
+          ) : null}
+
           {section === 'sobre' ? <DiagnosticoLocal /> : null}
 
           {section === 'sobre' ? (
@@ -1751,7 +2427,7 @@ export function SettingsScreen({
                   [
                     'Contexto',
                     backend.contextoTokens > 0
-                      ? `Resume sozinho depois de ${(backend.contextoTokens / 1000).toLocaleString('pt-BR')} mil tokens`
+                      ? `Resume sozinho depois de ${contextoEmTexto(backend.contextoTokens)}`
                       : 'Sem teto — o histórico vai inteiro ao modelo',
                   ],
                 ].map(([label, value]) => (

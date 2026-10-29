@@ -1,0 +1,2347 @@
+{
+  "_licenca": "9router MIT; copyright 2024-2026 decolua and contributors",
+  "_origem": "open-sse/providers/registry e src/lib/oauth/providers do 9router",
+  "provedores": [
+    {
+      "id": "anthropic",
+      "fonteId": "claude",
+      "nome": "Claude Code",
+      "sigla": "CL",
+      "cli": "Anthropic",
+      "website": "https://claude.ai",
+      "tipo": "authorization_code_pkce",
+      "oauth": {
+        "clientId": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        "authorizeUrl": "https://claude.ai/oauth/authorize",
+        "tokenUrl": "https://api.anthropic.com/v1/oauth/token",
+        "scopes": [
+          "org:create_api_key",
+          "user:profile",
+          "user:inference"
+        ],
+        "codeChallengeMethod": "S256",
+        "refreshLeadMs": 14400000,
+        "refresh": {
+          "encoding": "json"
+        }
+      },
+      "modelos": [
+        {
+          "id": "claude-opus-5-5",
+          "nome": "Claude Opus 5.5"
+        },
+        {
+          "id": "claude-opus-5",
+          "nome": "Claude Opus 5"
+        },
+        {
+          "id": "claude-fable-5-1",
+          "nome": "Claude Fable 5.1"
+        },
+        {
+          "id": "claude-fable-5",
+          "nome": "Claude Fable 5"
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "nome": "Claude Sonnet 5.5"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "nome": "Claude Sonnet 5"
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "nome": "Claude 4.5 Haiku"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "fonteId": "codex",
+      "nome": "OpenAI Codex",
+      "sigla": "OP",
+      "cli": "OpenAI",
+      "website": "https://chatgpt.com/codex",
+      "tipo": "authorization_code_pkce",
+      "oauth": {
+        "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",
+        "authorizeUrl": "https://auth.openai.com/oauth/authorize",
+        "tokenUrl": "https://auth.openai.com/oauth/token",
+        "scope": "openid profile email offline_access",
+        "codeChallengeMethod": "S256",
+        "fixedPort": 1455,
+        "callbackPath": "/auth/callback",
+        "extraParams": {
+          "id_token_add_organizations": "true",
+          "codex_cli_simplified_flow": "true",
+          "originator": "codex_cli_rs"
+        },
+        "refreshLeadMs": 600000,
+        "refresh": {
+          "encoding": "form",
+          "scope": "openid profile email offline_access"
+        },
+        "maxRefreshAgeMs": 691200000,
+        "trackRefreshAt": true
+      },
+      "modelos": [
+        {
+          "id": "gpt-6.1-sol",
+          "nome": "GPT 6.1 Sol"
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "nome": "GPT 6.1 Terra"
+        },
+        {
+          "id": "gpt-6-astra",
+          "nome": "GPT 6.0 Astra"
+        },
+        {
+          "id": "gpt-6-astra[1m]",
+          "nome": "GPT 6.0 Astra (extended context)"
+        },
+        {
+          "id": "gpt-6-sol",
+          "nome": "GPT 6.0 Sol"
+        },
+        {
+          "id": "gpt-6-sol[1m]",
+          "nome": "GPT 6.0 Sol (extended context)"
+        },
+        {
+          "id": "gpt-6-luna",
+          "nome": "GPT 6.0 Luna"
+        },
+        {
+          "id": "gpt-6-luna[1m]",
+          "nome": "GPT 6.0 Luna (extended context)"
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "nome": "GPT 5.6 Sol"
+        },
+        {
+          "id": "gpt-5.6-sol[1m]",
+          "nome": "GPT 5.6 Sol (extended context)"
+        },
+        {
+          "id": "gpt-5.6-sol-review",
+          "nome": "GPT 5.6 Sol Review"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "nome": "GPT 5.6 Terra"
+        },
+        {
+          "id": "gpt-5.6-terra[1m]",
+          "nome": "GPT 5.6 Terra (extended context)"
+        },
+        {
+          "id": "gpt-5.6-terra-review",
+          "nome": "GPT 5.6 Terra Review"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "nome": "GPT 5.6 Luna"
+        },
+        {
+          "id": "gpt-5.6-luna[1m]",
+          "nome": "GPT 5.6 Luna (extended context)"
+        },
+        {
+          "id": "gpt-5.6-luna-review",
+          "nome": "GPT 5.6 Luna Review"
+        },
+        {
+          "id": "gpt-daybreak-blue-latest",
+          "nome": "GPT Daybreak Blue"
+        },
+        {
+          "id": "gpt-reserve",
+          "nome": "GPT Reserve"
+        },
+        {
+          "id": "codex-auto-review",
+          "nome": "Codex Auto Review"
+        }
+      ]
+    },
+    {
+      "id": "antigravity",
+      "fonteId": "antigravity",
+      "nome": "Antigravity",
+      "sigla": "AN",
+      "cli": "Conta do provedor",
+      "website": "https://antigravity.google",
+      "tipo": "authorization_code",
+      "oauth": {
+        "clientId": "",
+        "clientSecret": "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",
+        "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+        "tokenUrl": "https://oauth2.googleapis.com/token",
+        "userInfoUrl": "https://www.googleapis.com/oauth2/v1/userinfo",
+        "scopes": [
+          "https://www.googleapis.com/auth/cloud-platform",
+          "https://www.googleapis.com/auth/userinfo.email",
+          "https://www.googleapis.com/auth/userinfo.profile",
+          "https://www.googleapis.com/auth/cclog",
+          "https://www.googleapis.com/auth/experimentsandconfigs"
+        ],
+        "apiEndpoint": "https://daily-cloudcode-pa.googleapis.com",
+        "apiVersion": "v1internal",
+        "loadCodeAssistEndpoint": "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+        "onboardUserEndpoint": "https://cloudcode-pa.googleapis.com/v1internal:onboardUser",
+        "loadCodeAssistUserAgent": "antigravity/hub/2.24.0 darwin/arm64",
+        "refreshLeadMs": 300000
+      },
+      "modelos": [
+        {
+          "id": "gemini-4-argon-high",
+          "nome": "Gemini 4 Argon (High)"
+        },
+        {
+          "id": "gemini-4-argon-medium",
+          "nome": "Gemini 4 Argon (Medium)"
+        },
+        {
+          "id": "gemini-4-argon-low",
+          "nome": "Gemini 4 Argon (Low)"
+        },
+        {
+          "id": "gemini-3.8-flash-high",
+          "nome": "Gemini 3.8 Flash (High)"
+        },
+        {
+          "id": "gemini-3.8-flash-medium",
+          "nome": "Gemini 3.8 Flash (Medium)"
+        },
+        {
+          "id": "gemini-3.8-flash-low",
+          "nome": "Gemini 3.8 Flash (Low)"
+        },
+        {
+          "id": "gemini-3.8-flash",
+          "nome": "Gemini 3.8 Flash"
+        },
+        {
+          "id": "gemini-3.7-flash-high",
+          "nome": "Gemini 3.7 Flash (High)"
+        },
+        {
+          "id": "gemini-3.7-flash-medium",
+          "nome": "Gemini 3.7 Flash (Medium)"
+        },
+        {
+          "id": "gemini-3.7-flash-low",
+          "nome": "Gemini 3.7 Flash (Low)"
+        },
+        {
+          "id": "gemini-3.6-flash-high",
+          "nome": "Gemini 3.6 Flash (High)"
+        },
+        {
+          "id": "gemini-3.6-flash-medium",
+          "nome": "Gemini 3.6 Flash (Medium)"
+        },
+        {
+          "id": "gemini-3.6-flash-low",
+          "nome": "Gemini 3.6 Flash (Low)"
+        },
+        {
+          "id": "gemini-3.1-pro-high",
+          "nome": "Gemini 3.1 Pro (High)"
+        },
+        {
+          "id": "gemini-pro-agent",
+          "nome": "Gemini 3.1 Pro (High)"
+        },
+        {
+          "id": "gemini-3.1-pro-low",
+          "nome": "Gemini 3.1 Pro (Low)"
+        },
+        {
+          "id": "claude-sonnet-5-5-high",
+          "nome": "Claude Sonnet 5.5 (High)"
+        },
+        {
+          "id": "claude-sonnet-5-5-medium",
+          "nome": "Claude Sonnet 5.5 (Medium)"
+        },
+        {
+          "id": "claude-sonnet-5-5-low",
+          "nome": "Claude Sonnet 5.5 (Low)"
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "nome": "Claude Sonnet 5.5 (Thinking)"
+        },
+        {
+          "id": "claude-opus-5-5-high",
+          "nome": "Claude Opus 5.5 (High)"
+        },
+        {
+          "id": "claude-opus-5-5-medium",
+          "nome": "Claude Opus 5.5 (Medium)"
+        },
+        {
+          "id": "claude-opus-5-5-low",
+          "nome": "Claude Opus 5.5 (Low)"
+        },
+        {
+          "id": "claude-opus-5-5",
+          "nome": "Claude Opus 5.5 (Thinking)"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "nome": "Claude Sonnet 4.6 (Thinking)"
+        },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "nome": "Claude Opus 4.6 (Thinking)"
+        },
+        {
+          "id": "gpt-oss-120b-medium",
+          "nome": "GPT-OSS 120B (Medium)"
+        }
+      ]
+    },
+    {
+      "id": "chatgpt-web",
+      "fonteId": "chatgpt-web",
+      "nome": "ChatGPT Web",
+      "sigla": "CH",
+      "cli": "Login no navegador",
+      "website": "https://chatgpt.com",
+      "tipo": "web_cookie",
+      "authHint": "Paste your chatgpt.com cookie header containing __Secure-next-auth.session-token (or a full Playwright storage-state JSON)",
+      "modelos": []
+    },
+    {
+      "id": "cline",
+      "fonteId": "cline",
+      "nome": "Cline",
+      "sigla": "CL",
+      "cli": "Conta do provedor",
+      "website": "https://cline.bot",
+      "tipo": "authorization_code",
+      "oauth": {
+        "appBaseUrl": "https://app.cline.bot",
+        "apiBaseUrl": "https://api.cline.bot",
+        "authorizeUrl": "https://api.cline.bot/api/v1/auth/authorize",
+        "tokenExchangeUrl": "https://api.cline.bot/api/v1/auth/token",
+        "refreshUrl": "https://api.cline.bot/api/v1/auth/refresh"
+      },
+      "modelos": [
+        {
+          "id": "anthropic/claude-opus-4.7",
+          "nome": "Claude Opus 4.7"
+        },
+        {
+          "id": "anthropic/claude-sonnet-4.6",
+          "nome": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "anthropic/claude-opus-4.6",
+          "nome": "Claude Opus 4.6"
+        },
+        {
+          "id": "openai/gpt-5.3-codex",
+          "nome": "GPT-5.3 Codex"
+        },
+        {
+          "id": "openai/gpt-5.4",
+          "nome": "GPT-5.4"
+        },
+        {
+          "id": "google/gemini-3.1-pro-preview",
+          "nome": "Gemini 3.1 Pro Preview"
+        },
+        {
+          "id": "google/gemini-3.1-flash-lite-preview",
+          "nome": "Gemini 3.1 Flash Lite Preview"
+        },
+        {
+          "id": "kwaipilot/kat-coder-pro",
+          "nome": "KAT Coder Pro"
+        }
+      ]
+    },
+    {
+      "id": "clinepass",
+      "fonteId": "clinepass",
+      "nome": "ClinePass",
+      "sigla": "CL",
+      "cli": "Conta do provedor",
+      "website": "https://cline.bot",
+      "tipo": "authorization_code",
+      "oauth": {
+        "appBaseUrl": "https://app.cline.bot",
+        "apiBaseUrl": "https://api.cline.bot",
+        "authorizeUrl": "https://api.cline.bot/api/v1/auth/authorize",
+        "tokenUrl": "https://api.cline.bot/api/v1/auth/token",
+        "refreshUrl": "https://api.cline.bot/api/v1/auth/refresh"
+      },
+      "modelos": [
+        {
+          "id": "cline-pass/glm-5.2",
+          "nome": "GLM-5.2 (ClinePass)"
+        },
+        {
+          "id": "cline-pass/kimi-k2.7-code",
+          "nome": "Kimi K2.7 Code (ClinePass)"
+        },
+        {
+          "id": "cline-pass/kimi-k2.6",
+          "nome": "Kimi K2.6 (ClinePass)"
+        },
+        {
+          "id": "cline-pass/deepseek-v4-pro",
+          "nome": "DeepSeek V4 Pro (ClinePass)"
+        },
+        {
+          "id": "cline-pass/deepseek-v4-flash",
+          "nome": "DeepSeek V4 Flash (ClinePass)"
+        },
+        {
+          "id": "cline-pass/mimo-v2.5",
+          "nome": "MiMo-V2.5 (ClinePass)"
+        },
+        {
+          "id": "cline-pass/mimo-v2.5-pro",
+          "nome": "MiMo-V2.5-Pro (ClinePass)"
+        },
+        {
+          "id": "cline-pass/minimax-m3",
+          "nome": "MiniMax M3 (ClinePass)"
+        },
+        {
+          "id": "cline-pass/qwen3.7-max",
+          "nome": "Qwen3.7 Max (ClinePass)"
+        },
+        {
+          "id": "cline-pass/qwen3.7-plus",
+          "nome": "Qwen3.7 Plus (ClinePass)"
+        }
+      ]
+    },
+    {
+      "id": "codebuddy-intl",
+      "fonteId": "codebuddy-intl",
+      "nome": "CodeBuddy",
+      "sigla": "CO",
+      "cli": "Conta do provedor",
+      "website": "https://www.codebuddy.ai",
+      "tipo": "device_code",
+      "oauth": {
+        "baseUrl": "https://www.codebuddy.ai",
+        "stateUrl": "https://www.codebuddy.ai/v2/plugin/auth/state",
+        "tokenUrl": "https://www.codebuddy.ai/v2/plugin/auth/token",
+        "refreshUrl": "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
+        "userAgent": "IDE/2.63.2 CodeBuddy/2.63.2",
+        "platform": "ide",
+        "pollInterval": 5000
+      },
+      "modelos": [
+        {
+          "id": "glm-5.2",
+          "nome": "GLM-5.2"
+        },
+        {
+          "id": "glm-5.1",
+          "nome": "GLM-5.1"
+        },
+        {
+          "id": "glm-5.0",
+          "nome": "GLM-5.0"
+        },
+        {
+          "id": "glm-5.0-turbo",
+          "nome": "GLM-5.0-Turbo"
+        },
+        {
+          "id": "glm-5v-turbo",
+          "nome": "GLM-5v-Turbo"
+        },
+        {
+          "id": "glm-4.7",
+          "nome": "GLM-4.7"
+        },
+        {
+          "id": "minimax-m3",
+          "nome": "MiniMax-M3"
+        },
+        {
+          "id": "minimax-m2.7",
+          "nome": "MiniMax-M2.7"
+        },
+        {
+          "id": "kimi-k2.7",
+          "nome": "Kimi-K2.7-Code"
+        },
+        {
+          "id": "kimi-k2.6",
+          "nome": "Kimi-K2.6"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi-K2.5"
+        },
+        {
+          "id": "hy3-preview",
+          "nome": "Hy3 Preview"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "nome": "DeepSeek-V4-Pro"
+        },
+        {
+          "id": "deepseek-v4.1-flash",
+          "nome": "DeepSeek-V4.1-Flash"
+        },
+        {
+          "id": "deepseek-v3-2-volc",
+          "nome": "DeepSeek-V3.2"
+        }
+      ]
+    },
+    {
+      "id": "codebuddy-cn",
+      "fonteId": "codebuddy-cn",
+      "nome": "CodeBuddy CN",
+      "sigla": "CO",
+      "cli": "Conta do provedor",
+      "website": "https://copilot.tencent.com",
+      "tipo": "device_code",
+      "oauth": {
+        "baseUrl": "https://copilot.tencent.com",
+        "stateUrl": "https://copilot.tencent.com/v2/plugin/auth/state",
+        "tokenUrl": "https://copilot.tencent.com/v2/plugin/auth/token",
+        "refreshUrl": "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
+        "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
+        "platform": "CLI",
+        "pollInterval": 5000
+      },
+      "modelos": [
+        {
+          "id": "glm-5.2",
+          "nome": "GLM-5.2"
+        },
+        {
+          "id": "glm-5.1",
+          "nome": "GLM-5.1"
+        },
+        {
+          "id": "minimax-m3",
+          "nome": "MiniMax-M3"
+        },
+        {
+          "id": "hy3",
+          "nome": "Hy3"
+        },
+        {
+          "id": "hy4-preview",
+          "nome": "Hy4-Preview"
+        },
+        {
+          "id": "glm-5.3",
+          "nome": "GLM-5.3"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "nome": "GLM-5.3-Flash"
+        },
+        {
+          "id": "kimi-k3-1",
+          "nome": "Kimi-K3"
+        },
+        {
+          "id": "kimi-k2.8-preview",
+          "nome": "Kimi-K2.8-Preview"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "nome": "DeepSeek-V4-Pro"
+        },
+        {
+          "id": "deepseek-v4.1-flash",
+          "nome": "DeepSeek-V4.1-Flash"
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "fonteId": "cursor",
+      "nome": "Cursor IDE",
+      "sigla": "CU",
+      "cli": "Conta do provedor",
+      "website": "https://cursor.com",
+      "tipo": "import_token",
+      "oauth": {
+        "apiEndpoint": "https://api2.cursor.sh",
+        "chatEndpoint": "/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
+        "modelsEndpoint": "/agent.v1.AgentService/GetUsableModels",
+        "api3Endpoint": "https://api3.cursor.sh",
+        "agentEndpoint": "https://agent.api5.cursor.sh",
+        "agentNonPrivacyEndpoint": "https://agentn.api5.cursor.sh",
+        "clientVersion": "3.12.17",
+        "clientType": "ide",
+        "dbKeys": {
+          "accessToken": "cursorAuth/accessToken",
+          "machineId": "storage.serviceMachineId"
+        }
+      },
+      "modelos": [
+        {
+          "id": "default",
+          "nome": "Auto (Server Picks)"
+        },
+        {
+          "id": "claude-4.5-opus-high-thinking",
+          "nome": "Claude 4.5 Opus High Thinking"
+        },
+        {
+          "id": "claude-4.5-opus-high",
+          "nome": "Claude 4.5 Opus High"
+        },
+        {
+          "id": "claude-4.5-sonnet-thinking",
+          "nome": "Claude 4.5 Sonnet Thinking"
+        },
+        {
+          "id": "claude-4.5-sonnet",
+          "nome": "Claude 4.5 Sonnet"
+        },
+        {
+          "id": "claude-4.5-haiku",
+          "nome": "Claude 4.5 Haiku"
+        },
+        {
+          "id": "claude-4.5-opus",
+          "nome": "Claude 4.5 Opus"
+        },
+        {
+          "id": "gpt-5.2-codex",
+          "nome": "GPT 5.2 Codex"
+        },
+        {
+          "id": "claude-4.6-opus-max",
+          "nome": "Claude 4.6 Opus Max"
+        },
+        {
+          "id": "claude-4.6-sonnet-medium-thinking",
+          "nome": "Claude 4.6 Sonnet Medium Thinking"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi K2.5"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "nome": "Gemini 3 Flash Preview"
+        },
+        {
+          "id": "gpt-5.2",
+          "nome": "GPT 5.2"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "nome": "GPT 5.3 Codex"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-web",
+      "fonteId": "deepseek-web",
+      "nome": "DeepSeek Web",
+      "sigla": "DE",
+      "cli": "Login no navegador",
+      "website": "https://chat.deepseek.com",
+      "tipo": "web_cookie",
+      "authHint": "Paste your userToken from chat.deepseek.com localStorage (DevTools → Application → Local Storage)",
+      "modelos": [
+        {
+          "id": "deepseek-v4-pro",
+          "nome": "DeepSeek V4 Pro"
+        },
+        {
+          "id": "deepseek-v4-pro-think",
+          "nome": "DeepSeek V4 Pro Think"
+        },
+        {
+          "id": "deepseek-v4-pro-search",
+          "nome": "DeepSeek V4 Pro Search"
+        },
+        {
+          "id": "deepseek-v4-pro-think-search",
+          "nome": "DeepSeek V4 Pro Think+Search"
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "nome": "DeepSeek V4 Flash"
+        },
+        {
+          "id": "deepseek-v4-flash-think",
+          "nome": "DeepSeek V4 Flash Think"
+        },
+        {
+          "id": "deepseek-v4-flash-search",
+          "nome": "DeepSeek V4 Flash Search"
+        },
+        {
+          "id": "deepseek-v4-flash-think-search",
+          "nome": "DeepSeek V4 Flash Think+Search"
+        },
+        {
+          "id": "deepseek-chat",
+          "nome": "DeepSeek Chat"
+        },
+        {
+          "id": "deepseek-reasoner",
+          "nome": "DeepSeek Reasoner"
+        },
+        {
+          "id": "DeepSeek-R1",
+          "nome": "DeepSeek R1"
+        },
+        {
+          "id": "DeepSeek-R1-Search",
+          "nome": "DeepSeek R1 Search"
+        },
+        {
+          "id": "DeepSeek-V3.2",
+          "nome": "DeepSeek V3.2"
+        },
+        {
+          "id": "DeepSeek-Search",
+          "nome": "DeepSeek Search"
+        }
+      ]
+    },
+    {
+      "id": "gemini-cli",
+      "fonteId": "gemini-cli",
+      "nome": "Gemini CLI",
+      "sigla": "GE",
+      "cli": "Conta do provedor",
+      "website": "https://github.com/google-gemini/gemini-cli",
+      "tipo": "authorization_code",
+      "oauth": {
+        "clientId": "",
+        "clientSecret": "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",
+        "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+        "tokenUrl": "https://oauth2.googleapis.com/token",
+        "userInfoUrl": "https://www.googleapis.com/oauth2/v1/userinfo",
+        "scopes": [
+          "https://www.googleapis.com/auth/cloud-platform",
+          "https://www.googleapis.com/auth/userinfo.email",
+          "https://www.googleapis.com/auth/userinfo.profile"
+        ],
+        "refresh": {
+          "encoding": "form"
+        }
+      },
+      "modelos": [
+        {
+          "id": "gemini-3.1-pro-preview",
+          "nome": "Gemini 3.1 Pro Preview"
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "nome": "Gemini 3 Pro Preview"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "nome": "Gemini 3 Flash Preview"
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "nome": "Gemini 3.1 Flash Lite Preview"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "nome": "Gemini 2.5 Pro"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "nome": "Gemini 2.5 Flash"
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "nome": "Gemini 2.5 Flash Lite"
+        }
+      ]
+    },
+    {
+      "id": "gemini-web",
+      "fonteId": "gemini-web",
+      "nome": "Gemini Web",
+      "sigla": "GE",
+      "cli": "Login no navegador",
+      "website": "https://gemini.google.com",
+      "tipo": "web_cookie",
+      "authHint": "Paste your __Secure-1PSID (and __Secure-1PSIDTS) cookie value(s) from gemini.google.com",
+      "modelos": []
+    },
+    {
+      "id": "github",
+      "fonteId": "github",
+      "nome": "GitHub Copilot",
+      "sigla": "GI",
+      "cli": "Conta do provedor",
+      "website": "https://github.com/features/copilot",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "Iv1.b507a08c87ecfe98",
+        "authorizeUrl": "https://github.com/login/oauth/authorize",
+        "deviceCodeUrl": "https://github.com/login/device/code",
+        "tokenUrl": "https://github.com/login/oauth/access_token",
+        "userInfoUrl": "https://api.github.com/user",
+        "scopes": "read:user",
+        "apiVersion": "2022-11-28",
+        "copilotTokenUrl": "https://api.github.com/copilot_internal/v2/token",
+        "userAgent": "GitHubCopilotChat/0.26.7",
+        "editorVersion": "vscode/1.85.0",
+        "editorPluginVersion": "copilot-chat/0.26.7"
+      },
+      "modelos": [
+        {
+          "id": "gpt-5-mini",
+          "nome": "GPT-5 Mini"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "nome": "GPT-5.3 Codex"
+        },
+        {
+          "id": "gpt-5.4",
+          "nome": "GPT-5.4"
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "nome": "GPT-5.4 Mini"
+        },
+        {
+          "id": "gpt-5.5",
+          "nome": "GPT-5.5"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "nome": "GPT-5.6 Luna"
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "nome": "GPT-5.6 Sol"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "nome": "GPT-5.6 Terra"
+        },
+        {
+          "id": "gpt-6-astra",
+          "nome": "GPT-6 Astra"
+        },
+        {
+          "id": "gpt-6-luna",
+          "nome": "GPT-6 Luna"
+        },
+        {
+          "id": "gpt-6-sol",
+          "nome": "GPT-6 Sol"
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "nome": "GPT-6.1 Sol"
+        },
+        {
+          "id": "claude-fable-5",
+          "nome": "Claude Fable 5"
+        },
+        {
+          "id": "claude-fable-5.1",
+          "nome": "Claude Fable 5.1"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "nome": "Claude Haiku 4.5"
+        },
+        {
+          "id": "claude-haiku-5.5",
+          "nome": "Claude Haiku 5.5"
+        },
+        {
+          "id": "claude-opus-4.8",
+          "nome": "Claude Opus 4.8"
+        },
+        {
+          "id": "claude-opus-4.8-fast",
+          "nome": "Claude Opus 4.8 (Fast)"
+        },
+        {
+          "id": "claude-opus-5",
+          "nome": "Claude Opus 5"
+        },
+        {
+          "id": "claude-opus-5.5",
+          "nome": "Claude Opus 5.5"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "nome": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "nome": "Claude Sonnet 5"
+        },
+        {
+          "id": "claude-sonnet-5.5",
+          "nome": "Claude Sonnet 5.5"
+        },
+        {
+          "id": "gemini-3.7-flash",
+          "nome": "Gemini 3.7 Flash"
+        },
+        {
+          "id": "gemini-3.8-flash",
+          "nome": "Gemini 3.8 Flash"
+        },
+        {
+          "id": "gemini-4-argon",
+          "nome": "Gemini 4 Argon"
+        },
+        {
+          "id": "kimi-k3",
+          "nome": "Kimi K3"
+        },
+        {
+          "id": "mai-code-1.1-flash",
+          "nome": "MAI-Code-1.1-Flash"
+        }
+      ]
+    },
+    {
+      "id": "gitlab",
+      "fonteId": "gitlab",
+      "nome": "GitLab Duo",
+      "sigla": "GI",
+      "cli": "Conta do provedor",
+      "website": "https://gitlab.com",
+      "tipo": "authorization_code_pkce",
+      "oauth": {
+        "defaultBaseUrl": "https://gitlab.com",
+        "authorizeUrlPath": "/oauth/authorize",
+        "tokenUrlPath": "/oauth/token",
+        "userInfoUrlPath": "/api/v4/user",
+        "scope": "api read_user",
+        "codeChallengeMethod": "S256"
+      },
+      "modelos": []
+    },
+    {
+      "id": "grok-cli",
+      "fonteId": "grok-cli",
+      "nome": "Grok CLI (Grok Build)",
+      "sigla": "GR",
+      "cli": "Conta do provedor",
+      "website": "https://x.ai",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "b1a00492-073a-47ea-816f-4c329264a828",
+        "deviceCodeUrl": "https://auth.x.ai/oauth2/device/code",
+        "tokenUrl": "https://auth.x.ai/oauth2/token",
+        "refreshUrl": "https://auth.x.ai/oauth2/token",
+        "scope": "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+        "referrer": "grok-build",
+        "refreshLeadMs": 300000
+      },
+      "modelos": [
+        {
+          "id": "grok-build",
+          "nome": "Grok Build"
+        },
+        {
+          "id": "grok-4.7",
+          "nome": "Grok 4.7"
+        },
+        {
+          "id": "grok-4.5",
+          "nome": "Grok 4.5"
+        },
+        {
+          "id": "grok-4.5-high",
+          "nome": "Grok 4.5 (High)"
+        },
+        {
+          "id": "grok-4.5-medium",
+          "nome": "Grok 4.5 (Medium)"
+        },
+        {
+          "id": "grok-4.5-low",
+          "nome": "Grok 4.5 (Low)"
+        }
+      ]
+    },
+    {
+      "id": "grok-web",
+      "fonteId": "grok-web",
+      "nome": "Grok Web (Subscription)",
+      "sigla": "GR",
+      "cli": "Login no navegador",
+      "website": "https://grok.com",
+      "tipo": "web_cookie",
+      "authHint": "Paste your full grok.com Cookie header (sso + cf_clearance — needed for image/video generation)",
+      "modelos": []
+    },
+    {
+      "id": "iflow",
+      "fonteId": "iflow",
+      "nome": "iFlow AI",
+      "sigla": "IF",
+      "cli": "Conta do provedor",
+      "website": "https://iflow.cn",
+      "tipo": "authorization_code",
+      "oauth": {
+        "clientId": "10009311001",
+        "clientSecret": "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW",
+        "authorizeUrl": "https://iflow.cn/oauth",
+        "tokenUrl": "https://iflow.cn/oauth/token",
+        "userInfoUrl": "https://iflow.cn/api/oauth/getUserInfo",
+        "extraParams": {
+          "loginMethod": "phone",
+          "type": "phone"
+        },
+        "refreshLeadMs": 86400000
+      },
+      "modelos": [
+        {
+          "id": "qwen3-coder-plus",
+          "nome": "Qwen3 Coder Plus"
+        },
+        {
+          "id": "qwen3-max",
+          "nome": "Qwen3 Max"
+        },
+        {
+          "id": "qwen3-vl-plus",
+          "nome": "Qwen3 VL Plus"
+        },
+        {
+          "id": "qwen3-max-preview",
+          "nome": "Qwen3 Max Preview"
+        },
+        {
+          "id": "qwen3-235b",
+          "nome": "Qwen3 235B A22B"
+        },
+        {
+          "id": "qwen3-235b-a22b-instruct",
+          "nome": "Qwen3 235B A22B Instruct"
+        },
+        {
+          "id": "qwen3-235b-a22b-thinking-2507",
+          "nome": "Qwen3 235B A22B Thinking"
+        },
+        {
+          "id": "qwen3-32b",
+          "nome": "Qwen3 32B"
+        },
+        {
+          "id": "kimi-k2",
+          "nome": "Kimi K2"
+        },
+        {
+          "id": "deepseek-v3.2",
+          "nome": "DeepSeek V3.2 Exp"
+        },
+        {
+          "id": "deepseek-v3.1",
+          "nome": "DeepSeek V3.1 Terminus"
+        },
+        {
+          "id": "deepseek-v3",
+          "nome": "DeepSeek V3 671B"
+        },
+        {
+          "id": "deepseek-r1",
+          "nome": "DeepSeek R1"
+        },
+        {
+          "id": "glm-4.7",
+          "nome": "GLM 4.7"
+        },
+        {
+          "id": "iflow-rome-30ba3b",
+          "nome": "iFlow ROME"
+        }
+      ]
+    },
+    {
+      "id": "kilocode",
+      "fonteId": "kilocode",
+      "nome": "Kilo Code",
+      "sigla": "KI",
+      "cli": "Conta do provedor",
+      "website": "https://kilocode.ai",
+      "tipo": "device_code",
+      "oauth": {
+        "apiBaseUrl": "https://api.kilo.ai",
+        "initiateUrl": "https://api.kilo.ai/api/device-auth/codes",
+        "pollUrlBase": "https://api.kilo.ai/api/device-auth/codes"
+      },
+      "modelos": [
+        {
+          "id": "anthropic/claude-sonnet-4-20250514",
+          "nome": "Claude Sonnet 4"
+        },
+        {
+          "id": "anthropic/claude-opus-4-20250514",
+          "nome": "Claude Opus 4"
+        },
+        {
+          "id": "google/gemini-2.5-pro",
+          "nome": "Gemini 2.5 Pro"
+        },
+        {
+          "id": "google/gemini-2.5-flash",
+          "nome": "Gemini 2.5 Flash"
+        },
+        {
+          "id": "openai/gpt-4.1",
+          "nome": "GPT-4.1"
+        },
+        {
+          "id": "openai/o3",
+          "nome": "o3"
+        },
+        {
+          "id": "deepseek/deepseek-chat",
+          "nome": "DeepSeek Chat"
+        },
+        {
+          "id": "deepseek/deepseek-reasoner",
+          "nome": "DeepSeek Reasoner"
+        }
+      ]
+    },
+    {
+      "id": "kimchi",
+      "fonteId": "kimchi",
+      "nome": "Kimchi",
+      "sigla": "KI",
+      "cli": "Conta do provedor",
+      "website": "https://kimchi.dev",
+      "tipo": "browser_token",
+      "oauth": {
+        "webAppUrl": "https://app.kimchi.dev",
+        "validationUrl": "https://api.cast.ai/v1/llm/openai/supported-providers",
+        "userInfoUrl": "https://app.kimchi.dev/api/v1/me",
+        "modelsUrl": "https://llm.kimchi.dev/v1/models/metadata?include_in_cli=true"
+      },
+      "modelos": [
+        {
+          "id": "minimax-m3",
+          "nome": "MiniMax-M3"
+        },
+        {
+          "id": "kimi-k2.7",
+          "nome": "Kimi-K2.7"
+        },
+        {
+          "id": "kimi-k2.6",
+          "nome": "Kimi-K2.6"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi-K2.5"
+        },
+        {
+          "id": "nemotron-3-ultra-fp4",
+          "nome": "Nemotron 3 Ultra FP4"
+        },
+        {
+          "id": "minimax-m2.7",
+          "nome": "MiniMax-M2.7"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "nome": "Claude Opus 4.6"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "nome": "Claude Sonnet 4.6"
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "fonteId": "kimi",
+      "nome": "Kimi",
+      "sigla": "KI",
+      "cli": "Conta do provedor",
+      "website": "https://kimi.moonshot.cn",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "17e5f671-d194-4dfb-9706-5516cb48c098",
+        "deviceCodeUrl": "https://auth.kimi.com/api/oauth/device_authorization",
+        "tokenUrl": "https://auth.kimi.com/api/oauth/token",
+        "refreshUrl": "https://auth.kimi.com/api/oauth/token",
+        "refreshLeadMs": 300000,
+        "authorizeDeviceUrl": "https://www.kimi.com/code/authorize_device"
+      },
+      "modelos": [
+        {
+          "id": "kimi-k3",
+          "nome": "Kimi K3"
+        },
+        {
+          "id": "k3",
+          "nome": "Kimi K3 (Code)"
+        },
+        {
+          "id": "kimi-for-coding",
+          "nome": "Kimi for Coding"
+        },
+        {
+          "id": "kimi-for-coding-highspeed",
+          "nome": "Kimi for Coding Highspeed"
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "nome": "Kimi K2.7 Code"
+        },
+        {
+          "id": "kimi-k2.7-code-highspeed",
+          "nome": "Kimi K2.7 Code Highspeed"
+        },
+        {
+          "id": "kimi-k2.6",
+          "nome": "Kimi K2.6"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi K2.5"
+        },
+        {
+          "id": "kimi-k2.5-thinking",
+          "nome": "Kimi K2.5 Thinking"
+        },
+        {
+          "id": "kimi-latest",
+          "nome": "Kimi Latest"
+        }
+      ]
+    },
+    {
+      "id": "kiro",
+      "fonteId": "kiro",
+      "nome": "Kiro AI",
+      "sigla": "KI",
+      "cli": "Conta do provedor",
+      "website": "https://kiro.dev",
+      "tipo": "device_code",
+      "oauth": {
+        "ssoOidcEndpoint": "https://oidc.us-east-1.amazonaws.com",
+        "registerClientUrl": "https://oidc.us-east-1.amazonaws.com/client/register",
+        "deviceAuthUrl": "https://oidc.us-east-1.amazonaws.com/device_authorization",
+        "tokenUrl": "https://oidc.us-east-1.amazonaws.com/token",
+        "startUrl": "https://view.awsapps.com/start",
+        "clientName": "kiro-oauth-client",
+        "clientType": "public",
+        "scopes": [
+          "codewhisperer:completions",
+          "codewhisperer:analysis",
+          "codewhisperer:conversations"
+        ],
+        "grantTypes": [
+          "urn:ietf:params:oauth:grant-type:device_code",
+          "refresh_token"
+        ],
+        "issuerUrl": "https://identitycenter.amazonaws.com/ssoins-722374e8c3c8e6c6",
+        "socialAuthEndpoint": "https://prod.us-east-1.auth.desktop.kiro.dev",
+        "socialLoginUrl": "https://prod.us-east-1.auth.desktop.kiro.dev/login",
+        "socialTokenUrl": "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token",
+        "socialRefreshUrl": "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
+        "authMethods": [
+          "builder-id",
+          "idc",
+          "google",
+          "github",
+          "import"
+        ]
+      },
+      "modelos": [
+        {
+          "id": "claude-opus-5.5",
+          "nome": "Claude Opus 5.5"
+        },
+        {
+          "id": "claude-opus-5.5-thinking",
+          "nome": "Claude Opus 5.5 (Thinking)"
+        },
+        {
+          "id": "claude-opus-5.5-agentic",
+          "nome": "Claude Opus 5.5 (Agentic)"
+        },
+        {
+          "id": "claude-opus-5.5-thinking-agentic",
+          "nome": "Claude Opus 5.5 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-opus-5",
+          "nome": "Claude Opus 5"
+        },
+        {
+          "id": "claude-opus-5-thinking",
+          "nome": "Claude Opus 5 (Thinking)"
+        },
+        {
+          "id": "claude-opus-5-agentic",
+          "nome": "Claude Opus 5 (Agentic)"
+        },
+        {
+          "id": "claude-opus-5-thinking-agentic",
+          "nome": "Claude Opus 5 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-opus-4.8",
+          "nome": "Claude Opus 4.8"
+        },
+        {
+          "id": "claude-opus-4.8-thinking",
+          "nome": "Claude Opus 4.8 (Thinking)"
+        },
+        {
+          "id": "claude-opus-4.8-agentic",
+          "nome": "Claude Opus 4.8 (Agentic)"
+        },
+        {
+          "id": "claude-opus-4.8-thinking-agentic",
+          "nome": "Claude Opus 4.8 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "nome": "Claude Opus 4.7"
+        },
+        {
+          "id": "claude-opus-4.7-thinking",
+          "nome": "Claude Opus 4.7 (Thinking)"
+        },
+        {
+          "id": "claude-opus-4.7-agentic",
+          "nome": "Claude Opus 4.7 (Agentic)"
+        },
+        {
+          "id": "claude-opus-4.7-thinking-agentic",
+          "nome": "Claude Opus 4.7 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-opus-4.5",
+          "nome": "Claude Opus 4.5"
+        },
+        {
+          "id": "claude-opus-4.5-thinking",
+          "nome": "Claude Opus 4.5 (Thinking)"
+        },
+        {
+          "id": "claude-opus-4.5-agentic",
+          "nome": "Claude Opus 4.5 (Agentic)"
+        },
+        {
+          "id": "claude-opus-4.5-thinking-agentic",
+          "nome": "Claude Opus 4.5 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "nome": "Claude Sonnet 5"
+        },
+        {
+          "id": "claude-sonnet-4.5",
+          "nome": "Claude Sonnet 4.5"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "nome": "Claude Haiku 4.5"
+        },
+        {
+          "id": "deepseek-3.2",
+          "nome": "DeepSeek 3.2"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "nome": "Qwen3 Coder Next"
+        },
+        {
+          "id": "glm-5",
+          "nome": "GLM 5"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "nome": "MiniMax M2.5"
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "nome": "GPT 5.6 Sol"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "nome": "GPT 5.6 Terra"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "nome": "GPT 5.6 Luna"
+        },
+        {
+          "id": "claude-sonnet-5-thinking",
+          "nome": "Claude Sonnet 5 (Thinking)"
+        },
+        {
+          "id": "claude-sonnet-4.5-thinking",
+          "nome": "Claude Sonnet 4.5 (Thinking)"
+        },
+        {
+          "id": "claude-haiku-4.5-thinking",
+          "nome": "Claude Haiku 4.5 (Thinking)"
+        },
+        {
+          "id": "gpt-5.6-sol-thinking",
+          "nome": "GPT 5.6 Sol (Thinking)"
+        },
+        {
+          "id": "gpt-5.6-terra-thinking",
+          "nome": "GPT 5.6 Terra (Thinking)"
+        },
+        {
+          "id": "gpt-5.6-luna-thinking",
+          "nome": "GPT 5.6 Luna (Thinking)"
+        },
+        {
+          "id": "claude-sonnet-5-agentic",
+          "nome": "Claude Sonnet 5 (Agentic)"
+        },
+        {
+          "id": "claude-sonnet-4.5-agentic",
+          "nome": "Claude Sonnet 4.5 (Agentic)"
+        },
+        {
+          "id": "claude-haiku-4.5-agentic",
+          "nome": "Claude Haiku 4.5 (Agentic)"
+        },
+        {
+          "id": "gpt-5.6-sol-agentic",
+          "nome": "GPT 5.6 Sol (Agentic)"
+        },
+        {
+          "id": "gpt-5.6-terra-agentic",
+          "nome": "GPT 5.6 Terra (Agentic)"
+        },
+        {
+          "id": "gpt-5.6-luna-agentic",
+          "nome": "GPT 5.6 Luna (Agentic)"
+        },
+        {
+          "id": "claude-sonnet-5-thinking-agentic",
+          "nome": "Claude Sonnet 5 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-sonnet-4.5-thinking-agentic",
+          "nome": "Claude Sonnet 4.5 (Thinking + Agentic)"
+        },
+        {
+          "id": "claude-haiku-4.5-thinking-agentic",
+          "nome": "Claude Haiku 4.5 (Thinking + Agentic)"
+        },
+        {
+          "id": "gpt-5.6-sol-thinking-agentic",
+          "nome": "GPT 5.6 Sol (Thinking + Agentic)"
+        },
+        {
+          "id": "gpt-5.6-terra-thinking-agentic",
+          "nome": "GPT 5.6 Terra (Thinking + Agentic)"
+        },
+        {
+          "id": "gpt-5.6-luna-thinking-agentic",
+          "nome": "GPT 5.6 Luna (Thinking + Agentic)"
+        }
+      ]
+    },
+    {
+      "id": "minimax-code",
+      "fonteId": "minimax-code",
+      "nome": "MiniMax Code",
+      "sigla": "MI",
+      "cli": "Conta do provedor",
+      "website": "https://agent.minimax.cn",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "mcode-public",
+        "deviceUrl": "https://account.minimax.cn/oauth2/device/code",
+        "tokenUrl": "https://account.minimax.cn/oauth2/token",
+        "scope": "agent.default",
+        "audience": "agent-backend",
+        "refreshLeadMs": 600000
+      },
+      "modelos": [
+        {
+          "id": "MiniMax-M3.1-Flash-Preview",
+          "nome": "MiniMax M3.1 Flash Preview"
+        },
+        {
+          "id": "MiniMax-M3",
+          "nome": "MiniMax M3"
+        },
+        {
+          "id": "MiniMax-M2.7",
+          "nome": "MiniMax M2.7"
+        },
+        {
+          "id": "MiniMax-M2.7-highspeed",
+          "nome": "MiniMax M2.7 Highspeed"
+        }
+      ]
+    },
+    {
+      "id": "minimax-code-global",
+      "fonteId": "minimax-code-global",
+      "nome": "MiniMax Code (Global)",
+      "sigla": "MI",
+      "cli": "Conta do provedor",
+      "website": "https://agent.minimax.io",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "mcode-public",
+        "deviceUrl": "https://account.minimax.io/oauth2/device/code",
+        "tokenUrl": "https://account.minimax.io/oauth2/token",
+        "scope": "agent.default",
+        "audience": "agent-backend",
+        "refreshLeadMs": 600000
+      },
+      "modelos": [
+        {
+          "id": "MiniMax-M3.1-Flash-Preview",
+          "nome": "MiniMax M3.1 Flash Preview"
+        },
+        {
+          "id": "MiniMax-M3",
+          "nome": "MiniMax M3"
+        },
+        {
+          "id": "MiniMax-M2.7",
+          "nome": "MiniMax M2.7"
+        },
+        {
+          "id": "MiniMax-M2.7-highspeed",
+          "nome": "MiniMax M2.7 Highspeed"
+        }
+      ]
+    },
+    {
+      "id": "muse",
+      "fonteId": "muse",
+      "nome": "Muse (Meta Model API)",
+      "sigla": "MU",
+      "cli": "Conta do provedor",
+      "website": "https://muse.ai",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "1031625952748946",
+        "deviceCodeUrl": "https://auth.meta.com/oidc/device/authorization/",
+        "tokenUrl": "https://auth.meta.com/oidc/device/token/"
+      },
+      "modelos": [
+        {
+          "id": "muse-spark-1.3",
+          "nome": "Muse Spark 1.3"
+        },
+        {
+          "id": "muse-spark-1.2",
+          "nome": "Muse Spark 1.2"
+        },
+        {
+          "id": "muse-spark-1.1",
+          "nome": "Muse Spark 1.1"
+        },
+        {
+          "id": "muse-spark-1.3-contributor",
+          "nome": "Muse Spark 1.3 Contributor"
+        },
+        {
+          "id": "muse-spark-1.2-contributor",
+          "nome": "Muse Spark 1.2 Contributor"
+        }
+      ]
+    },
+    {
+      "id": "muse-web",
+      "fonteId": "muse-web",
+      "nome": "Muse Web",
+      "sigla": "MU",
+      "cli": "Login no navegador",
+      "website": "https://muse.ai",
+      "tipo": "web_cookie",
+      "authHint": "Paste your muse.ai cookies (hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...) from a logged-in muse.ai session",
+      "modelos": []
+    },
+    {
+      "id": "nous",
+      "fonteId": "nous",
+      "nome": "Nous Research",
+      "sigla": "NO",
+      "cli": "Conta do provedor",
+      "website": "https://nousresearch.com",
+      "tipo": "device_code",
+      "oauth": {
+        "clientId": "hermes-cli",
+        "portalBaseUrl": "https://portal.nousresearch.com",
+        "deviceCodeUrl": "https://portal.nousresearch.com/api/oauth/device/code",
+        "tokenUrl": "https://portal.nousresearch.com/api/oauth/token",
+        "agentKeyUrl": "https://portal.nousresearch.com/api/oauth/agent-key",
+        "scope": "inference:invoke inference:mint_agent_key"
+      },
+      "modelos": [
+        {
+          "id": "meituan/longcat-2.0:free",
+          "nome": "Meituan: LongCat 2.0"
+        },
+        {
+          "id": "meituan/longcat-2.5-preview:free",
+          "nome": "Meituan: LongCat 2.5 Preview"
+        },
+        {
+          "id": "stepfun/step-5-preview:free",
+          "nome": "StepFun: Step 5 Preview"
+        },
+        {
+          "id": "upstage/solar-mini4:free",
+          "nome": "Upstage: Solar Mini 4"
+        },
+        {
+          "id": "stepfun/step-3.7-flash:free",
+          "nome": "StepFun: Step 3.7 Flash"
+        },
+        {
+          "id": "poolside/laguna-s-2.1:free",
+          "nome": "Poolside: Laguna S 2.1"
+        },
+        {
+          "id": "poolside/laguna-xs-2.1:free",
+          "nome": "Poolside: Laguna XS 2.1"
+        },
+        {
+          "id": "stealth/missingno",
+          "nome": "MissingNo"
+        }
+      ]
+    },
+    {
+      "id": "perplexity-web",
+      "fonteId": "perplexity-web",
+      "nome": "Perplexity Web (Pro/Max)",
+      "sigla": "PE",
+      "cli": "Login no navegador",
+      "website": "https://www.perplexity.ai",
+      "tipo": "web_cookie",
+      "authHint": "Paste your __Secure-next-auth.session-token cookie value from perplexity.ai",
+      "modelos": []
+    },
+    {
+      "id": "qoder",
+      "fonteId": "qoder",
+      "nome": "Qoder",
+      "sigla": "QO",
+      "cli": "Conta do provedor",
+      "website": "https://qoder.com",
+      "tipo": "device_code",
+      "authHint": "Personal Access Token (pt-...) từ https://qoder.com/account/integrations",
+      "oauth": {
+        "openApiBaseUrl": "https://openapi.qoder.sh",
+        "centerBaseUrl": "https://center.qoder.sh",
+        "chatBaseUrl": "https://api3.qoder.sh",
+        "deviceTokenUrl": "https://openapi.qoder.sh/api/v1/deviceToken/poll",
+        "refreshUrl": "https://center.qoder.sh/algo/api/v3/user/refresh_token",
+        "userInfoUrl": "https://openapi.qoder.sh/api/v1/userinfo",
+        "quotaUsageUrl": "https://openapi.qoder.sh/api/v2/quota/usage",
+        "loginUrl": "https://qoder.com/device/selectAccounts"
+      },
+      "modelos": [
+        {
+          "id": "ultimate",
+          "nome": "Ultimate"
+        },
+        {
+          "id": "auto",
+          "nome": "Auto"
+        },
+        {
+          "id": "performance",
+          "nome": "Performance"
+        },
+        {
+          "id": "efficient",
+          "nome": "Efficient"
+        },
+        {
+          "id": "lite",
+          "nome": "Lite"
+        },
+        {
+          "id": "qmodel_38max",
+          "nome": "Qwen3.8-Max"
+        },
+        {
+          "id": "qmodel_latest",
+          "nome": "Qwen3.7-Max"
+        },
+        {
+          "id": "qmodel",
+          "nome": "Qwen3.7-Plus"
+        },
+        {
+          "id": "qfmodel",
+          "nome": "Qwen3.8-Flash"
+        },
+        {
+          "id": "kmodel_latest",
+          "nome": "Kimi-K3"
+        },
+        {
+          "id": "kmodel",
+          "nome": "Kimi-K2.7-Code"
+        },
+        {
+          "id": "gmodel",
+          "nome": "GLM-5.3"
+        },
+        {
+          "id": "gfmodel",
+          "nome": "GLM-5.3-Flash"
+        },
+        {
+          "id": "dmodel",
+          "nome": "DeepSeek-V4-Pro"
+        },
+        {
+          "id": "dfmodel",
+          "nome": "DeepSeek-V4-Flash"
+        },
+        {
+          "id": "mmodel",
+          "nome": "MiniMax-M3"
+        },
+        {
+          "id": "smodel",
+          "nome": "Sonus"
+        },
+        {
+          "id": "cmodel",
+          "nome": "Cantus"
+        }
+      ]
+    },
+    {
+      "id": "qoder-cn",
+      "fonteId": "qoder-cn",
+      "nome": "Qoder CN",
+      "sigla": "QO",
+      "cli": "Conta do provedor",
+      "website": "https://qoder.com.cn",
+      "tipo": "device_code",
+      "authHint": "Personal Access Token (pt-...) from https://qoder.com.cn/account/integrations",
+      "oauth": {
+        "openApiBaseUrl": "https://openapi.qoder.com.cn",
+        "centerBaseUrl": "https://gateway.qoder.com.cn",
+        "chatBaseUrl": "https://gateway.qoder.com.cn",
+        "deviceTokenUrl": "https://openapi.qoder.com.cn/api/v1/deviceToken/poll",
+        "refreshUrl": "https://gateway.qoder.com.cn/algo/api/v3/user/refresh_token",
+        "userInfoUrl": "https://openapi.qoder.com.cn/api/v1/userinfo",
+        "quotaUsageUrl": "https://openapi.qoder.com.cn/api/v2/quota/usage",
+        "loginUrl": "https://qoder.com.cn/device/selectAccounts"
+      },
+      "modelos": [
+        {
+          "id": "ultimate",
+          "nome": "Ultimate"
+        },
+        {
+          "id": "auto",
+          "nome": "Auto"
+        },
+        {
+          "id": "performance",
+          "nome": "Performance"
+        },
+        {
+          "id": "efficient",
+          "nome": "Efficient"
+        },
+        {
+          "id": "lite",
+          "nome": "Lite"
+        },
+        {
+          "id": "qmodel_38max",
+          "nome": "Qwen3.8-Max"
+        },
+        {
+          "id": "qmodel_latest",
+          "nome": "Qwen3.7-Max"
+        },
+        {
+          "id": "qmodel",
+          "nome": "Qwen3.7-Plus"
+        },
+        {
+          "id": "qfmodel",
+          "nome": "Qwen3.8-Flash"
+        },
+        {
+          "id": "kmodel_latest",
+          "nome": "Kimi-K3"
+        },
+        {
+          "id": "kmodel",
+          "nome": "Kimi-K2.7-Code"
+        },
+        {
+          "id": "gmodel",
+          "nome": "GLM-5.3"
+        },
+        {
+          "id": "gfmodel",
+          "nome": "GLM-5.3-Flash"
+        },
+        {
+          "id": "dmodel",
+          "nome": "DeepSeek-V4-Pro"
+        },
+        {
+          "id": "dfmodel",
+          "nome": "DeepSeek-V4-Flash"
+        },
+        {
+          "id": "mmodel",
+          "nome": "MiniMax-M3"
+        }
+      ]
+    },
+    {
+      "id": "trae",
+      "fonteId": "trae",
+      "nome": "Trae",
+      "sigla": "TR",
+      "cli": "Conta do provedor",
+      "website": "https://www.trae.ai",
+      "tipo": "authorization_code",
+      "modelos": [
+        {
+          "id": "auto",
+          "nome": "Auto (Server Picks)"
+        },
+        {
+          "id": "work",
+          "nome": "Work (Fast)"
+        },
+        {
+          "id": "gemini-3.1-pro",
+          "nome": "Gemini 3.1 Pro"
+        },
+        {
+          "id": "gemini-3-flash-solo",
+          "nome": "Gemini 3 Flash"
+        },
+        {
+          "id": "minimax-m3",
+          "nome": "MiniMax M3"
+        },
+        {
+          "id": "minimax-m2.7",
+          "nome": "MiniMax M2.7"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi K2.5"
+        },
+        {
+          "id": "gpt-5.4",
+          "nome": "GPT 5.4"
+        },
+        {
+          "id": "gpt-5.2",
+          "nome": "GPT 5.2"
+        }
+      ]
+    },
+    {
+      "id": "uc-web",
+      "fonteId": "uc-web",
+      "nome": "UC Web",
+      "sigla": "UC",
+      "cli": "Login no navegador",
+      "website": "https://uncensored.com",
+      "tipo": "web_cookie",
+      "authHint": "Paste your full uncensored.com Cookie header (must include the __client cookie) from a logged-in session — image + video are un-metered on the web plan",
+      "modelos": []
+    },
+    {
+      "id": "windsurf",
+      "fonteId": "windsurf",
+      "nome": "Windsurf",
+      "sigla": "WI",
+      "cli": "Conta do provedor",
+      "website": "https://windsurf.com",
+      "tipo": "authorization_code",
+      "modelos": [
+        {
+          "id": "swe-1.6-fast",
+          "nome": "SWE-1.6 Fast"
+        },
+        {
+          "id": "swe-1.6",
+          "nome": "SWE-1.6"
+        },
+        {
+          "id": "swe-1.5-fast",
+          "nome": "SWE-1.5 Fast"
+        },
+        {
+          "id": "swe-1.5",
+          "nome": "SWE-1.5"
+        },
+        {
+          "id": "claude-opus-4.7-max",
+          "nome": "Claude Opus 4.7 Max"
+        },
+        {
+          "id": "claude-opus-4.7-xhigh",
+          "nome": "Claude Opus 4.7 XHigh"
+        },
+        {
+          "id": "claude-opus-4.7-high",
+          "nome": "Claude Opus 4.7 High"
+        },
+        {
+          "id": "claude-opus-4.7-medium",
+          "nome": "Claude Opus 4.7 Medium"
+        },
+        {
+          "id": "claude-opus-4.7-low",
+          "nome": "Claude Opus 4.7 Low"
+        },
+        {
+          "id": "claude-opus-4.7-review",
+          "nome": "Claude Opus 4.7 Review"
+        },
+        {
+          "id": "claude-sonnet-4.6-thinking-1m",
+          "nome": "Claude Sonnet 4.6 Thinking 1M"
+        },
+        {
+          "id": "claude-sonnet-4.6-1m",
+          "nome": "Claude Sonnet 4.6 1M"
+        },
+        {
+          "id": "claude-sonnet-4.6-thinking",
+          "nome": "Claude Sonnet 4.6 Thinking"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "nome": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "claude-opus-4.6-thinking",
+          "nome": "Claude Opus 4.6 Thinking"
+        },
+        {
+          "id": "claude-opus-4.6",
+          "nome": "Claude Opus 4.6"
+        },
+        {
+          "id": "claude-opus-4.5-thinking",
+          "nome": "Claude Opus 4.5 Thinking"
+        },
+        {
+          "id": "claude-opus-4.5",
+          "nome": "Claude Opus 4.5"
+        },
+        {
+          "id": "claude-sonnet-4.5-thinking",
+          "nome": "Claude Sonnet 4.5 Thinking"
+        },
+        {
+          "id": "claude-sonnet-4.5",
+          "nome": "Claude Sonnet 4.5"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "nome": "Claude Haiku 4.5"
+        },
+        {
+          "id": "gpt-5.5-xhigh-fast",
+          "nome": "GPT-5.5 XHigh Fast"
+        },
+        {
+          "id": "gpt-5.5-xhigh",
+          "nome": "GPT-5.5 XHigh"
+        },
+        {
+          "id": "gpt-5.5-high-fast",
+          "nome": "GPT-5.5 High Fast"
+        },
+        {
+          "id": "gpt-5.5-high",
+          "nome": "GPT-5.5 High"
+        },
+        {
+          "id": "gpt-5.5-medium-fast",
+          "nome": "GPT-5.5 Medium Fast"
+        },
+        {
+          "id": "gpt-5.5-medium",
+          "nome": "GPT-5.5 Medium"
+        },
+        {
+          "id": "gpt-5.5-low-fast",
+          "nome": "GPT-5.5 Low Fast"
+        },
+        {
+          "id": "gpt-5.5-low",
+          "nome": "GPT-5.5 Low"
+        },
+        {
+          "id": "gpt-5.5-none-fast",
+          "nome": "GPT-5.5 None Fast"
+        },
+        {
+          "id": "gpt-5.5-none",
+          "nome": "GPT-5.5 None"
+        },
+        {
+          "id": "gpt-5.4-xhigh-fast",
+          "nome": "GPT-5.4 XHigh Fast"
+        },
+        {
+          "id": "gpt-5.4-xhigh",
+          "nome": "GPT-5.4 XHigh"
+        },
+        {
+          "id": "gpt-5.4-high-fast",
+          "nome": "GPT-5.4 High Fast"
+        },
+        {
+          "id": "gpt-5.4-high",
+          "nome": "GPT-5.4 High"
+        },
+        {
+          "id": "gpt-5.4-medium-fast",
+          "nome": "GPT-5.4 Medium Fast"
+        },
+        {
+          "id": "gpt-5.4-medium",
+          "nome": "GPT-5.4 Medium"
+        },
+        {
+          "id": "gpt-5.4-low-fast",
+          "nome": "GPT-5.4 Low Fast"
+        },
+        {
+          "id": "gpt-5.4-low",
+          "nome": "GPT-5.4 Low"
+        },
+        {
+          "id": "gpt-5.4-none-fast",
+          "nome": "GPT-5.4 None Fast"
+        },
+        {
+          "id": "gpt-5.4-none",
+          "nome": "GPT-5.4 None"
+        },
+        {
+          "id": "gpt-5.4-mini-xhigh",
+          "nome": "GPT-5.4 Mini XHigh"
+        },
+        {
+          "id": "gpt-5.4-mini-high",
+          "nome": "GPT-5.4 Mini High"
+        },
+        {
+          "id": "gpt-5.4-mini-medium",
+          "nome": "GPT-5.4 Mini Medium"
+        },
+        {
+          "id": "gpt-5.4-mini-low",
+          "nome": "GPT-5.4 Mini Low"
+        },
+        {
+          "id": "gpt-5.3-codex-xhigh-fast",
+          "nome": "GPT-5.3 Codex XHigh Fast"
+        },
+        {
+          "id": "gpt-5.3-codex-xhigh",
+          "nome": "GPT-5.3 Codex XHigh"
+        },
+        {
+          "id": "gpt-5.3-codex-high-fast",
+          "nome": "GPT-5.3 Codex High Fast"
+        },
+        {
+          "id": "gpt-5.3-codex-high",
+          "nome": "GPT-5.3 Codex High"
+        },
+        {
+          "id": "gpt-5.3-codex-medium-fast",
+          "nome": "GPT-5.3 Codex Medium Fast"
+        },
+        {
+          "id": "gpt-5.3-codex-medium",
+          "nome": "GPT-5.3 Codex Medium"
+        },
+        {
+          "id": "gpt-5.3-codex-low-fast",
+          "nome": "GPT-5.3 Codex Low Fast"
+        },
+        {
+          "id": "gpt-5.3-codex-low",
+          "nome": "GPT-5.3 Codex Low"
+        },
+        {
+          "id": "gpt-5.2-xhigh",
+          "nome": "GPT-5.2 XHigh"
+        },
+        {
+          "id": "gpt-5.2-high",
+          "nome": "GPT-5.2 High"
+        },
+        {
+          "id": "gpt-5.2-medium",
+          "nome": "GPT-5.2 Medium"
+        },
+        {
+          "id": "gpt-5.2-low",
+          "nome": "GPT-5.2 Low"
+        },
+        {
+          "id": "gpt-5.2-none",
+          "nome": "GPT-5.2 None"
+        },
+        {
+          "id": "gpt-5",
+          "nome": "GPT-5"
+        },
+        {
+          "id": "gpt-4.1",
+          "nome": "GPT-4.1"
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "nome": "GPT-4.1 Mini"
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "nome": "GPT-4.1 Nano"
+        },
+        {
+          "id": "gpt-4o",
+          "nome": "GPT-4o"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "nome": "GPT-4o Mini"
+        },
+        {
+          "id": "gemini-3.1-pro-high",
+          "nome": "Gemini 3.1 Pro High"
+        },
+        {
+          "id": "gemini-3.1-pro-low",
+          "nome": "Gemini 3.1 Pro Low"
+        },
+        {
+          "id": "gemini-3.0-flash-high",
+          "nome": "Gemini 3 Flash High"
+        },
+        {
+          "id": "gemini-3.0-flash-medium",
+          "nome": "Gemini 3 Flash Medium"
+        },
+        {
+          "id": "gemini-3.0-flash-low",
+          "nome": "Gemini 3 Flash Low"
+        },
+        {
+          "id": "gemini-3.0-flash-minimal",
+          "nome": "Gemini 3 Flash Minimal"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "nome": "Gemini 2.5 Pro"
+        },
+        {
+          "id": "deepseek-v4",
+          "nome": "DeepSeek V4"
+        },
+        {
+          "id": "kimi-k2.6",
+          "nome": "Kimi K2.6"
+        },
+        {
+          "id": "kimi-k2.5",
+          "nome": "Kimi K2.5"
+        },
+        {
+          "id": "glm-5.1",
+          "nome": "GLM-5.1"
+        }
+      ]
+    },
+    {
+      "id": "xai",
+      "fonteId": "xai",
+      "nome": "xAI (Grok)",
+      "sigla": "XA",
+      "cli": "Conta do provedor",
+      "website": "https://x.ai",
+      "tipo": "authorization_code_pkce",
+      "modelos": [
+        {
+          "id": "grok-4.7",
+          "nome": "Grok 4.7"
+        },
+        {
+          "id": "grok-4.6",
+          "nome": "Grok 4.6"
+        },
+        {
+          "id": "grok-4.5",
+          "nome": "Grok 4.5"
+        },
+        {
+          "id": "grok-4",
+          "nome": "Grok 4"
+        },
+        {
+          "id": "grok-4-fast-reasoning",
+          "nome": "Grok 4 Fast Reasoning"
+        },
+        {
+          "id": "grok-code-fast-1",
+          "nome": "Grok Code Fast"
+        },
+        {
+          "id": "grok-3",
+          "nome": "Grok 3"
+        }
+      ]
+    },
+    {
+      "id": "xiaomi-mimo",
+      "fonteId": "xiaomi-mimo",
+      "nome": "Xiaomi MiMo",
+      "sigla": "XI",
+      "cli": "Conta do provedor",
+      "website": "https://xiaomimimo.com",
+      "tipo": "encrypted_callback",
+      "oauth": {
+        "custom": true,
+        "authorizeUrl": "https://platform.xiaomimimo.com/authorize",
+        "callbackParam": "u",
+        "kn": "mimocode"
+      },
+      "modelos": [
+        {
+          "id": "mimo-v2.6-pro",
+          "nome": "MiMo V2.6 Pro"
+        },
+        {
+          "id": "mimo-v2.6-flash",
+          "nome": "MiMo V2.6 Flash"
+        },
+        {
+          "id": "mimo-v2.6-pro-ultraspeed",
+          "nome": "MiMo V2.6 Pro UltraSpeed"
+        },
+        {
+          "id": "mimo-v2.5-pro",
+          "nome": "MiMo V2.5 Pro"
+        },
+        {
+          "id": "mimo-v2.5",
+          "nome": "MiMo V2.5"
+        },
+        {
+          "id": "mimo-v2-omni",
+          "nome": "MiMo V2 Omni"
+        },
+        {
+          "id": "mimo-v2-flash",
+          "nome": "MiMo V2 Flash"
+        }
+      ]
+    },
+    {
+      "id": "glm",
+      "fonteId": "glm",
+      "nome": "Zai GLM Coding",
+      "sigla": "ZA",
+      "cli": "Conta do provedor",
+      "website": "https://open.bigmodel.cn",
+      "tipo": "device_code",
+      "oauth": {
+        "providerId": "zai",
+        "cliInitUrl": "https://zcode.z.ai/api/v1/oauth/cli/init",
+        "cliPollUrl": "https://zcode.z.ai/api/v1/oauth/cli/poll",
+        "businessLoginUrl": "https://api.z.ai/api/auth/z/login",
+        "apiBaseUrl": "https://api.z.ai",
+        "planApiKeyName": "zcode-api-key"
+      },
+      "modelos": [
+        {
+          "id": "glm-5.3",
+          "nome": "GLM 5.3"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "nome": "GLM 5.3 Flash (Vision)"
+        },
+        {
+          "id": "glm-5.2",
+          "nome": "GLM 5.2"
+        },
+        {
+          "id": "glm-5.1",
+          "nome": "GLM 5.1"
+        },
+        {
+          "id": "glm-5-turbo",
+          "nome": "GLM 5 Turbo"
+        },
+        {
+          "id": "glm-5",
+          "nome": "GLM 5"
+        },
+        {
+          "id": "glm-4.7",
+          "nome": "GLM 4.7"
+        },
+        {
+          "id": "glm-4.6v",
+          "nome": "GLM 4.6V (Vision)"
+        }
+      ]
+    },
+    {
+      "id": "zed",
+      "fonteId": "zed",
+      "nome": "Zed",
+      "sigla": "ZE",
+      "cli": "Conta do provedor",
+      "website": "https://zed.dev",
+      "tipo": "authorization_code",
+      "oauth": {
+        "authorizeUrl": "https://zed.dev/native_app_signin",
+        "platform": "zed",
+        "rsaKeyExchange": true
+      },
+      "modelos": []
+    }
+  ]
+}

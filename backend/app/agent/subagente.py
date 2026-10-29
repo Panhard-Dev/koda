@@ -21,6 +21,7 @@ feito, o que foi achado e o que ficou em aberto.
 from __future__ import annotations
 
 import asyncio
+from ..execution.tempo import without_host_processes
 import re
 import threading
 import time
@@ -32,6 +33,8 @@ from .. import mcp, subagentes
 from ..config import Settings
 from ..limits import LIMITES
 from ..skills import SkillStore
+from ..tools import registry
+from ..policy.capabilities import deny_for_read_only
 
 if TYPE_CHECKING:  # pragma: no cover — só para os tipos
     from .loop import Aprovar, Emit, Resultado
@@ -208,6 +211,8 @@ def _prompt_do_agente(agente: subagentes.SubAgente, workspace: Path, sem_mcp: bo
         "Quem fala com a pessoa é o agente principal — o que você escrever volta para ele "
         "como relatório. Escreva para ele: o que você fez, o que achou, o que ficou em "
         "aberto. Ele não vê o seu caminho, só o que você contar.\n\n"
+        "Você tem somente ferramentas de leitura. Retorne análise e propostas ao principal; "
+        "ele executa as alterações e comandos autorizados.\n"
         "Duas coisas você **não** faz, e não é escolha sua:\n"
         "- não apaga arquivo nem pasta, por ferramenta nenhuma. Se um arquivo que você criou "
         "não serve mais, diga no relatório que ele pode ser apagado — apagar é do principal;\n"
@@ -218,6 +223,7 @@ def _prompt_do_agente(agente: subagentes.SubAgente, workspace: Path, sem_mcp: bo
     ).strip()
 
 
+@without_host_processes
 async def executar(
     engine: Any,
     settings: Settings,
@@ -253,13 +259,13 @@ async def executar(
     if not (tarefa or "").strip():
         return "ERRO: informe a tarefa do sub-agente — ele começa do zero e não vê esta conversa."
 
-    negadas = set(settings.tools_negadas) | set(PROIBIDAS)
+    negadas = set(settings.tools_negadas) | deny_for_read_only(registry.DEFINICOES)
     # Os MCPs dele, e só os dele: tudo o que é de servidor fora da lista entra como negado.
     catalogo_mcp = mcp.catalogo()
     for item in catalogo_mcp:
         endereco = mcp.detalhar(str(item["function"]["name"])) or {}
-        if endereco.get("servidor") not in agente.mcps:
-            negadas.add(str(item["function"]["name"]))
+        # Um servidor externo pode escrever ou executar código, mesmo que se anuncie leitor.
+        negadas.add(str(item["function"]["name"]))
 
     # Sem `skills:` no arquivo dele a lista é vazia, e o filtro tira todas: um agente novo
     # não herda poder — o que ele pode usar está escrito, não subentendido.

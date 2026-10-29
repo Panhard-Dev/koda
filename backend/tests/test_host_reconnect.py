@@ -11,9 +11,79 @@ from app.config import Settings
 from app.contracts.turn import StepResult
 from app.providers import ComTeto, HostProvider, host_boot
 from app.providers.base import Piece, TransientProviderError
+from app.providers.openai_compat import OpenAICompatibleProvider, _retry_after_segundos
 
 
 class HostReconnect(unittest.IsolatedAsyncioTestCase):
+    async def test_fallback_on_rate_limit_and_reuse_after_partial_stream(self):
+        settings = Settings(_env_file=None)
+        modelo = HostProvider(settings)
+        chamadas = []
+
+        async def step(provedor, *_args):
+            chamadas.append(provedor.base_url)
+            if provedor is modelo:
+                raise TransientProviderError("HTTP 429")
+            return StepResult(text="reserva respondeu")
+
+        with patch.object(OpenAICompatibleProvider, "step", step):
+            resposta = await modelo.step([], [])
+            self.assertEqual(resposta.text, "reserva respondeu")
+            self.assertEqual(chamadas, [modelo.base_url, modelo._fallback.base_url])
+            chamadas.clear()
+            await modelo.step([], [])
+            self.assertEqual(chamadas, [modelo._fallback.base_url])
+
+    async def test_partial_stream_switches_host_on_next_attempt(self):
+        settings = Settings(_env_file=None)
+        modelo = HostProvider(settings)
+        chamadas = []
+
+        async def stream(provedor, *_args):
+            chamadas.append(provedor.base_url)
+            if provedor is modelo:
+                yield Piece("parcial")
+                raise TransientProviderError("conexão caiu")
+            yield Piece("resposta completa")
+
+        with patch.object(OpenAICompatibleProvider, "step_streaming", stream):
+            with self.assertRaises(TransientProviderError):
+                _ = [pedaco async for pedaco in modelo.step_streaming([], [])]
+            resposta = [pedaco async for pedaco in modelo.step_streaming([], [])]
+        self.assertEqual([pedaco.text for pedaco in resposta], ["resposta completa"])
+        self.assertEqual(chamadas, [modelo.base_url, modelo._fallback.base_url])
+
+    def test_retry_after_from_host_is_bounded(self):
+        self.assertEqual(_retry_after_segundos("15"), 15.0)
+        self.assertIsNone(_retry_after_segundos("-1"))
+        self.assertIsNone(_retry_after_segundos("999999"))
+        self.assertIsNone(_retry_after_segundos("inválido"))
+
+    async def test_rate_limit_waits_for_provider_and_then_succeeds(self):
+        class RateLimited:
+            chamadas = 0
+
+            async def step_streaming(self, *_args):
+                self.chamadas += 1
+                if self.chamadas == 1:
+                    raise TransientProviderError("HTTP 429", retry_after_s=15)
+                yield StepResult(text="respondeu")
+
+        eventos = []
+
+        async def emitir(nome, dados):
+            eventos.append((nome, dados))
+
+        modelo = RateLimited()
+        with patch("app.agent.loop._esperar", return_value=True) as esperar:
+            resultado = await _com_tentativas(
+                modelo, [], [], emitir, numero=1, tentativas=2, espera_final=0,
+            )
+        self.assertEqual(resultado.text, "respondeu")
+        self.assertEqual(modelo.chamadas, 2)
+        esperar.assert_awaited_once_with(15.0, None)
+        self.assertTrue(any(nome == "aviso" for nome, _ in eventos))
+
     async def test_partial_step_is_buffered_and_retried_after_reconnect(self):
         class FlakyHost:
             tentativas = 0

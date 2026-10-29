@@ -53,6 +53,7 @@ const ESPERA_DESISTIDO: Duration = Duration::from_secs(300);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Papel {
     Host,
+    Reserva,
     Backend,
 }
 
@@ -61,6 +62,7 @@ impl Papel {
     pub fn nome(self) -> &'static str {
         match self {
             Papel::Host => "host",
+            Papel::Reserva => "kodahost de reserva",
             Papel::Backend => "backend",
         }
     }

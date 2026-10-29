@@ -36,7 +36,6 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // ---------------------------------------------------------------- utilidades
@@ -271,8 +270,9 @@ class Navegador {
     // disputa de recurso com outro navegador aberto, perfil recém-criado, antivírus passando
     // no executável. Uma queda dessas derrubava a chamada inteira da IA, que via "o navegador
     // fechou logo depois de subir" e desistia da tarefa. Uma segunda tentativa custa um
-    // segundo e salva a rodada.
+    // alguns segundos e salva a rodada.
     let ultimoErro = null
+    const errosTentativas = []
     this._erroNavegador = []
     for (let tentativa = 1; tentativa <= 2; tentativa++) {
       try {
@@ -286,6 +286,7 @@ class Navegador {
         return
       } catch (erro) {
         ultimoErro = erro
+        errosTentativas.push(erro.message)
         log(`tentativa ${tentativa} falhou: ${erro.message}`)
         await this._limpar()
         await dormir(900)
@@ -294,12 +295,20 @@ class Navegador {
     const pistas = this._erroNavegador.length
       ? `\nO navegador escreveu:\n  ${this._erroNavegador.slice(-5).join('\n  ')}`
       : '\nO navegador não escreveu nada.'
-    throw new Error(`${ultimoErro.message} (tentei duas vezes)${pistas}`)
+    const tentativaAnterior = errosTentativas.length > 1
+      ? `\nA tentativa anterior também falhou: ${errosTentativas[0]}`
+      : ''
+    throw new Error(`${ultimoErro.message} (tentei duas vezes)${tentativaAnterior}${pistas}`)
   }
 
   async _subir(exe, semSandbox) {
-    this.perfil = mkdtempSync(join(tmpdir(), 'koda-dev-browser-'))
-    this.processo = spawn(
+    // O backend do Koda já tem uma pasta de dados gravável. O processo MCP pode
+    // não ter acesso ao TEMP do usuário (EPERM no Windows), mesmo com o servidor
+    // e a interface funcionando. O perfil temporário fica junto dos dados do MCP
+    // e é removido em _limpar ao encerrar a sessão.
+    const perfil = mkdtempSync(join(pastaDeDados(), 'koda-dev-browser-'))
+    this.perfil = perfil
+    const processo = spawn(
       exe,
       [
         // Sem janela: quem mostra a sessão é o painel, por espelho. `KODA_DEV_BROWSER_VISIVEL=1`
@@ -324,8 +333,10 @@ class Navegador {
       // deixa o erro como um tempo esgotado sem explicação.
       { stdio: ['ignore', 'ignore', 'pipe'] },
     )
-    this.processo.stderr?.setEncoding('utf8')
-    this.processo.stderr?.on('data', (pedaco) => {
+    this.processo = processo
+    const falhaDeSpawn = { mensagem: null }
+    processo.stderr?.setEncoding('utf8')
+    processo.stderr?.on('data', (pedaco) => {
       for (const linha of pedaco.split('\n')) {
         const texto = linha.trim()
         if (!texto) continue
@@ -336,14 +347,24 @@ class Navegador {
         if (this._erroNavegador.length > 8) this._erroNavegador.shift()
       }
     })
-    this.processo.on('exit', (codigo) => {
-      log(`navegador saiu com código ${codigo}`)
+    processo.on('error', (erro) => {
+      falhaDeSpawn.mensagem = erro.message
+      log(`falha ao iniciar navegador: ${erro.message}`)
+    })
+    processo.on('exit', (codigo, sinal) => {
+      const detalheCodigo = codigo === null
+        ? 'código desconhecido'
+        : `código ${codigo} (0x${(codigo >>> 0).toString(16).padStart(8, '0')})`
+      log(`navegador saiu com ${detalheCodigo}${sinal ? `, sinal ${sinal}` : ''}`)
+      // Uma tentativa anterior pode terminar durante a próxima. Ela não pode apagar a
+      // referência, o WebSocket nem o estado da instância nova.
+      if (this.processo !== processo) return
       this.processo = null
       this.ws = null
       this._publicar(false)
     })
 
-    this.porta = await this._esperarPorta()
+    this.porta = await this._esperarPorta(processo, perfil, falhaDeSpawn)
     await this._conectar()
     this._ligarEspelho()
   }
@@ -351,31 +372,46 @@ class Navegador {
   /** Desfaz uma tentativa que não deu certo, antes de tentar de novo. */
   async _limpar() {
     this._desligarEspelho()
+    const processo = this.processo
+    const ws = this.ws
+    const perfil = this.perfil
+    this.processo = null
+    this.ws = null
+    this.sessionId = null
+    this.perfil = null
     try {
-      this.processo?.kill()
+      if (processo?.pid && processo.exitCode === null && processo.signalCode === null) {
+        // No Windows, kill() é assíncrono. Esperar a saída evita disputar recursos com a
+        // segunda tentativa; o limite impede uma falha de encerramento de travar a ferramenta.
+        const encerrado = new Promise((resolve) => {
+          const timer = setTimeout(resolve, 1500)
+          processo.once('exit', () => {
+            clearTimeout(timer)
+            resolve()
+          })
+        })
+        processo.kill()
+        await encerrado
+      }
     } catch {
       // já morreu
     }
     try {
-      this.ws?.close()
+      ws?.close()
     } catch {
       // já fechado
     }
-    this.processo = null
-    this.ws = null
-    this.sessionId = null
-    if (this.perfil) {
+    if (perfil) {
       try {
-        rmSync(this.perfil, { recursive: true, force: true })
+        rmSync(perfil, { recursive: true, force: true })
       } catch {
         // perfil travado: o Windows solta depois
       }
-      this.perfil = null
     }
   }
 
-  async _esperarPorta() {
-    const arquivo = join(this.perfil, 'DevToolsActivePort')
+  async _esperarPorta(processo, perfil, falhaDeSpawn) {
+    const arquivo = join(perfil, 'DevToolsActivePort')
     // A primeira subida de um perfil novo é lenta: o Chrome monta o perfil inteiro antes de
     // publicar a porta. Doze segundos não bastaram na primeira tentativa; trinta é folga.
     for (let tentativa = 0; tentativa < 300; tentativa++) {
@@ -383,13 +419,24 @@ class Navegador {
         const primeira = readFileSync(arquivo, 'utf8').split('\n')[0]?.trim()
         if (primeira) return Number(primeira)
       }
-      if (!this.processo) {
-        // O `exit` já rodou: esperar mais seria esperar por um processo que não existe.
-        throw new Error('o navegador fechou logo depois de subir — veja o stderr acima')
+      if (falhaDeSpawn.mensagem) {
+        throw new Error(`não foi possível iniciar o navegador: ${falhaDeSpawn.mensagem}`)
+      }
+      if (processo.exitCode !== null || processo.signalCode !== null) {
+        // O processo local desta tentativa terminou; a referência global pode já pertencer
+        // a uma tentativa mais nova.
+        const codigo = processo.exitCode
+        const detalheCodigo = codigo === null
+          ? (processo.signalCode ? '' : ', código desconhecido')
+          : `, código ${codigo} (0x${(codigo >>> 0).toString(16).padStart(8, '0')})`
+        const detalheSinal = processo.signalCode ? `, sinal ${processo.signalCode}` : ''
+        throw new Error(
+          `o navegador fechou logo depois de subir${detalheCodigo}${detalheSinal} — veja o stderr acima`,
+        )
       }
       await dormir(100)
     }
-    throw new Error(`o navegador não publicou a porta de depuração em 30s (perfil: ${this.perfil})`)
+    throw new Error(`o navegador não publicou a porta de depuração em 30s (perfil: ${perfil})`)
   }
 
   async _conectar() {
@@ -621,7 +668,23 @@ class Navegador {
   async ir(url) {
     this._alvoRolagem = null
     await this._prepararCanvasLegivel()
-    await this.enviar('Page.navigate', { url })
+    try {
+      await this.enviar('Page.navigate', { url })
+    } catch (erro) {
+      // Uma página pesada pode confirmar a navegação no navegador e ainda assim deixar
+      // o comando CDP sem resposta até o prazo. Nesse caso a aba já mudou: devolver erro
+      // faria o agente desistir de uma página que está aberta e pode ser lida.
+      if (!String(erro.message).includes('tempo esgotado em Page.navigate')) throw erro
+      const atual = await this.avaliar('location.href').catch(() => null)
+      let abriu = false
+      try {
+        abriu = Boolean(atual) && new URL(atual).href === new URL(url).href
+      } catch {
+        // URL interna de erro do navegador: preserve a falha original do CDP.
+      }
+      if (!abriu) throw erro
+      log(`Page.navigate demorou a responder, mas a aba abriu ${atual}`)
+    }
     await this._esperarCarga()
     await this._atualizarTitulo()
     return { url: this.url, titulo: this.titulo }
@@ -636,8 +699,8 @@ class Navegador {
    * corpo **vazio** nesse instante. Ler ali devolve "texto visível: (vazio)", e foi exatamente
    * o que aconteceu na primeira versão.
    *
-   * A segunda etapa espera o corpo ganhar conteúdo. Se a página for legitimamente vazia, o teto
-   * de 3s é o preço — pequeno perto de ler uma tela em branco e concluir que não há nada lá.
+   * A segunda etapa espera o corpo ganhar conteúdo. No Vite a compilação inicial pode
+   * continuar depois do readyState, sobretudo quando o projeto tem muitos módulos.
    */
   async _esperarCarga(limiteMs = 15000) {
     const fim = Date.now() + limiteMs
@@ -651,10 +714,9 @@ class Navegador {
       await dormir(150)
     }
 
-    // Seis segundos, e não três: a primeira carga de um servidor de dev (Vite compilando o
-    // grafo de módulos) passa fácil dos três, e a leitura saía vazia por azar de corrida —
-    // intermitente, que é o pior tipo de defeito para se confiar.
-    const tetoConteudo = Date.now() + 6000
+    // O frontend deste projeto pode precisar de mais de seis segundos para compilar a
+    // primeira vez. Sem esperar, `abrir` anunciava sucesso e `ler` via uma tela vazia.
+    const tetoConteudo = Date.now() + 15000
     while (Date.now() < tetoConteudo) {
       try {
         const temConteudo = await this.avaliar(

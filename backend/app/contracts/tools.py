@@ -13,6 +13,10 @@ from typing import Any
 def _def(
     nome: str, descricao: str, props: dict[str, Any], obrigatorios: list[str]
 ) -> dict[str, Any]:
+    # O adaptador Bedrock rejeita inputSchema sem propriedades, mesmo para uma
+    # ferramenta que não recebe argumentos. O campo opcional é ignorado no despacho.
+    if not props:
+        props = {"opcional": {"type": "string", "description": "Opcional; ignorado pela ferramenta."}}
     return {
         "type": "function",
         "function": {

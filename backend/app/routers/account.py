@@ -5,10 +5,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from ..db import Database
+from .. import host_auth
 from ..deps import call, database
 from ..repository import (
     UNSET,
-    clear_conversations,
     get_account,
     reset_account,
     update_account,
@@ -36,9 +36,8 @@ def _patch(db: Database, patch: AccountPatch) -> Account:
 
 
 def _sign_out(db: Database) -> Account:
-    """Sair da conta limpa o que era dela: conversas e vínculos."""
+    """Logout encerra a sessão; histórico não é uma credencial descartável."""
     with db.connect() as conn:
-        clear_conversations(conn)
         return reset_account(conn)
 
 
@@ -54,4 +53,5 @@ async def update(patch: AccountPatch, request: Request) -> Account:
 
 @router.post("/sign-out", response_model=Account)
 async def sign_out(request: Request) -> Account:
+    host_auth.limpar()
     return await call(_sign_out, database(request))

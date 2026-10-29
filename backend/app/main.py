@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import hmac
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import __version__, mcp, seguranca, semente
+from . import __version__, anexos, host_auth, mcp, seguranca, semente
 from .config import Settings, get_settings
 from .db import Database
 from .instalador import Baixador
@@ -35,6 +38,7 @@ from .routers import (
     nuvem,
     projects,
     prompt,
+    provedores,
     skills,
     store,
     usage,
@@ -70,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         seguranca.preparar()
         database = Database(config.database_path)
         database.initialize()
+        await asyncio.to_thread(anexos.reconciliar, config)
         app.state.settings = config
         app.state.db = database
         app.state.provider = build_provider(config)
@@ -113,9 +118,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tarefa: asyncio.Task[None] | None = None
         if config.cloud_check_on_start and servico.cliente.ativo:
             tarefa = asyncio.create_task(servico.verificar())
+        async def reconcile_attachments() -> None:
+            while True:
+                await asyncio.sleep(300)
+                try:
+                    await asyncio.to_thread(anexos.reconciliar, config)
+                except Exception:
+                    # Manter a limpeza viva após falha de disco/banco, com diagnóstico.
+                    logging.getLogger(__name__).exception('attachment_reconciliation_failed')
+        cleanup_task = asyncio.create_task(reconcile_attachments())
         try:
             yield
         finally:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
             maquina.cancelar()
             # Derruba **todo** processo que ficou rodando. Sem isto um `npm run dev` (ou
             # qualquer filho) sobrevivia ao fechamento do Koda, segurando porta e CPU, e
@@ -162,8 +179,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         maliciosa que resolve `evil.com` para `127.0.0.1` chega com `Host: evil.com`. Exigir
         que o `Host` seja local fecha essa porta sem mexer em quem usa o app de verdade.
         """
-        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
-        if host and host not in HOSTS_LOCAIS:
+        authority = request.headers.get("host") or ""
+        try:
+            parsed = urlsplit("//" + authority)
+            host = parsed.hostname
+            port = parsed.port  # valida também portas fora da faixa
+            valid = (bool(authority) and authority == authority.strip()
+                     and not any(c.isspace() for c in authority)
+                     and not parsed.username and not parsed.password
+                     and not parsed.path and not parsed.query and not parsed.fragment
+                     and host in HOSTS_LOCAIS and port != 0)
+        except ValueError:
+            valid = False
+        if not valid:
             return JSONResponse(
                 status_code=403,
                 content={"detail": "o backend do Koda só aceita conexões locais"},
@@ -189,7 +217,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     content={"detail": "token da execução ausente ou inválido"},
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-        return await call_next(request)
+        window = request.headers.get("x-koda-window", "desktop")
+        if not window or len(window) > 128 or not all(c.isalnum() or c in "-_" for c in window):
+            return JSONResponse(status_code=400, content={"detail": "janela inválida"})
+        context = host_auth.capturar(window)
+        # O identificador da janela é roteamento, não uma credencial de conta.
+        # Só o access token já validado permite usar a identidade associada.
+        if context.token and not seguranca.liberada(request.url.path) and not (request.url.path == "/api/host/sessao" and request.method == "POST"):
+            presented = request.headers.get("x-koda-session", "")
+            if not hmac.compare_digest(presented, context.token):
+                return JSONResponse(status_code=401, content={"detail": "sessão da conta ausente ou inválida"})
+        request.state.identity = context
+        binding = host_auth.vincular(context)
+        try:
+            return await call_next(request)
+        finally:
+            host_auth.desvincular(binding)
 
     app.include_router(chat.router, prefix="/api")
     app.include_router(attachments.router, prefix="/api")
@@ -207,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(dev_browser.router, prefix="/api")
     app.include_router(dev_logs.router, prefix="/api")
     app.include_router(prompt.router, prefix="/api")
+    app.include_router(provedores.router, prefix="/api")
 
     @app.get("/api/handshake", tags=["system"])
     async def handshake(nonce: str = "") -> dict[str, str]:

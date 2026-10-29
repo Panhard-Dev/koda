@@ -106,6 +106,7 @@ pub(crate) fn porta_no_ar(porta: u16) -> bool {
 fn porta_de(papel: Papel, acesso: &Acesso) -> u16 {
     match papel {
         Papel::Host => acesso.porta_host(),
+        Papel::Reserva => 21129,
         Papel::Backend => acesso.porta(),
     }
 }
@@ -122,6 +123,7 @@ fn servico_responde(papel: Papel, acesso: &Acesso) -> bool {
     let porta = porta_de(papel, acesso);
     let caminho = match papel {
         Papel::Host => "/v1/models",
+        Papel::Reserva => "/v1/models",
         Papel::Backend => "/api/health",
     };
     let endereco: SocketAddr = format!("127.0.0.1:{porta}").parse().expect("endereço fixo");
@@ -277,6 +279,54 @@ fn achar_host(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// O proxy de reserva tem o próprio estado de contas e não compartilha credenciais com o
+/// `c-host`. Ele é iniciado junto do app, mas só recebe uma chamada quando o primário falha
+/// (a decisão fica no backend, em `HostProvider`).
+fn achar_kodahost(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidatos: Vec<PathBuf> = Vec::new();
+    if let Ok(recursos) = app.path().resource_dir() {
+        candidatos.push(recursos.join("host").join("kodahost1.exe"));
+        candidatos.push(recursos.join("resources").join("host").join("kodahost1.exe"));
+        candidatos.push(recursos.join("kodahost1.exe"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidatos.push(achar_subindo(&cwd, "host/kodahost1.exe").unwrap_or_default());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(pasta) = exe.parent() {
+            candidatos.push(pasta.join("host").join("kodahost1.exe"));
+            candidatos.push(pasta.join("resources").join("host").join("kodahost1.exe"));
+            candidatos.push(achar_subindo(pasta, "host/kodahost1.exe").unwrap_or_default());
+        }
+    }
+    candidatos.into_iter().find(|caminho| caminho.is_file())
+}
+
+fn iniciar_kodahost(servicos: &Servicos, app: &AppHandle) {
+    if servicos.quantos_vivos(Papel::Reserva) > 0 {
+        return;
+    }
+    let Some(proxy) = achar_kodahost(app) else {
+        log("kodahost1.exe ausente; failover por proxy indisponível");
+        return;
+    };
+    let mut comando = Command::new(&proxy);
+    // O proxy guarda suas contas ao lado do executável. Não levamos contas da máquina de
+    // desenvolvimento para o instalador; cada instalação autoriza as próprias contas.
+    if let Some(pasta) = proxy.parent() {
+        comando.current_dir(pasta);
+    }
+    comando.stdout(Stdio::null()).stderr(Stdio::null());
+    match spawn_oculto(&mut comando) {
+        Ok(child) => {
+            log(&format!("kodahost iniciado como reserva (pid {})", child.id()));
+            // Entrar no mesmo job garante que o proxy não fica órfão ao fechar o Koda.
+            servicos.guardar(Papel::Reserva, child);
+        }
+        Err(erro) => log(&format!("não consegui iniciar kodahost de reserva: {erro}")),
+    }
+}
+
 /// O erro de subida foi o **antivírus** bloqueando o arquivo?
 ///
 /// `225` é `ERROR_VIRUS_INFECTED` e `1260` é "bloqueado por política": nos dois casos o
@@ -300,6 +350,23 @@ fn aviso_de_antivirus(caminho: &Path) -> String {
          → Exclusões → pasta) e reabra o app.",
         caminho.display()
     )
+}
+
+/// Onde a senha dinâmica do dia mora nesta máquina — o JSON que o painel
+/// entrega e o `c-host` lê (`SERVE_LIZ_DYNAMIC_KEY_FILE`).
+///
+/// Os dois lados precisam concordar no caminho: quem **escreve** é o backend
+/// (ele busca a senha no painel com a sessão de quem entrou) e quem **lê** é o
+/// host. Os dois sobem por este launcher, então é ele que fixa o lugar — na
+/// pasta de dados do app, ao lado do banco. `KODA_DYNAMIC_KEY_FILE` no
+/// ambiente manda, como em todos os outros endereços daqui.
+fn caminho_da_senha_dinamica(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(do_ambiente) = std::env::var("KODA_DYNAMIC_KEY_FILE") {
+        if !do_ambiente.trim().is_empty() {
+            return Some(PathBuf::from(do_ambiente));
+        }
+    }
+    pasta_de_dados(app).map(|pasta| pasta.join("koda-host-dinamica.json"))
 }
 
 /// Sobe o host. `false` = a porta não respondeu (o vigia tenta de novo).
@@ -374,13 +441,28 @@ fn iniciar_host(servicos: &Servicos, app: &AppHandle) -> bool {
     comando.env("SERVE_LIZ_AUTH_URL", painel);
     // Sem a chave da config selada o host não sobe — ver `CHAVE_DA_CONFIG_SELADA`.
     comando.env("SERVE_LIZ_BLOB_KEY", CHAVE_DA_CONFIG_SELADA);
+    // A senha dinâmica do dia: o painel entrega um JSON com uma senha que gira
+    // à meia-noite UTC, o backend grava neste arquivo e o host autoriza quem a
+    // apresentar — a segunda forma de entrar, que não depende de o painel
+    // estar no ar. O host relê o arquivo quando ele muda, então a rodada
+    // diária não reinicia nada. O arquivo pode não existir ainda (o backend
+    // escreve depois de subir): para o host, é seguir sem ela.
+    if let Some(caminho) = caminho_da_senha_dinamica(app) {
+        log(&format!("host vai aceitar também a senha dinâmica de {}", caminho.display()));
+        comando.env("SERVE_LIZ_DYNAMIC_KEY_FILE", &caminho);
+    }
     comando.stdout(Stdio::null()).stderr(Stdio::null());
 
     match spawn_oculto(&mut comando) {
         Ok(child) => {
             let pid = child.id();
             servicos.guardar(Papel::Host, child);
-            if esperar_porta(porta, 15) {
+            // 30 s, e não 15: o host decifra a config selada (PBKDF2 de 200 mil
+            // voltas + dois AES-GCM) antes de abrir a porta. Medido em máquina
+            // carregada, esse boot já passou de 15 s — e o sintoma era o host
+            // sendo declarado morto e os modelos oficiais ficando de fora sem
+            // motivo. O backend já espera 40 pelo mesmo motivo.
+            if esperar_porta(porta, 30) {
                 log(&format!("host no ar em 127.0.0.1:{porta} (pid {pid})"));
                 true
             } else {
@@ -541,6 +623,18 @@ fn iniciar_backend(servicos: &Servicos, app: &AppHandle) -> bool {
             format!("http://127.0.0.1:{}/v1", acesso.porta_host()),
         );
     }
+    // O kodahost usa sua própria porta fixa e suas próprias contas. Só definimos o padrão:
+    // quem opera outro endereço pode manter `KODA_HOST_FALLBACK_URL` no ambiente.
+    if std::env::var("KODA_HOST_FALLBACK_URL").is_err() {
+        comando.env("KODA_HOST_FALLBACK_URL", "http://127.0.0.1:21129/v1");
+    }
+
+    // Onde a senha dinâmica do dia mora: o backend escreve o JSON que o painel
+    // entrega (com a sessão de quem entrou), e o host lê o mesmo caminho — ver
+    // `caminho_da_senha_dinamica` e `iniciar_host`.
+    if let Some(caminho) = caminho_da_senha_dinamica(app) {
+        comando.env("KODA_DYNAMIC_KEY_FILE", &caminho);
+    }
 
     // A saída do backend vai para o arquivo (ver `log_do_backend`): é por onde se descobre,
     // na máquina de quem instalou, por que ele não subiu.
@@ -692,6 +786,10 @@ fn conferir_python(python: &Path) -> bool {
 fn subir(servicos: &Servicos, app: &AppHandle, papel: Papel) -> bool {
     match papel {
         Papel::Host => iniciar_host(servicos, app),
+        Papel::Reserva => {
+            iniciar_kodahost(servicos, app);
+            servicos.quantos_vivos(Papel::Reserva) > 0
+        }
         Papel::Backend => iniciar_backend(servicos, app),
     }
 }
@@ -707,6 +805,14 @@ fn vigiar(app: &AppHandle, servicos: &Servicos) {
     let acesso = app.state::<Acesso>();
     let mut primeira = true;
     loop {
+        // A reserva é um processo independente: a queda do principal não pode criar uma
+        // segunda cópia, e a queda só da reserva também precisa ser recuperada.
+        let reserva_viva = servicos.quantos_vivos(Papel::Reserva) > 0;
+        if reserva_viva {
+            servicos.anotar_ok(Papel::Reserva);
+        } else if primeira || servicos.pode_subir(Papel::Reserva) {
+            iniciar_kodahost(servicos, app);
+        }
         for papel in Papel::todas() {
             if servicos.parando() {
                 log("vigia encerrado com o app");
