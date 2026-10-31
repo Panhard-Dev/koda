@@ -1,5 +1,5 @@
 {
-  "_nota": "Fluxos de login por provedor. As constantes (client id, endpoints, escopos) são as que o 9router usa nesta máquina — extraídas de %APPDATA%/npm/node_modules/9router/app/.next-cli-build — e as do Google batem com o magpie (internal/provider/google.go). Nenhum segredo real aqui: são clientes públicos de app instalado, os mesmos que os CLIs oficiais carregam.",
+  "_nota": "Parâmetros e identificadores públicos de login dos provedores.",
   "anthropic": {
     "tipo": "pkce",
     "authorize": "https://claude.ai/oauth/authorize",

@@ -30,7 +30,7 @@ import DiagnosticoLocal from './DiagnosticoLocal'
 import type { Conta as ContaKoda, PlanoDaConta } from '../api/cloud'
 import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
 import { LOGO_DO_PROVEDOR } from '../logos-provedores'
-import provedores9router from '../../backend/app/provedores_9router.json'
+import catalogoProvedores from '../../backend/app/provedores_koda.json'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
 import { WindowControls } from './WindowControls'
@@ -200,14 +200,14 @@ const SECTIONS: {
   },
 ]
 
-/** O mesmo manifesto do backend, gerado do registry e dos fluxos do 9router. */
+/** O mesmo catálogo de provedores utilizado pelo backend. */
 const PROVEDORES: {
   id: string
   nome: string
   sigla: string
   cli: string
   logo?: string
-}[] = provedores9router.provedores.map((item) => ({
+}[] = catalogoProvedores.provedores.map((item) => ({
   id: item.id,
   nome: item.nome,
   sigla: item.sigla,

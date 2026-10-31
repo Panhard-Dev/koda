@@ -12,7 +12,6 @@ import zcodeLogo from './assets/provedores/zcode.png'
 import xiaomiLogo from './assets/provedores/xiaomi.svg'
 import clineLogo from './assets/provedores/cline.svg'
 import codebuddyLogo from './assets/provedores/codebuddy.svg'
-import deepseekLogo from './assets/provedores/deepseek.svg'
 import geminiLogo from './assets/provedores/gemini.svg'
 import gitlabLogo from './assets/provedores/gitlab.svg'
 import iflowLogo from './assets/provedores/iflow.svg'
@@ -21,11 +20,8 @@ import kilocodeLogo from './assets/provedores/kilocode.svg'
 import kimiLogo from './assets/provedores/kimi.svg'
 import minimaxLogo from './assets/provedores/minimax.svg'
 import museLogo from './assets/provedores/muse.svg'
-import museWebLogo from './assets/provedores/muse-web.svg'
 import nousLogo from './assets/provedores/nous.svg'
-import perplexityLogo from './assets/provedores/perplexity.svg'
 import traeLogo from './assets/provedores/trae.svg'
-import ucLogo from './assets/provedores/uc.svg'
 import windsurfLogo from './assets/provedores/windsurf.svg'
 import zedLogo from './assets/provedores/zed.svg'
 
@@ -54,17 +50,13 @@ export const LOGO_DO_PROVEDOR: Record<string, string> = {
   'xiaomi-mimo': xiaomiLogo,
 
   antigravity: googleLogo,
-  'chatgpt-web': openaiLogo,
   cline: clineLogo,
   clinepass: clineLogo,
   'codebuddy-intl': codebuddyLogo,
   'codebuddy-cn': codebuddyLogo,
-  'deepseek-web': deepseekLogo,
   'gemini-cli': geminiLogo,
-  'gemini-web': geminiLogo,
   gitlab: gitlabLogo,
   'grok-cli': xaiLogo,
-  'grok-web': xaiLogo,
   iflow: iflowLogo,
   kilocode: kilocodeLogo,
   kimchi: kimchiLogo,
@@ -72,12 +64,9 @@ export const LOGO_DO_PROVEDOR: Record<string, string> = {
   'minimax-code': minimaxLogo,
   'minimax-code-global': minimaxLogo,
   muse: museLogo,
-  'muse-web': museWebLogo,
   nous: nousLogo,
-  'perplexity-web': perplexityLogo,
   'qoder-cn': qoderLogo,
   trae: traeLogo,
-  'uc-web': ucLogo,
   windsurf: windsurfLogo,
   glm: zcodeLogo,
   zed: zedLogo,
