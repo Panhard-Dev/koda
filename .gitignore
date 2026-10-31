@@ -60,3 +60,17 @@ err.txt
 *.njsproj
 *.sln
 *.sw?
+
+# Testes mantidos somente localmente
+/backend/tests/
+/tests/
+**/__tests__/
+**/testes/
+**/test_*.py
+**/*_test.py
+**/*.test.*
+**/*.spec.*
+/scripts/_teste*
+/scripts/testar-*
+/scripts/smoke-packaged-backend.py
+/pytest.ini
