@@ -86,6 +86,7 @@ import {
   newProject,
   releaseProject,
   saveAgent,
+  saldoDoProvedor,
   setPermissionMode as salvarModoPermissao,
   statusDoDownload,
   streamChat,
@@ -103,6 +104,7 @@ import type {
   ApiMessage,
   ApiMcp,
   ApiProject,
+  ApiSaldoDoProvedor,
   ApiSkill,
   ApiTodo,
   ApiUsage,
@@ -128,6 +130,7 @@ import {
 
 /** Uma janela de uso já com as moedas contadas — o que a tela de Uso desenha. */
 type ResumoDaJanela = { tempoMs: number; creditos: number }
+type EstadoDoSaldoDoProvedor = ApiSaldoDoProvedor | 'carregando'
 
 /**
  * A janela que o servidor mandou, com os tokens virados em moedas.
@@ -1268,6 +1271,16 @@ function App() {
    * pode ficar batendo no backend a cada abertura.
    */
   const [gruposLogados, setGruposLogados] = useState<ReturnType<typeof modelMenu>>([])
+  /**
+   * Cota ou créditos da conta externa que está selecionada.
+   *
+   * O número do Koda continua sendo o do plano local. Este retrato é separado de propósito:
+   * trocar de provedor não pode transformar horas internas em créditos externos, nem o
+   * contrário. `carregando` existe para a aba nunca parecer cheia antes da resposta.
+   */
+  const [saldosDosProvedores, setSaldosDosProvedores] = useState<
+    Record<string, EstadoDoSaldoDoProvedor>
+  >({})
   useEffect(() => {
     // `backend` entra na dependência de propósito: no arranque a sessão fica «dentro» antes
     // de o serviço local responder, e uma consulta que falha ali deixava o menu sem os
@@ -1796,6 +1809,83 @@ function App() {
     const disponiveis = [...new Set([...doHost, ...dosProvedores])]
     return disponiveis.includes(model) ? model : (disponiveis[0] ?? '')
   }, [catalogoDoMenu, modelosVisiveis, modelosForaDoMenu, gruposLogados, model])
+
+  const provedorAtivoId = useMemo(() => {
+    if (!modeloAtivo.startsWith('provedor:')) return null
+    const [, identificador] = modeloAtivo.split(':', 3)
+    return identificador || null
+  }, [modeloAtivo])
+
+  const provedorAtivo = useMemo(() => {
+    if (!provedorAtivoId) return null
+    const grupo = gruposLogados.find((item) => item.value === `provedor-${provedorAtivoId}`)
+    const nome = typeof grupo?.label === 'string' ? grupo.label : provedorAtivoId
+    return {
+      id: provedorAtivoId,
+      nome,
+      logo: LOGO_DO_PROVEDOR[provedorAtivoId] ?? null,
+      saldo: saldosDosProvedores[provedorAtivoId] ?? 'carregando',
+    }
+  }, [provedorAtivoId, gruposLogados, saldosDosProvedores])
+
+  /**
+   * Atualiza o saldo do provedor escolhido e preserva o último valor durante uma falha
+   * passageira. O intervalo é lento de propósito: a consulta é para orientar a escolha do
+   * modelo, e não para transformar a tela em um monitor de rede.
+   */
+  useEffect(() => {
+    if (!provedorAtivoId) return
+    let cancelado = false
+    let consultando = false
+
+    const consultar = async (primeira: boolean) => {
+      if (consultando) return
+      consultando = true
+      if (primeira) {
+        setSaldosDosProvedores((atual) =>
+          atual[provedorAtivoId]
+            ? atual
+            : { ...atual, [provedorAtivoId]: 'carregando' },
+        )
+      }
+      try {
+        const saldo = await saldoDoProvedor(provedorAtivoId)
+        if (!cancelado) {
+          setSaldosDosProvedores((atual) => ({ ...atual, [provedorAtivoId]: saldo }))
+        }
+      } catch {
+        if (!cancelado) {
+          setSaldosDosProvedores((atual) =>
+            atual[provedorAtivoId] && atual[provedorAtivoId] !== 'carregando'
+              ? atual
+              : {
+                  ...atual,
+                  [provedorAtivoId]: {
+                    tipo: 'indisponivel',
+                    motivo: 'Não foi possível consultar a cota agora',
+                  },
+                },
+          )
+        }
+      } finally {
+        consultando = false
+      }
+    }
+
+    void consultar(true)
+    const timer = window.setInterval(() => void consultar(false), 60_000)
+    const aoVoltar = () => {
+      if (document.visibilityState === 'visible') void consultar(false)
+    }
+    document.addEventListener('visibilitychange', aoVoltar)
+    window.addEventListener('focus', aoVoltar)
+    return () => {
+      cancelado = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', aoVoltar)
+      window.removeEventListener('focus', aoVoltar)
+    }
+  }, [provedorAtivoId])
 
   /**
    * Um modelo bloqueado não volta pela porta de trás.
@@ -3439,6 +3529,7 @@ function App() {
               contextoPorModelo={contextoPorModelo}
               contextoJanela={janelaDoContexto}
               moedas={saldoDeMoedas}
+              provedorAtivo={provedorAtivo}
               agentes={agents}
               skills={skills}
               mcps={mcps}

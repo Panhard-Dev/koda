@@ -10,12 +10,14 @@ O catálogo de modelos fica em `provedores_koda.json`; o login fica em `oauth_lo
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -203,6 +205,430 @@ def _estado(provedor: dict[str, Any], settings: Settings | None) -> dict[str, An
 
 def listar(settings: Settings | None = None) -> list[dict[str, Any]]:
     return [_estado(provedor, settings) for provedor in PROVEDORES]
+
+
+def _numero(valor: Any) -> float | None:
+    if isinstance(valor, bool) or valor is None:
+        return None
+    try:
+        numero = float(str(valor).strip().removesuffix("%"))
+    except (TypeError, ValueError):
+        return None
+    return numero if numero == numero and abs(numero) != float("inf") else None
+
+
+def _percentual(valor: Any, *, consumido: bool = False) -> float | None:
+    numero = _numero(valor)
+    if numero is None:
+        return None
+    if 0 <= numero <= 1:
+        numero *= 100
+    if not 0 <= numero <= 100:
+        return None
+    return 100 - numero if consumido else numero
+
+
+def _chave_normalizada(valor: Any) -> str:
+    return "".join(caractere for caractere in str(valor).lower() if caractere.isalnum())
+
+
+_CHAVES_RESTANTES = {
+    "percentremaining", "remainingpercent", "remainingpercentage", "percentageleft",
+    "percentleft", "leftpercent", "remainingfraction", "remainingratio",
+    "availablepercent", "percentavailable", "availablefraction", "availableratio",
+}
+_CHAVES_CONSUMIDAS = {
+    "usedpercent", "percentused", "usedpercentage", "percentageused",
+    "usagepercent", "percentusage", "utilization", "utilizationpercent",
+    "consumedpercent", "percentconsumed", "usagefraction", "usedfraction",
+}
+_CHAVES_CREDITOS = {
+    "balance", "creditbalance", "creditsbalance", "availablecredits",
+    "remainingcredits", "creditremaining", "creditsremaining", "tokenbalance",
+}
+
+
+def _objetos(valor: Any):
+    if isinstance(valor, dict):
+        yield valor
+        for item in valor.values():
+            yield from _objetos(item)
+    elif isinstance(valor, list):
+        for item in valor:
+            yield from _objetos(item)
+
+
+def _percentual_fornecido(dados: Any) -> float | None:
+    """Lê primeiro a fração restante; ``used_percent`` vira 100 - usado."""
+    for objeto in _objetos(dados):
+        for chave, valor in objeto.items():
+            if _chave_normalizada(chave) in _CHAVES_RESTANTES:
+                percentual = _percentual(valor)
+                if percentual is not None:
+                    return percentual
+    for objeto in _objetos(dados):
+        for chave, valor in objeto.items():
+            if _chave_normalizada(chave) in _CHAVES_CONSUMIDAS:
+                percentual = _percentual(valor, consumido=True)
+                if percentual is not None:
+                    return percentual
+
+    # Alguns provedores mandam apenas contagens. Nesse caso, a porcentagem é calculada
+    # localmente a partir do par restante/total, sem inventar um teto quando ele não veio.
+    for objeto in _objetos(dados):
+        restante = next(
+            (
+                _numero(valor)
+                for chave, valor in objeto.items()
+                if _chave_normalizada(chave) in {
+                    "remaining", "available", "left", "remain", "remainingcount",
+                }
+            ),
+            None,
+        )
+        total = next(
+            (
+                _numero(valor)
+                for chave, valor in objeto.items()
+                if _chave_normalizada(chave) in {
+                    "total", "limit", "quota", "entitlement", "max", "maximum",
+                }
+            ),
+            None,
+        )
+        if restante is not None and total is not None and total > 0 and 0 <= restante <= total:
+            return 100 * restante / total
+    return None
+
+
+def _creditos_fornecidos(dados: Any) -> float | None:
+    for objeto in _objetos(dados):
+        for chave, valor in objeto.items():
+            normalizada = _chave_normalizada(chave)
+            if normalizada in _CHAVES_CREDITOS:
+                numero = _numero(valor)
+                if numero is not None and 0 <= numero < 1e12:
+                    return numero
+        for chave, valor in objeto.items():
+            normalizada = _chave_normalizada(chave)
+            if normalizada in {"credits", "credit", "tokens"}:
+                numero = _numero(valor)
+                if numero is not None and 0 <= numero < 1e12:
+                    return numero
+    return None
+
+
+def _ilimitado(dados: Any) -> bool:
+    for objeto in _objetos(dados):
+        for chave, valor in objeto.items():
+            if "unlimited" in _chave_normalizada(chave) and valor is True:
+                return True
+    return False
+
+
+def _kiro_machine_id(conta: dict[str, Any]) -> str:
+    especificos = conta.get("specific") or {}
+    configurado = str(especificos.get("machineId") or "").strip()
+    if len(configurado) == 64 and all(
+        caractere in "0123456789abcdefABCDEF" for caractere in configurado
+    ):
+        return configurado
+
+    if especificos.get("authMethod") == "api_key":
+        material = str(especificos.get("apiKey") or "").strip()
+        prefixo = "KiroAPIKey/"
+    else:
+        material = str(conta.get("refresh") or conta.get("access") or "").strip()
+        prefixo = "KotlinNativeAPI/"
+    return hashlib.sha256(f"{prefixo}{material}".encode()).hexdigest()
+
+
+def _cabecalhos_do_saldo(identificador: str, conta: dict[str, Any]) -> dict[str, str]:
+    especificos = conta.get("specific") or {}
+    token = str(especificos.get("apiKey") or conta.get("access") or "").strip()
+    if identificador == "cursor" and "::" in token:
+        token = token.split("::", 1)[1]
+    if identificador == "zed":
+        usuario = str(especificos.get("userId") or "")
+        cabecalhos = {
+            "authorization": f"{usuario} {token}",
+            "accept": "application/json",
+            "user-agent": "Koda/0.8.0",
+        }
+        if especificos.get("systemId"):
+            cabecalhos["x-zed-system-id"] = str(especificos["systemId"])
+        return cabecalhos
+
+    cabecalhos = {"authorization": f"Bearer {token}", "accept": "application/json"}
+    if identificador == "openai":
+        claims = oauth_login._claims(conta.get("id_token"))  # noqa: SLF001
+        account_id = (claims.get("https://api.openai.com/auth") or {}).get(
+            "chatgpt_account_id"
+        )
+        if account_id:
+            cabecalhos["chatgpt-account-id"] = str(account_id)
+    elif identificador == "anthropic":
+        cabecalhos["anthropic-version"] = "2023-06-01"
+        cabecalhos["anthropic-beta"] = "oauth-2025-04-20"
+        cabecalhos["user-agent"] = "claude-cli/2.1.0"
+    elif identificador == "github":
+        cabecalhos["x-github-api-version"] = "2022-11-28"
+        cabecalhos["user-agent"] = "GitHubCopilotChat/0.26.7"
+    elif identificador == "grok-cli":
+        cabecalhos.update({
+            "user-agent": "grok-cli/1.0.0",
+            "x-grok-client-identifier": "grok-cli",
+            "x-grok-client-version": "1.0.0",
+        })
+    elif identificador == "kimi":
+        cabecalhos.update(koda_headers.kimi(str(especificos.get("deviceId") or "") or None))
+    elif identificador == "kiro":
+        maquina = _kiro_machine_id(conta)
+        cabecalhos.update({
+            "user-agent": (
+                "aws-sdk-js/1.0.0 ua/2.1 os/windows lang/js "
+                f"api/codewhispererruntime#1.0.0 m/N,E KiroIDE-0.9.2-{maquina}"
+            ),
+            "x-amz-user-agent": f"aws-sdk-js/1.0.0 KiroIDE-0.9.2-{maquina}",
+            "amz-sdk-invocation-id": str(uuid.uuid4()),
+            "amz-sdk-request": "attempt=1; max=1",
+        })
+        if especificos.get("authMethod") == "api_key":
+            cabecalhos["TokenType"] = "API_KEY"
+    elif identificador in {"codebuddy-intl", "codebuddy-cn"}:
+        cabecalhos = koda_headers.codebuddy(conta, identificador == "codebuddy-intl")
+        cabecalhos["accept"] = "application/json"
+    elif identificador == "glm":
+        cabecalhos = koda_headers.glm(conta)
+        cabecalhos["accept"] = "application/json"
+    return cabecalhos
+
+
+def _pedidos_do_saldo(
+    identificador: str, conta: dict[str, Any], cabecalhos: dict[str, str]
+) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """Endpoints de cota fornecidos pela própria conta, sem leitura de CLI ou do PC."""
+    especificos = conta.get("specific") or {}
+    if identificador == "openai":
+        return [("GET", "https://chatgpt.com/backend-api/wham/usage", None)]
+    if identificador == "anthropic":
+        return [("GET", "https://api.anthropic.com/api/oauth/usage", None)]
+    if identificador == "github":
+        return [("GET", "https://api.github.com/copilot_internal/user", None)]
+    if identificador == "qoder":
+        return [("GET", "https://openapi.qoder.sh/api/v2/quota/usage", None)]
+    if identificador == "qoder-cn":
+        return [("GET", "https://openapi.qoder.com.cn/api/v2/quota/usage", None)]
+    if identificador == "glm":
+        return [("GET", "https://api.z.ai/api/monitor/usage/quota/limit", None)]
+    if identificador == "grok-cli":
+        return [(
+            "GET",
+            "https://cli-chat-proxy.grok.com/billing?format=credits",
+            None,
+        )]
+    if identificador == "kimi":
+        return [("GET", "https://api.kimi.com/coding/v1/usages", None)]
+    if identificador == "cursor":
+        return [
+            ("GET", "https://api2.cursor.sh/auth/usage", None),
+            (
+                "POST",
+                "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+                {},
+            ),
+        ]
+    if identificador == "gemini-cli":
+        corpo: dict[str, Any] = {}
+        if especificos.get("projectId"):
+            corpo["project"] = str(especificos["projectId"])
+        return [(
+            "POST",
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota",
+            corpo,
+        )]
+    if identificador == "antigravity":
+        corpo = {}
+        if especificos.get("projectId"):
+            corpo["project"] = str(especificos["projectId"])
+        return [(
+            "POST",
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            corpo,
+        )]
+    if identificador == "kiro":
+        regiao_sso = str(especificos.get("region") or "us-east-1").lower()
+        regioes = (
+            ["eu-central-1", "us-east-1"]
+            if regiao_sso == "eu-central-1" or regiao_sso.startswith("eu-")
+            else ["us-east-1", "eu-central-1"]
+        )
+        consulta = {
+            "origin": "AI_EDITOR",
+            "resourceType": "AGENTIC_REQUEST",
+            "isEmailRequired": "true",
+        }
+        profile_arn = str(especificos.get("profileArn") or "").strip()
+        if profile_arn.startswith("arn:"):
+            consulta["profileArn"] = profile_arn
+        return [
+            (
+                "GET",
+                f"https://q.{regiao}.amazonaws.com/getUsageLimits?{urlencode(consulta)}",
+                None,
+            )
+            for regiao in regioes
+        ]
+    if identificador == "codebuddy-cn":
+        return [(
+            "POST",
+            "https://copilot.tencent.com/v2/billing/meter/get-user-resource",
+            {},
+        )]
+    if identificador == "codebuddy-intl":
+        return [(
+            "POST",
+            "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
+            {},
+        )]
+    if identificador == "zed":
+        return [("GET", "https://cloud.zed.dev/client/users/me", None)]
+    return []
+
+
+def _numero_com_precisao(objeto: dict[str, Any], campo: str) -> float | None:
+    preciso = _numero(objeto.get(f"{campo}WithPrecision"))
+    return preciso if preciso is not None else _numero(objeto.get(campo))
+
+
+def _percentual_kiro(dados: Any) -> float | None:
+    if not isinstance(dados, dict):
+        return None
+    detalhes = dados.get("usageBreakdownList")
+    if not isinstance(detalhes, list) or not detalhes or not isinstance(detalhes[0], dict):
+        return None
+
+    detalhe = detalhes[0]
+    limite = _numero_com_precisao(detalhe, "usageLimit")
+    usado = _numero_com_precisao(detalhe, "currentUsage")
+    if limite is None or usado is None:
+        return None
+
+    trial = detalhe.get("freeTrialInfo")
+    if (
+        isinstance(trial, dict)
+        and str(trial.get("freeTrialStatus") or "").upper() == "ACTIVE"
+    ):
+        limite_trial = _numero_com_precisao(trial, "usageLimit")
+        usado_trial = _numero_com_precisao(trial, "currentUsage")
+        if limite_trial is not None and usado_trial is not None:
+            limite += limite_trial
+            usado += usado_trial
+
+    bonus = detalhe.get("bonuses")
+    if isinstance(bonus, list):
+        for item in bonus:
+            if not isinstance(item, dict) or str(item.get("status") or "").upper() != "ACTIVE":
+                continue
+            limite_bonus = _numero(item.get("usageLimit"))
+            usado_bonus = _numero(item.get("currentUsage"))
+            if limite_bonus is not None and usado_bonus is not None:
+                limite += limite_bonus
+                usado += usado_bonus
+
+    if limite <= 0:
+        return None
+    return max(0.0, min(100.0, 100 * (limite - usado) / limite))
+
+
+def _resultado_do_saldo(identificador: str, dados: Any) -> dict[str, Any] | None:
+    if identificador == "kiro":
+        percentual_kiro = _percentual_kiro(dados)
+        if percentual_kiro is None:
+            return None
+        return {
+            "tipo": "percentual",
+            "valor": round(percentual_kiro, 2),
+            "motivo": "Limite restante informado pelo Kiro",
+            "atualizadoEm": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    if identificador == "zed":
+        # `limit.limited = 0` não significa zero usado nem cota ilimitada. Até o Zed
+        # documentar o significado desse campo, não há um percentual confiável a exibir.
+        return None
+    percentual = _percentual_fornecido(dados)
+    if percentual is not None:
+        return {
+            "tipo": "percentual",
+            "valor": round(percentual, 2),
+            "motivo": "Limite restante informado pelo provedor",
+            "atualizadoEm": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    creditos = _creditos_fornecidos(dados)
+    if creditos is not None:
+        return {
+            "tipo": "creditos",
+            "valor": creditos,
+            "motivo": "Saldo de créditos informado pelo provedor",
+            "atualizadoEm": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    if _ilimitado(dados):
+        return {
+            "tipo": "percentual",
+            "valor": 100,
+            "motivo": "O provedor informou uso ilimitado para esta conta",
+            "atualizadoEm": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    return None
+
+
+def saldo_do_provedor(identificador: str, settings: Settings) -> dict[str, Any]:
+    """Consulta apenas valores fornecidos pela conta.
+
+    Ausência nunca vira 100%: mostrar conta cheia quando o fornecedor não respondeu faria
+    a pessoa planejar trabalho com uma cota que ninguém confirmou.
+    """
+    if identificador not in POR_ID:
+        return {"tipo": "indisponivel", "motivo": "Provedor desconhecido"}
+    conta = oauth_login.garantir(settings, identificador)
+    if not conta or not conta.get("access"):
+        return {"tipo": "indisponivel", "motivo": "Conta não conectada"}
+
+    cabecalhos = _cabecalhos_do_saldo(identificador, conta)
+    pedidos = _pedidos_do_saldo(identificador, conta, cabecalhos)
+    if not pedidos:
+        return {
+            "tipo": "indisponivel",
+            "motivo": "Este provedor ainda não expõe cota ou créditos à conta",
+        }
+
+    ultimo_erro = "O provedor não informou o saldo"
+    try:
+        with httpx.Client(timeout=10, follow_redirects=False) as cliente:
+            for metodo, url, corpo in pedidos:
+                resposta = cliente.request(metodo, url, headers=cabecalhos, json=corpo)
+                if resposta.status_code in {401, 403, 404, 405}:
+                    ultimo_erro = (
+                        f"O provedor recusou a consulta de cota (HTTP {resposta.status_code})"
+                    )
+                    continue
+                if resposta.status_code >= 400:
+                    ultimo_erro = (
+                        f"Não foi possível consultar a cota (HTTP {resposta.status_code})"
+                    )
+                    continue
+                try:
+                    dados = resposta.json()
+                except ValueError:
+                    ultimo_erro = "O provedor devolveu uma resposta inválida"
+                    continue
+                resultado = _resultado_do_saldo(identificador, dados)
+                if resultado is not None:
+                    return resultado
+                ultimo_erro = "O provedor não informou cota nem créditos"
+    except httpx.HTTPError:
+        return {"tipo": "indisponivel", "motivo": "Não foi possível consultar o limite da conta"}
+    return {"tipo": "indisponivel", "motivo": ultimo_erro}
 
 
 def testar(identificador: str, settings: Settings | None = None) -> dict[str, Any]:
