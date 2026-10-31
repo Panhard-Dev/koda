@@ -5,27 +5,27 @@ ali: **nada de ler credencial do PC**. Nada de `~/.codex`, `~/.gemini`, `~/.qode
 banco de IDE. Quem entra é ele, no site do provedor, e o que fica guardado é o token que o
 próprio Koda recebeu de volta — em `data/provedores/<id>.json` (0600).
 
-O catálogo de modelos por provedor está em `provedores_catalogo.json` (extraído do 9router,
-que é a referência de lista por provedor); o fluxo de login está em `oauth_login.py`.
+O catálogo de modelos fica em `provedores_koda.json`; o login fica em `oauth_login.py`.
 """
 
 from __future__ import annotations
 
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from . import oauth_login
+from . import koda_headers, oauth_login
 from .config import Settings
 
 #: Os provedores, um por **fornecedor** — sem repetir marca. Antes havia dois Google (Gemini
 #: CLI e Antigravity) e dois da OpenAI (Codex e ChatGPT); para quem olha a lista, era o mesmo
 #: nome duas vezes, e ele reclamou com razão.
-_manifesto = json.loads(Path(__file__).with_name("provedores_9router.json").read_text(encoding="utf-8"))
+_manifesto = json.loads(Path(__file__).with_name("provedores_koda.json").read_text(encoding="utf-8"))
 PROVEDORES: list[dict[str, Any]] = _manifesto["provedores"]
 
 POR_ID = {item["id"]: item for item in PROVEDORES}
@@ -135,6 +135,7 @@ def _carregar_catalogo() -> dict[str, list[dict[str, str]]]:
 
 
 CATALOGO = _carregar_catalogo()
+CATALOGO["gitlab"] = [{"id": "gitlab-duo", "nome": "GitLab Duo (padrão da conta)"}]
 
 #: Os modelos que cada conta logada publicou na última consulta (id → provedor).
 #:
@@ -348,7 +349,7 @@ def modelos(identificador: str, settings: Settings | None = None) -> dict[str, A
         "modelos": modelos,
         "nomes": {str(item.get("id")): str(item.get("nome")) for item in itens if item.get("id")},
         "esforcos": _esforcos_por_modelo(identificador, modelos),
-        "fonte": "catálogo do 9router",
+        "fonte": "catálogo local",
         "motivo": "",
     }
 
@@ -371,11 +372,27 @@ def _ao_vivo(identificador: str, settings: Settings | None) -> dict[str, Any] | 
         return None
     token = str(dado["access"])
 
-    if identificador == "zed":
-        from . import engine_9router
+    if identificador == "kilocode":
+        try:
+            with httpx.Client(timeout=15) as cliente:
+                resposta = cliente.get("https://api.kilo.ai/api/gateway/models", headers=koda_headers.kilo(dado))
+                resposta.raise_for_status()
+                itens = resposta.json().get("data") or []
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None
+        itens = [item for item in itens if isinstance(item, dict) and item.get("id")]
+        return {"modelos": [str(item["id"]) for item in itens],
+                "nomes": {str(item["id"]): str(item.get("name") or item["id"]) for item in itens},
+                "fonte": "API da conta Kilo", "motivo": ""}
 
-        itens = engine_9router.modelos_ao_vivo(settings, identificador, dado)
-        if itens is None:
+    if identificador == "zed":
+        import asyncio
+        from . import zed_koda
+        from .providers.base import ProviderError
+
+        try:
+            itens = asyncio.run(zed_koda.modelos(dado))
+        except ProviderError:
             return None
         return {"modelos": [str(i["id"]) for i in itens if i.get("id")],
                 "nomes": {str(i["id"]): str(i.get("name") or i["id"])
@@ -465,6 +482,8 @@ def testar_modelo(identificador: str, modelo: str, settings: Settings | None = N
         if conta.get("esgotadaAte") and _ainda_esgotada(conta["esgotadaAte"]):
             tentativas.append(f"{conta.get('conta') or conta['id']}: sem cota até {conta['esgotadaAte'][:10]}")
             continue
+        if identificador in {"antigravity", "gemini-cli", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl", "grok-cli", "kimi", "kiro", "minimax-code", "minimax-code-global", "nous", "xai"}:
+            conta = oauth_login.garantir(settings, identificador, conta["id"]) or conta
         resultado = _chamar_modelo(identificador, conta, modelo, settings)
         if resultado.get("esgotadaAte"):
             oauth_login._marcar(  # noqa: SLF001 — mesmo pacote, e é o único que grava a marca
@@ -532,19 +551,488 @@ def _chamar_modelo(
     if identificador == "openai":
         return _chamar_chatgpt(conta, modelo)
 
-    if settings is None:
-        return {"ok": False, "detalhe": "o serviço local não está pronto"}
-    from . import engine_9router
+    if identificador == "muse":
+        return _chamar_modelo_muse(conta, modelo)
 
-    resposta = engine_9router.chamar(
-        settings, identificador, conta, modelo,
-        [{"role": "user", "content": "responda apenas: ok"}], max_tokens=24,
-    )
-    if not resposta["ok"]:
-        return {"ok": False, "detalhe": resposta["detalhe"]}
-    escolha = (resposta["dados"].get("choices") or [{}])[0]
-    texto = (escolha.get("message") or {}).get("content") or ""
+    if identificador in {"cline", "clinepass", "github", "glm", "iflow", "kilocode", "kimchi", "kimi", "nous", "xai"}:
+        return _chamar_modelo_compativel(identificador, conta, modelo)
+    if identificador in {"minimax-code", "minimax-code-global"}:
+        return _chamar_modelo_minimax(identificador, conta, modelo)
+    if identificador == "grok-cli":
+        return _chamar_modelo_grok(conta, modelo)
+    if identificador in {"codebuddy-cn", "codebuddy-intl"}:
+        return _chamar_modelo_codebuddy(identificador, conta, modelo)
+    if identificador in {"qoder", "qoder-cn"}:
+        return _chamar_modelo_qoder(identificador, conta, modelo, settings)
+    if identificador == "kiro":
+        return _chamar_modelo_kiro(conta, modelo, settings)
+    if identificador == "windsurf":
+        return _chamar_modelo_windsurf(conta, modelo, settings)
+    if identificador == "zed":
+        return _chamar_modelo_zed(conta, modelo, settings)
+    if identificador in {"antigravity", "gemini-cli"}:
+        return _chamar_modelo_google_conta(identificador, conta, modelo, settings)
+    if identificador == "trae":
+        return _chamar_modelo_trae(conta, modelo, settings)
+    if identificador == "gitlab":
+        return _chamar_modelo_gitlab(conta, modelo, settings)
+    if identificador == "cursor":
+        return _chamar_modelo_cursor(conta, modelo, settings)
+    if identificador == "xiaomi-mimo":
+        from . import mimo_conta_koda
+        from .providers.conta import _mimo_chave_direta
+
+        if mimo_conta_koda.usa_conta(conta, modelo):
+            return _chamar_modelo_mimo_conta(conta, modelo, settings)
+        if _mimo_chave_direta(conta, modelo):
+            return _chamar_modelo_compativel(identificador, conta, modelo)
+
+    return {"ok": False, "detalhe": f"o Koda não possui um adaptador de conversa para {identificador}"}
+
+
+def _chamar_modelo_muse(conta: dict[str, Any], modelo: str) -> dict[str, Any]:
+    from .providers.base import ProviderError
+    from .providers.conta import MUSE_URL, _resultado_muse
+
+    try:
+        with httpx.Client(timeout=45) as cliente:
+            resposta = cliente.post(MUSE_URL, headers=koda_headers.muse(conta),
+                                    json={"model": modelo, "input": "responda apenas: ok", "store": False})
+        if resposta.status_code == 429:
+            return {"ok": False, "esgotadaAte": _quando_renova(resposta), "detalhe": "limite de uso atingido"}
+        resultado = _resultado_muse(resposta)
+        if not resultado.text and not resultado.calls:
+            return {"ok": False, "detalhe": "a Meta devolveu uma resposta vazia"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120] or "respondeu"}
+    except (httpx.HTTPError, ProviderError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_compativel(
+    identificador: str, conta: dict[str, Any], modelo: str
+) -> dict[str, Any]:
+    """Testa diretamente os provedores com protocolo de chat compatível com OpenAI."""
+    token = str(conta.get("access") or "")
+    if not token:
+        return {"ok": False, "detalhe": "conta sem token de acesso"}
+    try:
+        with httpx.Client(timeout=45) as cliente:
+            if identificador == "github":
+                troca = cliente.get(
+                    "https://api.github.com/copilot_internal/v2/token",
+                    headers={"authorization": f"token {token}", "accept": "application/json",
+                             "user-agent": "koda/1.0"},
+                )
+                if troca.status_code >= 400:
+                    return {"ok": False, "detalhe": _motivo(troca, "GitHub")}
+                token = str(troca.json().get("token") or "")
+                if not token:
+                    return {"ok": False, "detalhe": "o GitHub não devolveu o token do Copilot"}
+                url = "https://api.githubcopilot.com/chat/completions"
+                cabecalhos = {
+                    "authorization": f"Bearer {token}", "content-type": "application/json",
+                    "copilot-integration-id": "vscode-chat", "editor-version": "vscode/1.95.0",
+                    "editor-plugin-version": "copilot-chat/0.22.0",
+                    "user-agent": "GitHubCopilotChat/0.22.0",
+                }
+                nome = "Copilot"
+            elif identificador == "kimi":
+                url = "https://api.kimi.com/coding/v1/chat/completions"
+                cabecalhos = {
+                    "authorization": f"Bearer {token}", "content-type": "application/json",
+                    **koda_headers.kimi((conta.get("specific") or {}).get("deviceId")),
+                }
+                nome = "Kimi"
+            elif identificador == "nous":
+                token = koda_headers.token_nous(conta)
+                url = "https://inference-api.nousresearch.com/v1/chat/completions"
+                cabecalhos = {"authorization": f"Bearer {token}", "content-type": "application/json"}
+                nome = "Nous"
+            elif identificador in {"cline", "clinepass"}:
+                url = "https://api.cline.bot/api/v1/chat/completions"
+                cabecalhos = koda_headers.cline(conta)
+                nome = "Cline"
+            elif identificador == "kilocode":
+                url = "https://api.kilo.ai/api/gateway/chat/completions"
+                cabecalhos = koda_headers.kilo(conta)
+                nome = "Kilo"
+            elif identificador == "kimchi":
+                url = "https://llm.kimchi.dev/openai/v1/chat/completions"
+                cabecalhos = koda_headers.kimchi(conta)
+                nome = "Kimchi"
+            elif identificador == "glm":
+                url = "https://api.z.ai/api/coding/paas/v4/chat/completions"
+                cabecalhos = koda_headers.glm(conta)
+                nome = "GLM"
+            elif identificador == "iflow":
+                url = "https://apis.iflow.cn/v1/chat/completions"
+                cabecalhos = koda_headers.iflow(conta)
+                nome = "iFlow"
+            elif identificador == "xiaomi-mimo":
+                url = "https://api.xiaomimimo.com/v1/chat/completions"
+                cabecalhos = koda_headers.mimo_api(conta)
+                nome = "MiMo"
+            else:
+                url = "https://api.x.ai/v1/chat/completions"
+                cabecalhos = {
+                    "authorization": f"Bearer {token}", "content-type": "application/json",
+                    "user-agent": "grok-cli/0.2.1", "x-grok-client-identifier": "grok-cli",
+                    "x-grok-client-version": "0.2.1",
+                }
+                nome = "xAI"
+            resposta = cliente.post(
+                url, headers=cabecalhos,
+                json={"model": modelo, "messages": [{"role": "user", "content": "responda apenas: ok"}],
+                      "max_tokens": 24, "stream": False},
+            )
+    except (httpx.HTTPError, ValueError) as erro:
+        return {"ok": False, "detalhe": f"não deu para falar com o provedor: {erro}"}
+    if resposta.status_code == 429:
+        return {"ok": False, "esgotadaAte": _quando_renova(resposta),
+                "detalhe": "limite de uso atingido"}
+    if resposta.status_code >= 400:
+        return {"ok": False, "detalhe": _motivo(resposta, nome)}
+    try:
+        dados = resposta.json()
+        if isinstance(dados.get("data"), dict) and isinstance(dados["data"].get("choices"), list):
+            dados = dados["data"]
+        escolhas = dados.get("choices")
+        if not isinstance(escolhas, list) or not escolhas:
+            return {"ok": False, "detalhe": f"{nome} devolveu uma resposta sem escolhas"}
+        escolha = escolhas[0]
+        texto = (escolha.get("message") or {}).get("content") or ""
+    except (ValueError, AttributeError, IndexError, TypeError):
+        return {"ok": False, "detalhe": f"{nome} devolveu uma resposta inválida"}
     return {"ok": True, "detalhe": str(texto).strip()[:120] or "respondeu"}
+
+
+def _chamar_modelo_minimax(identificador: str, conta: dict[str, Any], modelo: str) -> dict[str, Any]:
+    """Testa o modelo da conta MiniMax usando o protocolo Messages."""
+    from .providers.conta import MINIMAX_URLS
+
+    token = str(conta.get("access") or "")
+    if not token:
+        return {"ok": False, "detalhe": "conta sem token de acesso"}
+    try:
+        with httpx.Client(timeout=45) as cliente:
+            resposta = cliente.post(
+                MINIMAX_URLS[identificador],
+                headers={"authorization": f"Bearer {token}", **koda_headers.minimax(str(uuid.uuid4()))},
+                json={"model": modelo, "max_tokens": 24,
+                      "messages": [{"role": "user", "content": "responda apenas: ok"}]},
+            )
+    except httpx.HTTPError as erro:
+        return {"ok": False, "detalhe": f"não deu para falar com o MiniMax: {erro}"}
+    if resposta.status_code == 429:
+        return {"ok": False, "esgotadaAte": _quando_renova(resposta),
+                "detalhe": "limite de uso atingido"}
+    if resposta.status_code >= 400:
+        return {"ok": False, "detalhe": _motivo(resposta, "MiniMax")}
+    try:
+        blocos = resposta.json().get("content") or []
+        texto = "".join(str(bloco.get("text") or "") for bloco in blocos if bloco.get("type") == "text")
+    except (ValueError, AttributeError, TypeError):
+        return {"ok": False, "detalhe": "o MiniMax devolveu uma resposta inválida"}
+    return {"ok": True, "detalhe": texto.strip()[:120] or "respondeu"}
+
+
+def _chamar_modelo_cursor(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import cursor_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = cursor_koda.linhas(conta, modelo, mensagens)
+        return await ContaProvider(settings, "cursor")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Cursor", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        return {"ok": bool(resultado.text and not resultado.truncado), "detalhe": resultado.text.strip()[:120] or "sem resposta"}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+
+
+def _chamar_modelo_gitlab(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import gitlab_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = gitlab_koda.linhas(conta, mensagens, [])
+        return await ContaProvider(settings, "gitlab")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "GitLab", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        return {"ok": bool(resultado.text and not resultado.truncado), "detalhe": resultado.text.strip()[:120] or "sem resposta"}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+
+
+def _chamar_modelo_mimo_conta(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import mimo_conta_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = mimo_conta_koda.linhas(conta, modelo, mensagens, [])
+        return await ContaProvider(settings, "xiaomi-mimo")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "MiMo", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o MiMo não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+
+
+def _chamar_modelo_trae(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import trae_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = trae_koda.linhas(conta, modelo, mensagens)
+        return await ContaProvider(settings, "trae")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Trae", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Trae não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_google_conta(
+    identificador: str, conta: dict[str, Any], modelo: str, settings: Settings | None
+) -> dict[str, Any]:
+    import asyncio
+    from . import google_conta_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = google_conta_koda.linhas(identificador, conta, modelo, mensagens, [])
+        return await ContaProvider(settings, identificador)._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Google", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Google não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_zed(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import zed_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = zed_koda.linhas(conta, modelo, mensagens, [])
+        return await ContaProvider(settings, "zed")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Zed", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Zed não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_windsurf(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import windsurf_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = windsurf_koda.linhas(conta, modelo, mensagens)
+        return await ContaProvider(settings, "windsurf")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Windsurf", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Windsurf não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_kiro(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
+    import asyncio
+    from . import kiro_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = kiro_koda.linhas(conta, modelo, mensagens, [])
+        return await ContaProvider(settings, "kiro")._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Kiro", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Kiro não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_qoder(
+    identificador: str, conta: dict[str, Any], modelo: str, settings: Settings | None
+) -> dict[str, Any]:
+    import asyncio
+    from . import qoder_koda
+    from .providers.base import ProviderError
+    from .providers.conta import ContaProvider
+
+    async def testar() -> Any:
+        mensagens = [{"role": "user", "content": "responda apenas: ok"}]
+        eventos = qoder_koda.linhas(identificador, conta, modelo, mensagens, [])
+        return await ContaProvider(settings, identificador)._streaming_openai_step(
+            conta, modelo, mensagens, [], "", {}, "Qoder", eventos,
+        )
+
+    try:
+        resultado = asyncio.run(testar())
+        if resultado.truncado or not resultado.text:
+            return {"ok": False, "detalhe": "o Qoder não concluiu a resposta do modelo"}
+        return {"ok": True, "detalhe": resultado.text.strip()[:120]}
+    except (ProviderError, httpx.HTTPError) as erro:
+        return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_codebuddy(identificador: str, conta: dict[str, Any], modelo: str) -> dict[str, Any]:
+    """Verifica o modelo no gateway de streaming da região escolhida."""
+    from .providers.conta import CODEBUDDY_URLS, _mensagens_codebuddy
+
+    internacional = identificador == "codebuddy-intl"
+    mensagens = _mensagens_codebuddy([{"role": "user", "content": "responda apenas: ok"}], internacional)
+    try:
+        with httpx.Client(timeout=45) as cliente:
+            with cliente.stream("POST", CODEBUDDY_URLS[identificador],
+                                headers=koda_headers.codebuddy(conta, internacional),
+                                json={"model": modelo, "messages": mensagens, "stream": True, "max_tokens": 24}) as resposta:
+                if resposta.status_code >= 400:
+                    resposta.read()
+                    try:
+                        erro = resposta.json()
+                    except ValueError:
+                        erro = {}
+                    if resposta.status_code == 429 or (isinstance(erro, dict) and erro.get("code") == 6004):
+                        return {"ok": False, "esgotadaAte": _quando_renova(resposta), "detalhe": "limite de uso atingido"}
+                    return {"ok": False, "detalhe": _motivo(resposta, "CodeBuddy")}
+                partes: list[str] = []
+                terminou = False
+                for linha in resposta.iter_lines():
+                    if not linha.startswith("data:"):
+                        continue
+                    carga = linha[5:].strip()
+                    if carga == "[DONE]":
+                        terminou = True
+                        break
+                    try:
+                        evento = json.loads(carga)
+                    except ValueError:
+                        continue
+                    if isinstance(evento, dict) and evento.get("error"):
+                        return {"ok": False, "detalhe": str(evento["error"])[:300]}
+                    for escolha in evento.get("choices") or []:
+                        terminou = terminou or bool(escolha.get("finish_reason"))
+                        texto = (escolha.get("delta") or {}).get("content")
+                        if texto:
+                            partes.append(str(texto))
+                if not terminou:
+                    return {"ok": False, "detalhe": "o CodeBuddy interrompeu a resposta antes do fim"}
+                return {"ok": True, "detalhe": "".join(partes).strip()[:120] or "respondeu"}
+    except httpx.HTTPError as erro:
+        return {"ok": False, "detalhe": f"não deu para falar com o CodeBuddy: {erro}"}
+
+
+def _chamar_modelo_grok(conta: dict[str, Any], modelo: str) -> dict[str, Any]:
+    """Testa um modelo do Grok CLI por streaming, como exigido pelo serviço."""
+    from .providers.conta import GROK_CLI_URL
+
+    token = str(conta.get("access") or "")
+    if not token:
+        return {"ok": False, "detalhe": "conta sem token de acesso"}
+    try:
+        with httpx.Client(timeout=45) as cliente:
+            with cliente.stream(
+                "POST", GROK_CLI_URL,
+                headers={"authorization": f"Bearer {token}", "x-xai-token-auth": "xai-grok-cli",
+                         "x-grok-model-override": modelo, "user-agent": "grok-cli/0.2.1"},
+                json={"model": modelo, "messages": [{"role": "user", "content": "responda apenas: ok"}],
+                      "stream": True, "max_tokens": 24},
+            ) as resposta:
+                if resposta.status_code >= 400:
+                    resposta.read()
+                    if resposta.status_code == 429:
+                        return {"ok": False, "esgotadaAte": _quando_renova(resposta),
+                                "detalhe": "limite de uso atingido"}
+                    return {"ok": False, "detalhe": _motivo(resposta, "Grok")}
+                partes: list[str] = []
+                terminou = False
+                for linha in resposta.iter_lines():
+                    if not linha.startswith("data:"):
+                        continue
+                    carga = linha[5:].strip()
+                    if carga == "[DONE]":
+                        terminou = True
+                        break
+                    try:
+                        evento = json.loads(carga)
+                    except ValueError:
+                        continue
+                    for escolha in evento.get("choices") or []:
+                        if escolha.get("finish_reason"):
+                            terminou = True
+                        texto = (escolha.get("delta") or {}).get("content")
+                        if texto:
+                            partes.append(str(texto))
+                if not terminou:
+                    return {"ok": False, "detalhe": "o Grok interrompeu a resposta antes do fim"}
+                return {"ok": True, "detalhe": "".join(partes).strip()[:120] or "respondeu"}
+    except httpx.HTTPError as erro:
+        return {"ok": False, "detalhe": f"não deu para falar com o Grok: {erro}"}
 
 
 def _chamar_chatgpt(conta: dict[str, Any], modelo: str) -> dict[str, Any]:

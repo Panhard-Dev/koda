@@ -1,6 +1,5 @@
 {
-  "_licenca": "9router MIT; copyright 2024-2026 decolua and contributors",
-  "_origem": "open-sse/providers/registry e src/lib/oauth/providers do 9router",
+  "_licenca": "MIT; copyright 2024-2026 decolua and contributors; ver TERCEIROS_MIT.LICENSE",
   "provedores": [
     {
       "id": "anthropic",
@@ -306,17 +305,6 @@
           "nome": "GPT-OSS 120B (Medium)"
         }
       ]
-    },
-    {
-      "id": "chatgpt-web",
-      "fonteId": "chatgpt-web",
-      "nome": "ChatGPT Web",
-      "sigla": "CH",
-      "cli": "Login no navegador",
-      "website": "https://chatgpt.com",
-      "tipo": "web_cookie",
-      "authHint": "Paste your chatgpt.com cookie header containing __Secure-next-auth.session-token (or a full Playwright storage-state JSON)",
-      "modelos": []
     },
     {
       "id": "cline",
@@ -652,74 +640,6 @@
       ]
     },
     {
-      "id": "deepseek-web",
-      "fonteId": "deepseek-web",
-      "nome": "DeepSeek Web",
-      "sigla": "DE",
-      "cli": "Login no navegador",
-      "website": "https://chat.deepseek.com",
-      "tipo": "web_cookie",
-      "authHint": "Paste your userToken from chat.deepseek.com localStorage (DevTools → Application → Local Storage)",
-      "modelos": [
-        {
-          "id": "deepseek-v4-pro",
-          "nome": "DeepSeek V4 Pro"
-        },
-        {
-          "id": "deepseek-v4-pro-think",
-          "nome": "DeepSeek V4 Pro Think"
-        },
-        {
-          "id": "deepseek-v4-pro-search",
-          "nome": "DeepSeek V4 Pro Search"
-        },
-        {
-          "id": "deepseek-v4-pro-think-search",
-          "nome": "DeepSeek V4 Pro Think+Search"
-        },
-        {
-          "id": "deepseek-v4-flash",
-          "nome": "DeepSeek V4 Flash"
-        },
-        {
-          "id": "deepseek-v4-flash-think",
-          "nome": "DeepSeek V4 Flash Think"
-        },
-        {
-          "id": "deepseek-v4-flash-search",
-          "nome": "DeepSeek V4 Flash Search"
-        },
-        {
-          "id": "deepseek-v4-flash-think-search",
-          "nome": "DeepSeek V4 Flash Think+Search"
-        },
-        {
-          "id": "deepseek-chat",
-          "nome": "DeepSeek Chat"
-        },
-        {
-          "id": "deepseek-reasoner",
-          "nome": "DeepSeek Reasoner"
-        },
-        {
-          "id": "DeepSeek-R1",
-          "nome": "DeepSeek R1"
-        },
-        {
-          "id": "DeepSeek-R1-Search",
-          "nome": "DeepSeek R1 Search"
-        },
-        {
-          "id": "DeepSeek-V3.2",
-          "nome": "DeepSeek V3.2"
-        },
-        {
-          "id": "DeepSeek-Search",
-          "nome": "DeepSeek Search"
-        }
-      ]
-    },
-    {
       "id": "gemini-cli",
       "fonteId": "gemini-cli",
       "nome": "Gemini CLI",
@@ -772,17 +692,6 @@
           "nome": "Gemini 2.5 Flash Lite"
         }
       ]
-    },
-    {
-      "id": "gemini-web",
-      "fonteId": "gemini-web",
-      "nome": "Gemini Web",
-      "sigla": "GE",
-      "cli": "Login no navegador",
-      "website": "https://gemini.google.com",
-      "tipo": "web_cookie",
-      "authHint": "Paste your __Secure-1PSID (and __Secure-1PSIDTS) cookie value(s) from gemini.google.com",
-      "modelos": []
     },
     {
       "id": "github",
@@ -981,17 +890,6 @@
           "nome": "Grok 4.5 (Low)"
         }
       ]
-    },
-    {
-      "id": "grok-web",
-      "fonteId": "grok-web",
-      "nome": "Grok Web (Subscription)",
-      "sigla": "GR",
-      "cli": "Login no navegador",
-      "website": "https://grok.com",
-      "tipo": "web_cookie",
-      "authHint": "Paste your full grok.com Cookie header (sso + cf_clearance — needed for image/video generation)",
-      "modelos": []
     },
     {
       "id": "iflow",
@@ -1572,17 +1470,6 @@
       ]
     },
     {
-      "id": "muse-web",
-      "fonteId": "muse-web",
-      "nome": "Muse Web",
-      "sigla": "MU",
-      "cli": "Login no navegador",
-      "website": "https://muse.ai",
-      "tipo": "web_cookie",
-      "authHint": "Paste your muse.ai cookies (hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...) from a logged-in muse.ai session",
-      "modelos": []
-    },
-    {
       "id": "nous",
       "fonteId": "nous",
       "nome": "Nous Research",
@@ -1632,17 +1519,6 @@
           "nome": "MissingNo"
         }
       ]
-    },
-    {
-      "id": "perplexity-web",
-      "fonteId": "perplexity-web",
-      "nome": "Perplexity Web (Pro/Max)",
-      "sigla": "PE",
-      "cli": "Login no navegador",
-      "website": "https://www.perplexity.ai",
-      "tipo": "web_cookie",
-      "authHint": "Paste your __Secure-next-auth.session-token cookie value from perplexity.ai",
-      "modelos": []
     },
     {
       "id": "qoder",
@@ -1870,17 +1746,6 @@
           "nome": "GPT 5.2"
         }
       ]
-    },
-    {
-      "id": "uc-web",
-      "fonteId": "uc-web",
-      "nome": "UC Web",
-      "sigla": "UC",
-      "cli": "Login no navegador",
-      "website": "https://uncensored.com",
-      "tipo": "web_cookie",
-      "authHint": "Paste your full uncensored.com Cookie header (must include the __client cookie) from a logged-in session — image + video are un-metered on the web plan",
-      "modelos": []
     },
     {
       "id": "windsurf",

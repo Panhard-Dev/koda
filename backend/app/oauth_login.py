@@ -1,8 +1,6 @@
 """OAuth de verdade, dentro do Koda — autorização, troca de código e refresh.
 
-O motor é um só; o que muda por provedor está em `provedores_oauth.json` (client id,
-endpoints, escopos, corpo do pedido de token). As constantes vêm do **9router** instalado
-nesta máquina — um proxy que já faz esses logins — e as do Google batem com o magpie.
+Os endereços, escopos e identificadores públicos ficam no catálogo de provedores.
 
 **Dois fluxos, porque são os dois que os fornecedores publicam:**
 
@@ -29,15 +27,17 @@ import sqlite3
 import shutil
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import httpx
 
 from .config import Settings
+from . import koda_headers
 
 #: Quanto tempo um fluxo espera o navegador antes de desistir.
 ESPERA_S = 600
@@ -83,8 +83,125 @@ def _carregar_fluxos() -> dict[str, dict[str, Any]]:
 
 
 FLUXOS: dict[str, dict[str, Any]] = _carregar_fluxos()
-_MANIFESTO = json.loads(Path(__file__).with_name("provedores_9router.json").read_text(encoding="utf-8"))
-_LOGIN_9ROUTER = {item["id"]: item for item in _MANIFESTO["provedores"]}
+if FLUXOS.get("google", {}).get("client_id"):
+    FLUXOS["gemini-cli"] = {**FLUXOS["google"]}
+if FLUXOS.get("xai", {}).get("client_id") and FLUXOS["xai"].get("token"):
+    FLUXOS["xai"] = {
+        **FLUXOS["xai"], "tipo": "pkce", "authorize": "https://auth.x.ai/oauth2/authorize",
+        "porta": 56121, "caminho": "/callback", "host_callback": "127.0.0.1",
+        "scopes": "openid profile email offline_access grok-cli:access api:access",
+        "nonce": True, "extra": {"plan": "generic", "referrer": "koda"},
+    }
+_MANIFESTO = json.loads(Path(__file__).with_name("provedores_koda.json").read_text(encoding="utf-8"))
+_LOGIN_PROVEDORES = {item["id"]: item for item in _MANIFESTO["provedores"]}
+
+# O login do MiniMax Code usa o device grant com PKCE. Os endereços e parâmetros
+# ficam no catálogo de provedores; a implementação do protocolo é do Koda.
+for _id in ("minimax-code", "minimax-code-global"):
+    _oauth = _LOGIN_PROVEDORES.get(_id, {}).get("oauth") or {}
+    if all(_oauth.get(chave) for chave in ("clientId", "deviceUrl", "tokenUrl")):
+        FLUXOS[_id] = {
+            "tipo": "device", "client_id": _oauth["clientId"],
+            "device": _oauth["deviceUrl"], "token": _oauth["tokenUrl"],
+            "scopes": _oauth.get("scope") or "", "audience": _oauth.get("audience") or "",
+            "pkce_device": True, "poll_por_codigo_permitido": True,
+        }
+
+_kimi_oauth = _LOGIN_PROVEDORES.get("kimi", {}).get("oauth") or {}
+if all(_kimi_oauth.get(chave) for chave in ("clientId", "deviceCodeUrl", "tokenUrl")):
+    FLUXOS["kimi"] = {
+        "tipo": "device", "client_id": _kimi_oauth["clientId"],
+        "device": _kimi_oauth["deviceCodeUrl"], "token": _kimi_oauth["tokenUrl"],
+        "pagina_device": _kimi_oauth.get("authorizeDeviceUrl"), "identidade": "kimi",
+    }
+
+_grok_oauth = _LOGIN_PROVEDORES.get("grok-cli", {}).get("oauth") or {}
+if all(_grok_oauth.get(chave) for chave in ("clientId", "deviceCodeUrl", "tokenUrl")):
+    FLUXOS["grok-cli"] = {
+        "tipo": "device", "client_id": _grok_oauth["clientId"],
+        "device": _grok_oauth["deviceCodeUrl"], "token": _grok_oauth["tokenUrl"],
+        "scopes": _grok_oauth.get("scope") or "", "referrer": _grok_oauth.get("referrer"),
+        "identidade": "grok-cli",
+    }
+
+_nous_oauth = _LOGIN_PROVEDORES.get("nous", {}).get("oauth") or {}
+if all(_nous_oauth.get(chave) for chave in ("clientId", "deviceCodeUrl", "tokenUrl")):
+    FLUXOS["nous"] = {
+        "tipo": "device", "client_id": _nous_oauth["clientId"],
+        "device": _nous_oauth["deviceCodeUrl"], "token": _nous_oauth["tokenUrl"],
+        "scopes": "inference:invoke",
+    }
+
+_muse_oauth = _LOGIN_PROVEDORES.get("muse", {}).get("oauth") or {}
+if all(_muse_oauth.get(chave) for chave in ("clientId", "deviceCodeUrl", "tokenUrl")):
+    FLUXOS["muse"] = {
+        "tipo": "device", "client_id": _muse_oauth["clientId"],
+        "device": _muse_oauth["deviceCodeUrl"], "token": _muse_oauth["tokenUrl"],
+        "identidade": "muse",
+    }
+
+_iflow_oauth = _LOGIN_PROVEDORES.get("iflow", {}).get("oauth") or {}
+if all(_iflow_oauth.get(chave) for chave in ("clientId", "clientSecret", "authorizeUrl", "tokenUrl", "userInfoUrl")):
+    FLUXOS["iflow"] = {
+        "tipo": "iflow", "client_id": _iflow_oauth["clientId"], "client_secret": _iflow_oauth["clientSecret"],
+        "authorize": _iflow_oauth["authorizeUrl"], "token": _iflow_oauth["tokenUrl"],
+        "userinfo": _iflow_oauth["userInfoUrl"], "extra_iflow": _iflow_oauth.get("extraParams") or {},
+        "verificar_state": True,
+    }
+
+_glm_oauth = _LOGIN_PROVEDORES.get("glm", {}).get("oauth") or {}
+if all(_glm_oauth.get(k) for k in ("cliInitUrl", "cliPollUrl", "businessLoginUrl", "apiBaseUrl")):
+    FLUXOS["glm"] = {"tipo": "glm", "device": _glm_oauth["cliInitUrl"], "poll": _glm_oauth["cliPollUrl"],
+        "business_login": _glm_oauth["businessLoginUrl"], "api": _glm_oauth["apiBaseUrl"],
+        "provider_id": _glm_oauth.get("providerId") or "zai", "key_name": _glm_oauth.get("planApiKeyName") or "zcode-api-key"}
+
+FLUXOS["zed"] = {"tipo": "zed", "caminho": "/", "fonte": "zed", "verificar_state": False}
+
+_trae_exchange_path = os.environ.get("KODA_TRAE_EXCHANGE_PATH", "").strip()
+if (_trae_exchange_path.startswith("/") and not _trae_exchange_path.startswith("//")
+        and "?" not in _trae_exchange_path and "#" not in _trae_exchange_path):
+    FLUXOS["trae"] = {"tipo": "trae", "fonte": "trae", "verificar_state": False,
+                      "exchange_path": _trae_exchange_path}
+
+for _id in ("cline", "clinepass"):
+    _oauth = _LOGIN_PROVEDORES.get(_id, {}).get("oauth") or {}
+    _token_url = _oauth.get("tokenExchangeUrl") or _oauth.get("tokenUrl")
+    if _oauth.get("authorizeUrl") and _token_url:
+        FLUXOS[_id] = {
+            "tipo": "cline", "authorize": _oauth["authorizeUrl"], "token": _token_url,
+            "refresh_url": _oauth.get("refreshUrl"),
+        }
+
+_kilo_oauth = _LOGIN_PROVEDORES.get("kilocode", {}).get("oauth") or {}
+if all(_kilo_oauth.get(chave) for chave in ("initiateUrl", "pollUrlBase", "apiBaseUrl")):
+    FLUXOS["kilocode"] = {
+        "tipo": "kilo", "device": _kilo_oauth["initiateUrl"],
+        "poll": _kilo_oauth["pollUrlBase"], "api": _kilo_oauth["apiBaseUrl"],
+    }
+
+_kimchi_oauth = _LOGIN_PROVEDORES.get("kimchi", {}).get("oauth") or {}
+if _kimchi_oauth.get("webAppUrl") and _kimchi_oauth.get("validationUrl"):
+    FLUXOS["kimchi"] = {
+        "tipo": "kimchi", "authorize": f"{str(_kimchi_oauth['webAppUrl']).rstrip('/')}/cli-auth",
+        "validar": _kimchi_oauth["validationUrl"], "userinfo": _kimchi_oauth.get("userInfoUrl"),
+    }
+
+for _id in ("codebuddy-intl", "codebuddy-cn"):
+    _oauth = _LOGIN_PROVEDORES.get(_id, {}).get("oauth") or {}
+    if all(_oauth.get(chave) for chave in ("baseUrl", "stateUrl", "tokenUrl", "refreshUrl", "userAgent", "platform")):
+        FLUXOS[_id] = {
+            "tipo": "codebuddy", "base": _oauth["baseUrl"], "estado": _oauth["stateUrl"],
+            "token": _oauth["tokenUrl"], "refresh_url": _oauth["refreshUrl"],
+            "user_agent": _oauth["userAgent"], "plataforma": _oauth["platform"],
+            "intervalo": max(1, int(_oauth.get("pollInterval") or 5000) // 1000),
+        }
+
+FLUXOS["windsurf"] = {
+    "tipo": "windsurf", "authorize": "https://www.windsurf.com/windsurf/signin",
+    "client_id": "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u", "caminho": "/windsurf-auth-callback",
+    "register": "https://register.windsurf.com/exa.seat_management_pb.SeatManagementService/RegisterUser",
+    "api": "https://server.codeium.com",
+}
 
 
 def _escopos(config: dict[str, Any]) -> str:
@@ -94,7 +211,7 @@ def _escopos(config: dict[str, Any]) -> str:
     return str(bruto or "")
 
 
-#: As contas dos provedores, **várias por provedor** — empilhadas como no 9router.
+#: As contas dos provedores, com suporte a várias contas por provedor.
 #:
 #: Fica no mesmo banco do app (`koda.db`): a conta é dado do app como a conversa, e um JSON
 #: paralelo só criava um segundo lugar para o backup esquecer.
@@ -258,7 +375,12 @@ def _gravar(settings: Settings, identificador: str, dado: dict[str, Any]) -> str
     agora = datetime.now(tz=timezone.utc).isoformat()
     with _conexao(settings) as banco:
         existente = None
-        if dado.get("conta"):
+        if dado.get("id"):
+            existente = banco.execute(
+                "SELECT id FROM provedor_contas WHERE provedor = ? AND id = ?",
+                (identificador, dado["id"]),
+            ).fetchone()
+        if existente is None and dado.get("conta"):
             existente = banco.execute(
                 "SELECT id FROM provedor_contas WHERE provedor = ? AND conta = ?",
                 (identificador, dado["conta"]),
@@ -361,6 +483,20 @@ def _expira_em(dado: dict[str, Any]) -> str | None:
         return None
 
 
+def _expiracao_absoluta(valor: Any) -> str | None:
+    """Normaliza datas ISO e timestamps em segundos ou milissegundos."""
+    if isinstance(valor, (int, float)) or (isinstance(valor, str) and valor.isdigit()):
+        segundos = float(valor)
+        return _iso(segundos / 1000 if segundos >= 1_000_000_000_000 else segundos)
+    if isinstance(valor, str):
+        try:
+            quando = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (quando if quando.tzinfo else quando.replace(tzinfo=timezone.utc)).isoformat()
+    return None
+
+
 # --------------------------------------------------------------- fluxos vivos
 
 
@@ -387,6 +523,7 @@ class _Fluxo:
 
 _trava = threading.Lock()
 _vivos: dict[str, _Fluxo] = {}
+_travas_renovacao: dict[tuple[str, str], threading.Lock] = {}
 
 
 def _challenge(verifier: str) -> str:
@@ -406,8 +543,13 @@ def _pagina(titulo: str, texto: str) -> bytes:
 
 def iniciar(settings: Settings, identificador: str) -> dict[str, Any]:
     """Começa um login. Devolve o que a tela precisa mostrar: URL, código ou o motivo."""
-    if identificador in _LOGIN_9ROUTER and identificador not in {"anthropic", "openai"}:
-        return _iniciar_9router(settings, identificador)
+    item = _LOGIN_PROVEDORES.get(identificador)
+    if item and (item.get("fonteId") in {"cursor", "gitlab", "xiaomi-mimo"} or (identificador == "trae" and not FLUXOS.get("trae"))):
+        return _iniciar_sessao_web(settings, identificador, item)
+    google_nativo = identificador in {"gemini-cli", "antigravity"} and bool(FLUXOS.get(identificador, {}).get("client_id"))
+    if identificador in {"gemini-cli", "antigravity"} and not google_nativo:
+        variavel = "KODA_GOOGLE_CLIENT_ID" if identificador == "gemini-cli" else "KODA_ANTIGRAVITY_CLIENT_ID"
+        return {"tipo": "nada", "mensagem": f"configure {variavel} para autorizar esta conta Google no Koda"}
     config = FLUXOS.get(identificador)
     if config is None:
         if identificador in SEM_FLUXO:
@@ -429,7 +571,12 @@ def iniciar(settings: Settings, identificador: str) -> dict[str, Any]:
 
     fluxo = _Fluxo(identificador, config, settings)
     with _trava:
+        anterior = _vivos.get(identificador)
         _vivos[identificador] = fluxo
+    if anterior:
+        anterior.estado = "cancelado"
+        if anterior.servidor is not None:
+            threading.Thread(target=anterior.servidor.shutdown, daemon=True).start()
 
     if config.get("tipo") == "device":
         return _iniciar_device(fluxo)
@@ -437,136 +584,53 @@ def iniciar(settings: Settings, identificador: str) -> dict[str, Any]:
         return _iniciar_aws_sso(fluxo)
     if config.get("tipo") == "qoder":
         return _iniciar_qoder(fluxo)
+    if config.get("tipo") == "cline":
+        return _iniciar_cline(fluxo)
+    if config.get("tipo") == "kilo":
+        return _iniciar_kilo(fluxo)
+    if config.get("tipo") == "kimchi":
+        return _iniciar_kimchi(fluxo)
+    if config.get("tipo") == "codebuddy":
+        return _iniciar_codebuddy(fluxo)
+    if config.get("tipo") == "windsurf":
+        return _iniciar_windsurf(fluxo)
+    if config.get("tipo") == "iflow":
+        return _iniciar_iflow(fluxo)
+    if config.get("tipo") == "glm":
+        return _iniciar_glm(fluxo)
+    if config.get("tipo") == "zed":
+        return _iniciar_zed(fluxo)
+    if config.get("tipo") == "trae":
+        return _iniciar_trae(fluxo)
     return _iniciar_pkce(fluxo)
 
 
-def _iniciar_9router(settings: Settings, identificador: str) -> dict[str, Any]:
-    """Usa os mesmos construtores de autorização e troca de token do 9router."""
-    item = _LOGIN_9ROUTER[identificador]
-    fonte = item["fonteId"]
-    if item["tipo"] == "web_cookie":
-        fluxo = _Fluxo(identificador, {"motor": "cookie"}, settings)
-        fluxo.url = item.get("website") or ""
-        with _trava:
-            _vivos[identificador] = fluxo
-        return {"tipo": "cookie", "estado": "aguardando", "url": fluxo.url,
-                "mensagem": item.get("authHint") or "Cole a credencial da sessão do navegador."}
-    if fonte == "cursor":
-        fluxo = _Fluxo(identificador, {"motor": "cookie"}, settings)
-        fluxo.url = item.get("website") or ""
-        with _trava:
-            _vivos[identificador] = fluxo
-        return {"tipo": "cookie", "estado": "aguardando", "url": fluxo.url,
-                "mensagem": "Cole o token de acesso da sua conta Cursor. O Koda não lê arquivos da IDE."}
-    if fonte == "xiaomi-mimo":
-        return {"tipo": "nada", "mensagem": "o login do MiMo usa retorno criptografado; o adaptador de retorno ainda não está ligado ao Koda"}
-    if fonte == "gitlab":
-        return {"tipo": "nada", "mensagem": "o GitLab exige o Client ID de um aplicativo OAuth próprio; o Koda ainda não tem esse campo"}
-
-    from . import auth_9router
-
-    preparo = auth_9router.chamar(settings, fonte, "prepare")
-    if not preparo.get("ok"):
-        return {"tipo": "nada", "mensagem": preparo.get("error") or "não consegui preparar o login"}
-    info = preparo["result"]
-    tipo_fluxo = info.get("flowType")
-    config = {
-        "motor": "9router", "fonte": fonte,
-        "caminho": info.get("callbackPath") or "/callback",
-        "porta": info.get("fixedPort") or 0,
-        "verificar_state": tipo_fluxo == "authorization_code_pkce" or fonte in {"gemini-cli", "antigravity", "iflow", "kimchi"},
-    }
-    fluxo = _Fluxo(identificador, config, settings)
+def _iniciar_sessao_web(settings: Settings, identificador: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Recebe uma credencial fornecida pelo usuário, sem ler dados do navegador ou da IDE."""
+    fluxo = _Fluxo(identificador, {"motor": "cookie"}, settings)
+    fluxo.url = item.get("website") or ""
     with _trava:
-        anterior = _vivos.pop(identificador, None)
+        anterior = _vivos.get(identificador)
         _vivos[identificador] = fluxo
-    if anterior and anterior.servidor is not None:
-        threading.Thread(target=anterior.servidor.shutdown, daemon=True).start()
-
-    if tipo_fluxo == "device_code":
-        pedido = auth_9router.chamar(settings, fonte, "device-code")
-        if not pedido.get("ok"):
-            fluxo.estado = "erro"
-            fluxo.detalhe = pedido.get("error") or "o provedor não deu código de dispositivo"
-            return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
-        dado = pedido["result"]
-        fluxo.extra = dado
-        fluxo.codigo = dado.get("user_code") or dado.get("code")
-        fluxo.state = dado.get("device_code") or dado.get("code") or ""
-        fluxo.url = dado.get("verification_uri_complete") or dado.get("verification_uri") or dado.get("verificationUrl")
-        if not fluxo.url or not fluxo.state:
-            fluxo.estado = "erro"
-            fluxo.detalhe = "o provedor não devolveu página ou código de login"
-            return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
-        threading.Thread(target=_esperar_9router, args=(fluxo,), daemon=True).start()
-        return {"tipo": "device", "estado": "aguardando", "url": fluxo.url, "codigo": fluxo.codigo}
-
-    if tipo_fluxo not in {"authorization_code", "authorization_code_pkce", "browser_token"}:
-        fluxo.estado = "erro"
-        fluxo.detalhe = f"o fluxo {tipo_fluxo or 'especial'} do 9router ainda não tem retorno no Koda"
-        return {"tipo": "nada", "mensagem": fluxo.detalhe}
-    try:
-        servidor = ThreadingHTTPServer(("127.0.0.1", int(config["porta"])), _Handler)
-    except OSError as erro:
-        fluxo.estado = "erro"
-        fluxo.detalhe = f"não consegui abrir a porta do retorno: {erro}"
-        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
-    servidor.daemon_threads = True
-    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
-    fluxo.servidor = servidor
-    callback_host = "127.0.0.1" if fonte in {"xai", "zed"} else "localhost"
-    fluxo.redirect = f"http://{callback_host}:{servidor.server_address[1]}{config['caminho']}"
-    meta = {"nativeAppPort": servidor.server_address[1]} if fonte == "zed" else {}
-    autorizado = auth_9router.chamar(settings, fonte, "authorize", redirectUri=fluxo.redirect, meta=meta)
-    if not autorizado.get("ok"):
-        servidor.server_close()
-        fluxo.estado = "erro"
-        fluxo.detalhe = autorizado.get("error") or "o provedor não montou o login"
-        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
-    dados = autorizado["result"]
-    fluxo.state = dados.get("state") or fluxo.state
-    fluxo.verifier = dados.get("codeVerifier") or fluxo.verifier
-    fluxo.auth_meta = {"systemId": dados.get("systemId")} if dados.get("systemId") else {}
-    fluxo.url = dados.get("authUrl")
-    if not fluxo.url:
-        servidor.server_close()
-        fluxo.estado = "erro"
-        fluxo.detalhe = "o provedor não devolveu endereço de login"
-        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
-    threading.Thread(target=servidor.serve_forever, daemon=True).start()
-    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+    if anterior:
+        anterior.estado = "cancelado"
+        if anterior.servidor is not None:
+            threading.Thread(target=anterior.servidor.shutdown, daemon=True).start()
+    if item.get("fonteId") == "cursor":
+        mensagem = "Cole o token de acesso da sua conta Cursor. O Koda não lê arquivos da IDE."
+    elif item.get("fonteId") == "trae":
+        mensagem = "Cole o token de acesso da sua conta Trae para conectar ao Koda."
+    elif item.get("fonteId") == "gitlab":
+        mensagem = "Cole o token de acesso da sua conta GitLab. A API Duo do GitLab.com é restrita a contas autorizadas."
+    elif item.get("fonteId") == "xiaomi-mimo":
+        mensagem = "Cole a chave de API da sua conta MiMo para usar os modelos de API."
+    else:
+        mensagem = item.get("authHint") or "Cole a credencial da sessão do navegador."
+    return {"tipo": "cookie", "estado": "aguardando", "url": fluxo.url, "mensagem": mensagem}
 
 
-def _esperar_9router(fluxo: _Fluxo) -> None:
-    from . import auth_9router
 
-    limite = time.time() + min(int(fluxo.extra.get("expires_in") or ESPERA_S), ESPERA_S)
-    intervalo = max(int(fluxo.extra.get("interval") or 5), 3)
-    while time.time() < limite and fluxo.estado == "aguardando":
-        time.sleep(intervalo)
-        pedido = auth_9router.chamar(
-            fluxo.settings, fluxo.config["fonte"], "poll",
-            deviceCode=fluxo.state, codeVerifier=fluxo.extra.get("codeVerifier"),
-            extraData=fluxo.extra,
-        )
-        if not pedido.get("ok"):
-            fluxo.estado = "erro"
-            fluxo.detalhe = pedido.get("error") or "falha ao verificar o login"
-            return
-        resultado = pedido["result"]
-        if resultado.get("success") and resultado.get("tokens", {}).get("accessToken"):
-            _concluir(fluxo, resultado["tokens"])
-            return
-        if resultado.get("pending") or resultado.get("error") in {"authorization_pending", "slow_down"}:
-            if resultado.get("error") == "slow_down":
-                intervalo += 5
-            continue
-        fluxo.estado = "erro"
-        fluxo.detalhe = resultado.get("errorDescription") or resultado.get("error") or "login recusado"
-        return
-    if fluxo.estado == "aguardando":
-        fluxo.estado = "erro"
-        fluxo.detalhe = "o tempo do login acabou"
+
 
 
 def _iniciar_pkce(fluxo: _Fluxo) -> dict[str, Any]:
@@ -585,9 +649,8 @@ def _iniciar_pkce(fluxo: _Fluxo) -> dict[str, Any]:
     servidor.daemon_threads = True
     servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
     fluxo.servidor = servidor
-    fluxo.redirect = (
-        f"http://localhost:{servidor.server_address[1]}{config.get('caminho') or '/callback'}"
-    )
+    host_callback = config.get("host_callback") or "localhost"
+    fluxo.redirect = f"http://{host_callback}:{servidor.server_address[1]}{config.get('caminho') or '/callback'}"
 
     parametros = {
         "response_type": "code",
@@ -599,20 +662,237 @@ def _iniciar_pkce(fluxo: _Fluxo) -> dict[str, Any]:
         "code_challenge_method": "S256",
         **{chave: str(valor) for chave, valor in (config.get("extra") or {}).items()},
     }
+    if config.get("nonce"):
+        parametros["nonce"] = secrets.token_hex(16)
     fluxo.url = f"{config['authorize']}?{urlencode(parametros)}"
 
     threading.Thread(target=servidor.serve_forever, daemon=True).start()
     return {"tipo": "pkce", "url": fluxo.url, "estado": "aguardando"}
 
 
+def _iniciar_trae(fluxo: _Fluxo) -> dict[str, Any]:
+    """Prepara retorno local exclusivo e pede ao Trae o endereço de autenticação."""
+    trace = str(uuid.uuid4())
+    login_host = ""
+    try:
+        with httpx.Client(timeout=20, follow_redirects=False) as cliente:
+            for url in ("https://api.marscode.com/cloudide/api/v3/trae/GetLoginGuidance",
+                        "https://api.trae.ai/cloudide/api/v3/trae/GetLoginGuidance",
+                        "https://www.trae.ai/cloudide/api/v3/trae/GetLoginGuidance"):
+                try:
+                    resposta = cliente.post(url, json={"loginTraceID": trace, "login_trace_id": trace},
+                                            headers={"accept": "application/json", "user-agent": "Trae/1.0.0"})
+                    if resposta.status_code >= 400:
+                        continue
+                    dados = resposta.json()
+                    for candidato in (dados, dados.get("Result"), dados.get("result"), dados.get("data")):
+                        if isinstance(candidato, dict):
+                            login_host = str(candidato.get("LoginHost") or candidato.get("loginHost") or candidato.get("LoginURL") or "")
+                            if login_host:
+                                break
+                    if login_host:
+                        break
+                except (httpx.HTTPError, ValueError, AttributeError):
+                    continue
+        partes = urlparse(login_host if "://" in login_host else "https://" + login_host)
+        host = (partes.hostname or "").lower()
+        if (partes.scheme != "https" or partes.username or partes.password or partes.port not in (None, 443)
+                or not any(host == dominio or host.endswith("." + dominio) for dominio in ("trae.ai", "marscode.com"))):
+            raise RuntimeError("Trae não devolveu um endereço de login válido")
+        fluxo.config = {**fluxo.config, "caminho": f"/callback/{secrets.token_urlsafe(24)}"}
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except (OSError, ValueError, RuntimeError) as erro:
+        fluxo.estado, fluxo.detalhe = "erro", f"não consegui iniciar o login Trae: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    fluxo.redirect = f"http://localhost:{servidor.server_address[1]}{fluxo.config['caminho']}"
+    maquina = str(uuid.uuid4())
+    parametros = {"login_version": "1", "auth_from": "trae", "login_channel": "native_ide", "plugin_version": "local",
+        "auth_type": "local", "client_id": "ono9krqynydwx5", "redirect": "0", "login_trace_id": trace,
+        "auth_callback_url": fluxo.redirect, "machine_id": maquina, "device_id": "0", "x_device_id": "0",
+        "x_machine_id": maquina, "x_device_brand": "unknown", "x_device_type": "unknown", "x_os_version": "unknown",
+        "x_env": "", "x_app_version": "3.5.54", "x_app_type": "stable"}
+    fluxo.url = f"https://{host}/authorization?{urlencode(parametros)}"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+
+
+def _iniciar_zed(fluxo: _Fluxo) -> dict[str, Any]:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    try:
+        chave = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except (OSError, ValueError) as erro:
+        fluxo.estado, fluxo.detalhe = "erro", f"não consegui iniciar o login Zed: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    fluxo.extra["zed_private_key"] = chave
+    fluxo.extra["zed_system_id"] = str(uuid.uuid4())
+    publica = chave.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.PKCS1)
+    parametros = {"native_app_port": servidor.server_address[1],
+                  "native_app_public_key": base64.urlsafe_b64encode(publica).decode("ascii"),
+                  "system_id": fluxo.extra["zed_system_id"]}
+    fluxo.url = "https://zed.dev/native_app_signin?" + urlencode(parametros)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+
+
+def _iniciar_glm(fluxo: _Fluxo) -> dict[str, Any]:
+    from . import glm_login_koda
+
+    segredo = secrets.token_hex(32)
+    try:
+        with httpx.Client(timeout=20, follow_redirects=False) as cliente:
+            dados = glm_login_koda.iniciar(cliente, fluxo.config, segredo)
+        endereco = urlparse(str(dados["authorize_url"]))
+        dominio = (endereco.hostname or "").lower()
+        if (endereco.scheme != "https" or endereco.username or endereco.password or endereco.port not in (None, 443)
+                or not (dominio == "z.ai" or dominio.endswith(".z.ai"))):
+            raise RuntimeError("GLM devolveu um endereço de autorização inválido")
+        flow_id = str(dados["flow_id"])
+        intervalo = max(3, min(int(dados.get("poll_interval_sec") or 3), 30))
+    except (httpx.HTTPError, ValueError, TypeError, RuntimeError) as erro:
+        fluxo.estado, fluxo.detalhe = "erro", str(erro)
+        return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
+    fluxo.url = str(dados["authorize_url"])
+
+    def esperar() -> None:
+        limite = time.time() + ESPERA_S
+        while fluxo.estado == "aguardando" and time.time() < limite:
+            time.sleep(intervalo)
+            if fluxo.estado != "aguardando":
+                return
+            try:
+                with httpx.Client(timeout=20, follow_redirects=False) as cliente:
+                    estado = glm_login_koda.consultar(cliente, fluxo.config, segredo, flow_id)
+                    if estado.get("status") == "failed":
+                        raise RuntimeError("o login GLM foi recusado ou cancelado")
+                    if estado.get("status") != "ready":
+                        continue
+                    provedor = estado.get(fluxo.config["provider_id"]) or {}
+                    if not isinstance(provedor, dict):
+                        raise RuntimeError("GLM devolveu dados de conta inválidos")
+                    token = provedor.get("access_token") or provedor.get("accessToken") or estado.get("accessToken") or estado.get("access_token")
+                    if not token:
+                        raise RuntimeError("GLM não devolveu a credencial da conta")
+                    chave, business = glm_login_koda.chave_do_plano(cliente, fluxo.config, str(token))
+                if fluxo.estado != "aguardando":
+                    return
+                usuario = estado.get("user") if isinstance(estado.get("user"), dict) else {}
+                _concluir(fluxo, {"access_token": chave, "email": usuario.get("email"), "specific": {
+                    "authMethod": "cli_poll", "userId": usuario.get("user_id"), "zaiBusinessToken": business}})
+                return
+            except (httpx.HTTPError, ValueError, TypeError, RuntimeError) as erro:
+                fluxo.estado, fluxo.detalhe = "erro", str(erro)
+                return
+        if fluxo.estado == "aguardando":
+            fluxo.estado, fluxo.detalhe = "erro", "o tempo do login GLM acabou"
+
+    threading.Thread(target=esperar, daemon=True).start()
+    return {"tipo": "device", "estado": "aguardando", "url": fluxo.url, "codigo": ""}
+
+
+def _iniciar_iflow(fluxo: _Fluxo) -> dict[str, Any]:
+    resultado = _iniciar_pkce(fluxo)
+    if resultado.get("estado") != "aguardando":
+        return resultado
+    config = fluxo.config
+    params = {**config.get("extra_iflow", {}), "redirect": fluxo.redirect,
+              "state": fluxo.state, "client_id": config["client_id"]}
+    fluxo.url = f"{config['authorize']}?{urlencode(params)}"
+    return {**resultado, "url": fluxo.url}
+
+
+def _iniciar_windsurf(fluxo: _Fluxo) -> dict[str, Any]:
+    """Abre o login do Windsurf e confere o estado no retorno local."""
+    try:
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"não consegui abrir o retorno local: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    fluxo.redirect = f"http://localhost:{servidor.server_address[1]}{fluxo.config['caminho']}"
+    parametros = {"response_type": "token", "client_id": fluxo.config["client_id"],
+                  "redirect_uri": fluxo.redirect, "state": fluxo.state, "prompt": "login",
+                  "redirect_parameters_type": "query", "workflow": "onboarding"}
+    fluxo.url = f"{fluxo.config['authorize']}?{urlencode(parametros)}"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+
+
+def _iniciar_cline(fluxo: _Fluxo) -> dict[str, Any]:
+    """Abre o retorno local do Cline em um caminho aleatório exclusivo da sessão."""
+    fluxo.config = {**fluxo.config, "caminho": f"/callback/{secrets.token_urlsafe(24)}", "verificar_state": False}
+    try:
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"não consegui abrir o retorno local: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    fluxo.redirect = f"http://localhost:{servidor.server_address[1]}{fluxo.config['caminho']}"
+    parametros = {"client_type": "extension", "callback_url": fluxo.redirect, "redirect_uri": fluxo.redirect}
+    fluxo.url = f"{fluxo.config['authorize']}?{urlencode(parametros)}"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+
+
+def _iniciar_kimchi(fluxo: _Fluxo) -> dict[str, Any]:
+    """Abre uma sessão de navegador com retorno local e verificação de estado."""
+    fluxo.config = {**fluxo.config, "caminho": f"/callback/{secrets.token_urlsafe(24)}", "verificar_state": True}
+    try:
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"não consegui abrir o retorno local: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    fluxo.redirect = f"http://localhost:{servidor.server_address[1]}{fluxo.config['caminho']}"
+    fluxo.url = f"{fluxo.config['authorize']}?{urlencode({'callback': fluxo.redirect, 'state': fluxo.state})}"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
+
+
 def _iniciar_device(fluxo: _Fluxo) -> dict[str, Any]:
     config = fluxo.config
+    pedido: dict[str, Any] = {"client_id": config["client_id"]}
+    if _escopos(config):
+        pedido["scope"] = _escopos(config)
+    cabecalhos = {"accept": "application/json"}
+    if config.get("identidade") == "kimi":
+        dispositivo = str(uuid.uuid4())
+        fluxo.extra["specific"] = {"deviceId": dispositivo, "authMethod": "device_code"}
+        cabecalhos.update(koda_headers.kimi(dispositivo))
+    elif config.get("identidade") == "grok-cli":
+        fluxo.extra["specific"] = {"authMethod": "device_code"}
+        cabecalhos["user-agent"] = "grok-cli/0.2.1"
+    elif config.get("identidade") == "muse":
+        cabecalhos["x-api-version"] = "1.0.0"
+    if config.get("referrer"):
+        pedido["referrer"] = config["referrer"]
+    if config.get("audience"):
+        pedido["audience"] = config["audience"]
+    if config.get("pkce_device"):
+        pedido.update(code_challenge=_challenge(fluxo.verifier), code_challenge_method="S256")
     try:
         with httpx.Client(timeout=20) as cliente:
             resposta = cliente.post(
                 config["device"],
-                data={"client_id": config["client_id"], "scope": _escopos(config)},
-                headers={"accept": "application/json"},
+                data=pedido,
+                headers=cabecalhos,
             )
             resposta.raise_for_status()
             dado = resposta.json()
@@ -622,32 +902,66 @@ def _iniciar_device(fluxo: _Fluxo) -> dict[str, Any]:
         return {"tipo": "device", "mensagem": fluxo.detalhe, "estado": "erro"}
 
     fluxo.codigo = dado.get("user_code")
-    fluxo.url = dado.get("verification_uri") or dado.get("verification_url")
-    fluxo.state = dado.get("device_code", "")
-    intervalo = max(int(dado.get("interval") or 5), 5)
-    expira = int(dado.get("expires_in") or 900)
+    fluxo.url = dado.get("verification_uri_complete") or dado.get("verification_uri") or dado.get("verification_url")
+    if not fluxo.url and config.get("pagina_device") and fluxo.codigo:
+        fluxo.url = f"{config['pagina_device']}?{urlencode({'user_code': fluxo.codigo})}"
+    fluxo.state = dado.get("device_code") or ""
+    if not fluxo.state and config.get("poll_por_codigo_permitido"):
+        fluxo.state = fluxo.codigo or ""
+        fluxo.extra["poll_por_codigo"] = bool(fluxo.state)
+    if not fluxo.url or not fluxo.state or not fluxo.codigo:
+        fluxo.estado = "erro"
+        fluxo.detalhe = "o fornecedor não devolveu os dados necessários para o login"
+        return {"tipo": "device", "mensagem": fluxo.detalhe, "estado": "erro"}
+    intervalo_recebido = float(dado.get("interval") or 5)
+    if fluxo.extra.get("poll_por_codigo") and intervalo_recebido >= 60:
+        intervalo_recebido /= 1000
+    intervalo = max(int(intervalo_recebido), 5)
+    expira = float(dado.get("expires_in") or dado.get("expired_in") or 900)
+    if expira >= 1_000_000_000_000:
+        expira = max(1, (expira / 1000) - time.time())
 
     def esperar() -> None:
+        nonlocal intervalo
         limite = time.time() + min(expira, ESPERA_S)
         while time.time() < limite and fluxo.estado == "aguardando":
             time.sleep(intervalo)
+            if fluxo.estado != "aguardando":
+                return
+            corpo = {
+                "client_id": config["client_id"],
+                "user_code" if fluxo.extra.get("poll_por_codigo") else "device_code": fluxo.state,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }
+            if config.get("pkce_device"):
+                corpo["code_verifier"] = fluxo.verifier
             try:
                 with httpx.Client(timeout=20) as cliente:
                     resposta = cliente.post(
                         config["token"],
-                        data={
-                            "client_id": config["client_id"],
-                            "device_code": fluxo.state,
-                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                        },
-                        headers={"accept": "application/json"},
+                        data=corpo,
+                        headers=cabecalhos,
                     )
                     dado = resposta.json()
             except (httpx.HTTPError, ValueError):
                 continue
             if dado.get("access_token"):
+                if config.get("identidade") == "muse":
+                    _concluir_muse(fluxo, str(dado["access_token"]))
+                    return
+                if fluxo.extra.get("specific"):
+                    dado["specific"] = {**fluxo.extra["specific"], **(dado.get("specific") or {})}
+                    if config.get("identidade") == "grok-cli" and dado.get("id_token"):
+                        dado["specific"]["idToken"] = dado["id_token"]
                 _concluir(fluxo, dado)
                 return
+            if dado.get("status"):
+                situacao = str(dado["status"])
+                dado["error"] = {"pending": "authorization_pending", "denied": "access_denied",
+                                 "expired": "expired_token"}.get(situacao, situacao)
+            if dado.get("error") == "slow_down":
+                intervalo += 5
+                continue
             if dado.get("error") not in (None, "authorization_pending", "slow_down"):
                 fluxo.estado = "erro"
                 fluxo.detalhe = str(dado.get("error_description") or dado.get("error"))
@@ -658,6 +972,164 @@ def _iniciar_device(fluxo: _Fluxo) -> dict[str, Any]:
 
     threading.Thread(target=esperar, daemon=True).start()
     return {"tipo": "device", "url": fluxo.url, "codigo": fluxo.codigo, "estado": "aguardando"}
+
+
+def _concluir_muse(fluxo: _Fluxo, token_conta: str) -> None:
+    """Obtém a credencial de inferência para a conta aprovada no dispositivo."""
+    try:
+        with httpx.Client(timeout=30, follow_redirects=False) as cliente:
+            resposta = cliente.post(
+                "https://api.meta.ai/muse-code/key",
+                headers={"authorization": f"Bearer {token_conta}", "accept": "application/json",
+                         "x-api-version": "1.0.0"},
+                json={"onboard": True},
+            )
+            resposta.raise_for_status()
+            dados = resposta.json()
+    except (httpx.HTTPError, ValueError) as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"a Meta não conseguiu emitir a credencial de uso: {erro}"
+        return
+    if not isinstance(dados, dict) or dados.get("is_subs_active") is False or not dados.get("api_key"):
+        fluxo.estado = "erro"
+        fluxo.detalhe = "a Meta não liberou uma credencial de uso para esta conta"
+        return
+    _concluir(fluxo, {
+        "access_token": dados["api_key"], "email": dados.get("user_email"),
+        "specific": {"authMethod": "device_code", "oauthAccessToken": token_conta,
+                     "subscriptionTier": dados.get("subs_tier_name")},
+    })
+
+
+def _cabecalhos_codebuddy(config: dict[str, Any]) -> dict[str, str]:
+    return {
+        "accept": "application/json", "user-agent": str(config["user_agent"]),
+        "x-requested-with": "XMLHttpRequest", "x-domain": urlparse(str(config["base"])).netloc,
+        "x-product": "SaaS",
+    }
+
+
+def _iniciar_codebuddy(fluxo: _Fluxo) -> dict[str, Any]:
+    """Abre a autorização do CodeBuddy e acompanha a aprovação no navegador."""
+    config = fluxo.config
+    cabecalhos = {**_cabecalhos_codebuddy(config), "x-no-authorization": "true", "x-no-user-id": "true"}
+    try:
+        with httpx.Client(timeout=20) as cliente:
+            resposta = cliente.post(config["estado"], params={"platform": config["plataforma"]},
+                                    headers=cabecalhos, json={})
+            resposta.raise_for_status()
+            recebido = resposta.json()
+    except (httpx.HTTPError, ValueError) as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"o CodeBuddy não abriu o login: {erro}"
+        return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
+    dados = recebido.get("data") if isinstance(recebido, dict) else None
+    if not isinstance(recebido, dict) or recebido.get("code") != 0 or not isinstance(dados, dict) or not dados.get("state") or not dados.get("authUrl"):
+        fluxo.estado = "erro"
+        fluxo.detalhe = "o CodeBuddy não devolveu os dados necessários para o login"
+        return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
+    fluxo.state, fluxo.url = str(dados["state"]), str(dados["authUrl"])
+
+    def esperar() -> None:
+        limite = time.time() + ESPERA_S
+        consulta_headers = {**cabecalhos, "x-no-enterprise-id": "true", "x-no-department-info": "true"}
+        while time.time() < limite and fluxo.estado == "aguardando":
+            time.sleep(config["intervalo"])
+            if fluxo.estado != "aguardando":
+                return
+            try:
+                with httpx.Client(timeout=20) as cliente:
+                    resposta = cliente.get(config["token"], params={"state": fluxo.state}, headers=consulta_headers)
+                    resposta.raise_for_status()
+                    recebido = resposta.json()
+            except (httpx.HTTPError, ValueError):
+                continue
+            if not isinstance(recebido, dict):
+                continue
+            dados = recebido.get("data")
+            if recebido.get("code") == 0 and isinstance(dados, dict) and dados.get("accessToken"):
+                _concluir(fluxo, {"access_token": dados["accessToken"], "refresh_token": dados.get("refreshToken"),
+                                  "expires_in": dados.get("expiresIn") or 86400})
+                return
+            if recebido.get("code") == 11217:
+                continue
+            fluxo.estado = "erro"
+            fluxo.detalhe = str(recebido.get("msg") or "o CodeBuddy recusou o login")
+            return
+        if fluxo.estado == "aguardando":
+            fluxo.estado = "erro"
+            fluxo.detalhe = "o tempo do login acabou"
+
+    threading.Thread(target=esperar, daemon=True).start()
+    return {"tipo": "device", "estado": "aguardando", "url": fluxo.url}
+
+
+def _iniciar_kilo(fluxo: _Fluxo) -> dict[str, Any]:
+    """Solicita e acompanha o código de dispositivo fornecido pelo Kilo."""
+    try:
+        with httpx.Client(timeout=20) as cliente:
+            resposta = cliente.post(fluxo.config["device"], json={})
+            resposta.raise_for_status()
+            dados = resposta.json()
+    except (httpx.HTTPError, ValueError) as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"o Kilo não abriu o login: {erro}"
+        return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
+    if not isinstance(dados, dict) or not dados.get("code") or not dados.get("verificationUrl"):
+        fluxo.estado = "erro"
+        fluxo.detalhe = "o Kilo não devolveu os dados necessários para o login"
+        return {"tipo": "device", "estado": "erro", "mensagem": fluxo.detalhe}
+    fluxo.codigo = str(dados["code"])
+    fluxo.state = fluxo.codigo
+    fluxo.url = str(dados["verificationUrl"])
+    try:
+        expira = max(1, int(dados.get("expiresIn") or 300))
+    except (TypeError, ValueError):
+        expira = 300
+
+    def esperar() -> None:
+        limite = time.time() + min(expira, ESPERA_S)
+        endereco = f"{str(fluxo.config['poll']).rstrip('/')}/{quote(fluxo.state, safe='')}"
+        while time.time() < limite and fluxo.estado == "aguardando":
+            time.sleep(3)
+            if fluxo.estado != "aguardando":
+                return
+            try:
+                with httpx.Client(timeout=20) as cliente:
+                    resposta = cliente.get(endereco)
+                    if resposta.status_code == 202:
+                        continue
+                    if resposta.status_code >= 400:
+                        fluxo.estado = "erro"
+                        fluxo.detalhe = f"o Kilo recusou o login (HTTP {resposta.status_code})"
+                        return
+                    dados = resposta.json()
+            except (httpx.HTTPError, ValueError):
+                continue
+            if not isinstance(dados, dict) or dados.get("status") != "approved" or not dados.get("token"):
+                continue
+            token = str(dados["token"])
+            organizacao = ""
+            try:
+                with httpx.Client(timeout=20) as cliente:
+                    perfil = cliente.get(f"{str(fluxo.config['api']).rstrip('/')}/api/profile",
+                                         headers={"authorization": f"Bearer {token}"})
+                    if perfil.status_code < 400:
+                        perfil_dado = perfil.json()
+                        organizacoes = perfil_dado.get("organizations") or []
+                        if organizacoes and isinstance(organizacoes[0], dict):
+                            organizacao = str(organizacoes[0].get("id") or "")
+            except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+                pass
+            _concluir(fluxo, {"access_token": token, "email": dados.get("userEmail"),
+                              "specific": {"orgId": organizacao} if organizacao else {}})
+            return
+        if fluxo.estado == "aguardando":
+            fluxo.estado = "erro"
+            fluxo.detalhe = "o tempo do login acabou"
+
+    threading.Thread(target=esperar, daemon=True).start()
+    return {"tipo": "device", "estado": "aguardando", "url": fluxo.url, "codigo": fluxo.codigo}
 
 
 def _iniciar_qoder(fluxo: _Fluxo) -> dict[str, Any]:
@@ -681,7 +1153,6 @@ def _iniciar_qoder(fluxo: _Fluxo) -> dict[str, Any]:
         "challenge_method": "S256",
         "nonce": fluxo.state,
         "machine_id": machine,
-        "client_id": config["client_id"],
     }
     fluxo.url = f"{config['login']}?{urlencode(parametros)}"
 
@@ -689,18 +1160,19 @@ def _iniciar_qoder(fluxo: _Fluxo) -> dict[str, Any]:
         limite = time.time() + ESPERA_S
         while time.time() < limite and fluxo.estado == "aguardando":
             time.sleep(3)
+            if fluxo.estado != "aguardando":
+                return
             try:
                 with httpx.Client(timeout=20) as cliente:
                     resposta = cliente.get(
                         f"{openapi}/api/v1/deviceToken/poll",
-                        params={"nonce": fluxo.state, "verifier": fluxo.verifier},
+                        params={"nonce": fluxo.state, "verifier": fluxo.verifier, "challenge_method": "S256"},
                         headers={"accept": "application/json"},
                     )
             except httpx.HTTPError:
                 continue
-            if resposta.status_code in (404, 400):
-                # 404 = a página ainda não registrou este nonce (ninguém escolheu a conta);
-                # 400 sem verifier seria erro nosso, e o laço desiste abaixo pelo tempo.
+            if resposta.status_code in (202, 404):
+                # A pessoa ainda não concluiu a autorização no navegador.
                 continue
             if resposta.status_code >= 400:
                 fluxo.estado = "erro"
@@ -723,64 +1195,48 @@ def _iniciar_qoder(fluxo: _Fluxo) -> dict[str, Any]:
 def _concluir_qoder(
     fluxo: _Fluxo, config: dict[str, Any], dado: dict[str, Any], machine: str
 ) -> bool:
-    """Troca o device token pelo par de tokens da conta. `True` quando concluiu."""
+    """Guarda o token recebido do dispositivo junto da identidade necessária ao cliente."""
     corpo = dado.get("data") if isinstance(dado.get("data"), dict) else dado
-    device = corpo.get("deviceToken") or corpo.get("token") or corpo.get("accessToken")
-    if not device:
+    acesso = corpo.get("deviceToken") or corpo.get("token") or corpo.get("accessToken")
+    if not acesso:
         return False
-    openapi = str(config["openapi"]).rstrip("/")
-    trocado: dict[str, Any] = {}
-    for tentativa in (
-        {"json": {"deviceToken": device, "machineId": machine}},
-        {"headers": {"authorization": f"Bearer {device}"}},
-    ):
-        try:
-            with httpx.Client(timeout=30) as cliente:
-                resposta = cliente.post(
-                    f"{openapi}/api/v1/jobToken/exchange",
-                    headers={"accept": "application/json", **tentativa.get("headers", {})},
-                    **({"json": tentativa["json"]} if "json" in tentativa else {}),
-                )
-        except httpx.HTTPError:
-            continue
-        if resposta.status_code < 400:
-            try:
-                trocado = resposta.json()
-            except ValueError:
-                trocado = {}
-            break
-    dados = trocado.get("data") if isinstance(trocado.get("data"), dict) else trocado
-    acesso = dados.get("accessToken") or dados.get("access_token") or device
+    info = _detalhes_qoder(config, str(acesso))
+    usuario = str(corpo.get("user_id") or corpo.get("userId") or info.get("id") or "")
+    expiracao = (_expiracao_absoluta(corpo.get("expires_at") or corpo.get("expiresAt"))
+                 or _expira_em({"expires_in": corpo.get("expiresIn") or corpo.get("expires_in")}))
     fluxo.estado = "concluido"
-    # O `dt-…` **é** a credencial (o `/userinfo` aceita ele direto como Bearer), então a conta
-    # sai de lá — antes ficava sem nome e a tela mostrava «conta sem nome».
-    fluxo.conta = dados.get("email") or dados.get("name") or _conta_qoder(config, acesso)
+    fluxo.conta = (info.get("email") or info.get("name") or info.get("username")
+                   or (f"qoder-user-{usuario}" if usuario else None))
     _gravar(fluxo.settings, fluxo.id, {
         "id": fluxo.id,
         "conta": fluxo.conta,
         "access": acesso,
-        "refresh": dados.get("refreshToken") or dados.get("refresh_token"),
-        "expiraEm": _expira_em({"expires_in": dados.get("expiresIn") or dados.get("expires_in")}),
+        "refresh": corpo.get("refreshToken") or corpo.get("refresh_token"),
+        "expiraEm": expiracao,
         "id_token": None,
         "escopo": machine,
+        "specific": {"authMethod": "device", "machineId": machine, "userId": usuario,
+                     "organizationId": str(info.get("organization_id") or info.get("organizationId") or "")},
     })
     return True
 
 
-def _conta_qoder(config: dict[str, Any], token: str) -> str | None:
-    """Quem é a conta, pelo `/userinfo` do Qoder (aceita o device token como Bearer)."""
+def _detalhes_qoder(config: dict[str, Any], token: str) -> dict[str, Any]:
+    """Consulta a identidade da conta pelo endpoint do Qoder."""
     url = config.get("userinfo")
     if not url:
-        return None
+        return {}
     try:
         with httpx.Client(timeout=15) as cliente:
             resposta = cliente.get(url, headers={"authorization": f"Bearer {token}"})
             if resposta.status_code >= 400:
-                return None
+                return {}
             dados = resposta.json()
     except (httpx.HTTPError, ValueError):
-        return None
-    return dados.get("email") or dados.get("name") or dados.get("username")
+        return {}
+    if not isinstance(dados, dict):
+        return {}
+    return dados.get("data") if isinstance(dados.get("data"), dict) else dados
 
 
 def _iniciar_aws_sso(fluxo: _Fluxo) -> dict[str, Any]:
@@ -805,6 +1261,8 @@ def _iniciar_aws_sso(fluxo: _Fluxo) -> dict[str, Any]:
             )
             registro.raise_for_status()
             criado = registro.json()
+            if not criado.get("clientId") or not criado.get("clientSecret"):
+                raise ValueError("a AWS não devolveu as credenciais do aplicativo")
             fluxo.state = json.dumps(
                 {
                     "clientId": criado.get("clientId"),
@@ -829,14 +1287,21 @@ def _iniciar_aws_sso(fluxo: _Fluxo) -> dict[str, Any]:
     fluxo.codigo = dado.get("userCode")
     fluxo.url = dado.get("verificationUriComplete") or dado.get("verificationUri")
     device_code = str(dado.get("deviceCode") or "")
+    if not fluxo.url or not fluxo.codigo or not device_code:
+        fluxo.estado = "erro"
+        fluxo.detalhe = "a AWS não devolveu os dados necessários para o login"
+        return {"tipo": "device", "mensagem": fluxo.detalhe, "estado": "erro"}
     intervalo = max(int(dado.get("interval") or 5), 5)
     expira = int(dado.get("expiresIn") or 600)
 
     def esperar() -> None:
+        nonlocal intervalo
         limite = time.time() + min(expira, ESPERA_S)
         credenciais = json.loads(fluxo.state)
         while time.time() < limite and fluxo.estado == "aguardando":
             time.sleep(intervalo)
+            if fluxo.estado != "aguardando":
+                return
             try:
                 with httpx.Client(timeout=20) as cliente:
                     resposta = cliente.post(
@@ -852,15 +1317,25 @@ def _iniciar_aws_sso(fluxo: _Fluxo) -> dict[str, Any]:
             except (httpx.HTTPError, ValueError):
                 continue
             if dado.get("accessToken"):
+                partes_host = (urlparse(base).hostname or "").split(".")
+                regiao = partes_host[1] if len(partes_host) > 2 and partes_host[0] == "oidc" else "us-east-1"
+                especificos = {**credenciais, "region": regiao, "authMethod": "builder-id",
+                               "startUrl": config.get("start_url")}
+                if dado.get("profileArn"):
+                    especificos["profileArn"] = dado["profileArn"]
                 _concluir(
                     fluxo,
                     {
                         "access_token": dado.get("accessToken"),
                         "refresh_token": dado.get("refreshToken"),
                         "expires_in": dado.get("expiresIn"),
+                        "specific": especificos,
                     },
                 )
                 return
+            if dado.get("error") == "slow_down":
+                intervalo += 5
+                continue
             if dado.get("error") not in (None, "authorization_pending", "slow_down"):
                 fluxo.estado = "erro"
                 fluxo.detalhe = str(dado.get("error_description") or dado.get("error"))
@@ -934,17 +1409,18 @@ def _fluxo_do_caminho(caminho_pedido: str) -> _Fluxo | None:
 
 def _trocar_codigo(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
     config = fluxo.config
-    if config.get("motor") == "9router":
-        from . import auth_9router
-
-        pedido = auth_9router.chamar(
-            fluxo.settings, config["fonte"], "exchange",
-            code=codigo, redirectUri=fluxo.redirect, codeVerifier=fluxo.verifier,
-            state=fluxo.state, meta=fluxo.auth_meta,
-        )
-        if not pedido.get("ok"):
-            raise RuntimeError(pedido.get("error") or "o provedor recusou a troca do login")
-        return pedido["result"]
+    if config.get("tipo") == "windsurf":
+        return _trocar_codigo_windsurf(fluxo, codigo)
+    if config.get("tipo") == "cline":
+        return _trocar_codigo_cline(fluxo, codigo)
+    if config.get("tipo") == "kimchi":
+        return _validar_kimchi(fluxo, codigo)
+    if config.get("tipo") == "iflow":
+        return _trocar_codigo_iflow(fluxo, codigo)
+    if config.get("tipo") == "zed":
+        return _trocar_codigo_zed(fluxo, codigo)
+    if config.get("tipo") == "trae":
+        return _trocar_codigo_trae(fluxo, codigo)
     corpo: dict[str, Any] = {
         "grant_type": "authorization_code",
         "code": codigo,
@@ -974,19 +1450,178 @@ def _trocar_codigo(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
         return resposta.json()
 
 
+def _trocar_codigo_trae(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    consulta = parse_qs(urlparse(codigo if "?" in codigo else "?" + codigo.lstrip("?")).query)
+    refresh = next((consulta[k][0] for k in ("refreshToken", "refresh_token", "RefreshToken") if consulta.get(k)), "")
+    token_cloud = next((consulta[k][0] for k in ("x-cloudide-token", "xCloudideToken", "accessToken", "access_token", "token") if consulta.get(k)), "")
+    if not refresh:
+        raise RuntimeError("o retorno Trae não contém o token de renovação")
+    corpo = {"ClientID": "ono9krqynydwx5", "RefreshToken": refresh, "ClientSecret": "-", "UserID": ""}
+    headers = {"accept": "application/json", "user-agent": "Trae/1.0.0"}
+    if token_cloud:
+        headers["x-cloudide-token"] = token_cloud
+    with httpx.Client(timeout=30, follow_redirects=False) as cliente:
+        for origem in ("https://api.marscode.com", "https://api.trae.ai", "https://www.trae.ai", "https://www.marscode.com"):
+            try:
+                resposta = cliente.post(origem + fluxo.config["exchange_path"], headers=headers, json=corpo)
+                if resposta.status_code >= 400:
+                    continue
+                bruto = resposta.json()
+                dados = bruto.get("Result") or bruto.get("result") or bruto
+                if not isinstance(dados, dict):
+                    continue
+                acesso = dados.get("AccessToken") or dados.get("accessToken") or dados.get("access_token")
+                if acesso:
+                    return {"access_token": acesso, "refresh_token": dados.get("RefreshToken") or dados.get("refresh_token") or refresh,
+                            "expires_at": _expiracao_absoluta(dados.get("ExpiresAt") or dados.get("expires_at")),
+                            "specific": {"authMethod": "oauth"}}
+            except (httpx.HTTPError, ValueError, AttributeError):
+                continue
+    raise RuntimeError("Trae recusou a troca do login; confira a configuração do endpoint")
+
+
+def _trocar_codigo_zed(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    try:
+        dados = json.loads(codigo)
+    except ValueError:
+        consulta = parse_qs(urlparse(codigo if "?" in codigo else "?" + codigo.lstrip("?")).query)
+        dados = {k: v[0] for k, v in consulta.items() if v}
+    if not isinstance(dados, dict):
+        raise RuntimeError("retorno Zed inválido")
+    usuario = str(dados.get("user_id") or dados.get("userId") or "")
+    encriptado = str(dados.get("access_token") or dados.get("accessToken") or dados.get("token") or "")
+    chave = fluxo.extra.get("zed_private_key")
+    if not usuario or any(c in usuario for c in "\r\n ") or not encriptado or not chave or len(encriptado) > 2048:
+        raise RuntimeError("o retorno Zed não contém a conta ou credencial esperada")
+    try:
+        cifrado = base64.b64decode(encriptado + "=" * (-len(encriptado) % 4), altchars=b"-_", validate=True)
+        try:
+            token = chave.decrypt(cifrado, padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        except ValueError:
+            token = chave.decrypt(cifrado, padding.PKCS1v15())
+        acesso = token.decode("utf-8")
+        if not acesso or any(c in acesso for c in "\r\n"):
+            raise ValueError("token inválido")
+    except (ValueError, UnicodeDecodeError) as erro:
+        raise RuntimeError("não consegui validar o retorno criptografado do Zed") from erro
+    fluxo.extra.pop("zed_private_key", None)
+    return {"access_token": acesso, "specific": {"userId": usuario, "systemId": fluxo.extra["zed_system_id"], "authMethod": "oauth"}}
+
+
+def _trocar_codigo_iflow(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    config = fluxo.config
+    basic = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode()).decode("ascii")
+    corpo = {"grant_type": "authorization_code", "code": codigo, "redirect_uri": fluxo.redirect,
+             "client_id": config["client_id"], "client_secret": config["client_secret"]}
+    with httpx.Client(timeout=30, follow_redirects=False) as cliente:
+        resposta = cliente.post(config["token"], data=corpo, headers={"accept": "application/json", "authorization": f"Basic {basic}"})
+        if resposta.status_code >= 400:
+            raise RuntimeError(f"iFlow recusou o login (HTTP {resposta.status_code})")
+        tokens = resposta.json()
+        if not isinstance(tokens, dict) or not tokens.get("access_token"):
+            raise RuntimeError("iFlow não devolveu token de acesso")
+        info = cliente.get(config["userinfo"], params={"accessToken": tokens["access_token"]}, headers={"accept": "application/json"})
+        if info.status_code >= 400:
+            raise RuntimeError(f"iFlow recusou a consulta da conta (HTTP {info.status_code})")
+        dados = info.json()
+        usuario = dados.get("data") if isinstance(dados, dict) and dados.get("success") else None
+        if not isinstance(usuario, dict) or not usuario.get("apiKey"):
+            raise RuntimeError("iFlow não devolveu a chave da conta")
+        return {**tokens, "email": usuario.get("email") or usuario.get("phone"), "specific": {"apiKey": usuario["apiKey"]}}
+
+
+def _trocar_codigo_windsurf(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    credencial = codigo.strip()
+    if credencial.lower().startswith("bearer "):
+        credencial = credencial[7:].strip()
+    if credencial.startswith("sk-ws-"):
+        return {"access_token": credencial, "specific": {"authMethod": "imported", "apiServerUrl": fluxo.config["api"]}}
+    try:
+        with httpx.Client(timeout=30, follow_redirects=False) as cliente:
+            resposta = cliente.post(fluxo.config["register"], json={"firebase_id_token": credencial},
+                                    headers={"accept": "application/json", "user-agent": "Koda/0.8.0"})
+            resposta.raise_for_status()
+            dados = resposta.json()
+    except (httpx.HTTPError, ValueError) as erro:
+        raise RuntimeError("o Windsurf não aceitou o login") from erro
+    chave = (dados.get("apiKey") or dados.get("api_key")) if isinstance(dados, dict) else None
+    if not chave:
+        raise RuntimeError("o Windsurf não devolveu uma credencial de acesso")
+    endereco = str(dados.get("apiServerUrl") or dados.get("api_server_url") or fluxo.config["api"])
+    partes = urlparse(endereco)
+    dominio = (partes.hostname or "").lower()
+    if (partes.scheme != "https" or partes.username or partes.password or partes.query or partes.fragment
+            or not any(dominio == base or dominio.endswith("." + base) for base in ("codeium.com", "windsurf.com"))):
+        raise RuntimeError("o Windsurf devolveu um endereço de serviço inválido")
+    return {"access_token": str(chave), "email": dados.get("name"),
+            "specific": {"authMethod": "oauth", "apiServerUrl": endereco, "firebaseIdToken": credencial}}
+
+
+def _trocar_codigo_cline(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    """Aceita o retorno codificado do navegador ou troca um código no provedor."""
+    dados: dict[str, Any] = {}
+    try:
+        carga = base64.urlsafe_b64decode(codigo + "=" * (-len(codigo) % 4))
+        candidato = json.loads(carga.decode("utf-8"))
+        if isinstance(candidato, dict) and candidato.get("accessToken"):
+            dados = candidato
+    except (ValueError, UnicodeError):
+        pass
+    if not dados:
+        with httpx.Client(timeout=30) as cliente:
+            resposta = cliente.post(
+                fluxo.config["token"], headers={"accept": "application/json"},
+                json={"grant_type": "authorization_code", "code": codigo,
+                      "client_type": "extension", "redirect_uri": fluxo.redirect},
+            )
+            if resposta.status_code >= 400:
+                raise RuntimeError(f"o Cline recusou a troca: {resposta.text[:300]}")
+            recebido = resposta.json()
+            dados = recebido.get("data") if isinstance(recebido.get("data"), dict) else recebido
+    info = dados.get("userInfo") if isinstance(dados.get("userInfo"), dict) else {}
+    return {
+        "access_token": dados.get("accessToken"), "refresh_token": dados.get("refreshToken"),
+        "expires_at": (_expiracao_absoluta(dados.get("expiresAt"))
+                       or _expira_em({"expires_in": dados.get("expiresIn")})),
+        "email": dados.get("email") or info.get("email"),
+        "specific": {"authMethod": "oauth", "firstName": dados.get("firstName"), "lastName": dados.get("lastName")},
+    }
+
+
+def _validar_kimchi(fluxo: _Fluxo, token: str) -> dict[str, Any]:
+    """Valida a credencial devolvida pelo navegador antes de guardá-la."""
+    credencial = token.strip()
+    if not credencial:
+        raise RuntimeError("o Kimchi não devolveu uma credencial")
+    cabecalhos = {"authorization": f"Bearer {credencial}", "accept": "application/json"}
+    try:
+        with httpx.Client(timeout=20, follow_redirects=False) as cliente:
+            validacao = cliente.get(fluxo.config["validar"], headers=cabecalhos)
+            validacao.raise_for_status()
+            usuario: dict[str, Any] = {}
+            if fluxo.config.get("userinfo"):
+                try:
+                    resposta = cliente.get(fluxo.config["userinfo"], headers=cabecalhos)
+                    if resposta.status_code < 400:
+                        recebido = resposta.json()
+                        usuario = recebido if isinstance(recebido, dict) else {}
+                except (httpx.HTTPError, ValueError):
+                    pass
+    except httpx.HTTPError as erro:
+        raise RuntimeError(f"não consegui validar a credencial do Kimchi: {erro}") from erro
+    usuario_id = str(usuario.get("id") or "")
+    return {
+        "access_token": credencial,
+        "email": usuario.get("email") or (f"kimchi-user-{usuario_id}" if usuario_id else None),
+        "specific": {"authMethod": "browser_token", "userId": usuario_id,
+                     "username": str(usuario.get("username") or "")},
+    }
+
+
 def _concluir(fluxo: _Fluxo, dado: dict[str, Any]) -> None:
-    if fluxo.config.get("motor") == "9router":
-        dado = {
-            "access_token": dado.get("accessToken") or dado.get("apiKey"),
-            "refresh_token": dado.get("refreshToken"),
-            "expires_in": dado.get("expiresIn"),
-            "expires_at": dado.get("expiresAt"),
-            "id_token": dado.get("idToken"),
-            "scope": dado.get("scope"),
-            "email": dado.get("email") or dado.get("displayName"),
-            "specific": {**(dado.get("providerSpecificData") or {}),
-                         **({"apiKey": dado["apiKey"]} if dado.get("apiKey") else {})},
-        }
     if not dado.get("access_token"):
         fluxo.estado = "erro"
         fluxo.detalhe = "o provedor não devolveu token de acesso"
@@ -1045,9 +1680,12 @@ def _extrair_codigo(texto: str) -> tuple[str, str]:
     limpo = (texto or "").strip()
     if not limpo:
         return "", ""
-    if "code=" in limpo:
-        consulta = parse_qs(urlparse(limpo).query)
-        return consulta.get("code", [""])[0], consulta.get("state", [""])[0]
+    partes = urlparse(limpo)
+    if partes.scheme in {"http", "https"}:
+        consulta = parse_qs(partes.query)
+        codigo = next((consulta[chave][0] for chave in ("code", "access_token", "token") if consulta.get(chave)), "")
+        if codigo:
+            return codigo, consulta.get("state", [""])[0]
     if "#" in limpo:
         codigo, _, state = limpo.partition("#")
         return codigo.strip(), state.strip()
@@ -1068,7 +1706,7 @@ def concluir_com_texto(settings: Settings, identificador: str, texto: str) -> di
                           "specific": {"apiKey": segredo}})
         return {"ok": fluxo.estado == "concluido", "conta": fluxo.conta,
                 "mensagem": fluxo.detalhe if fluxo.estado != "concluido" else None}
-    codigo, state = _extrair_codigo(texto)
+    codigo, state = (texto.strip(), "") if fluxo.config.get("tipo") in {"zed", "trae"} else _extrair_codigo(texto)
     if not codigo:
         return {"ok": False, "mensagem": "não achei um código nesse texto"}
     if state and state != fluxo.state:
@@ -1104,42 +1742,117 @@ def estado(identificador: str) -> dict[str, Any]:
 def cancelar(identificador: str) -> None:
     with _trava:
         fluxo = _vivos.pop(identificador, None)
-    if fluxo and fluxo.servidor is not None:
-        threading.Thread(target=fluxo.servidor.shutdown, daemon=True).start()
+    if fluxo:
+        fluxo.estado = "cancelado"
+        if fluxo.servidor is not None:
+            threading.Thread(target=fluxo.servidor.shutdown, daemon=True).start()
 
 
 # ------------------------------------------------------------------- refresh
 
 
-def garantir(settings: Settings, identificador: str) -> dict[str, Any] | None:
+def garantir(settings: Settings, identificador: str, conta_id: str | None = None) -> dict[str, Any] | None:
     """Devolve o login guardado com token válido, renovando se preciso."""
-    dado = guardado(settings, identificador)
-    if dado is None:
-        return None
-    expira = dado.get("expiraEm")
-    if expira:
-        try:
-            quando = datetime.fromisoformat(expira)
-        except ValueError:
-            quando = None
-        if quando is not None and quando > datetime.now(tz=timezone.utc):
+    chave = (str(settings.database_path), identificador)
+    with _trava:
+        bloqueio = _travas_renovacao.setdefault(chave, threading.Lock())
+    # Alguns provedores invalidam o refresh token assim que ele é usado. A segunda
+    # chamada espera e relê a conta para não tentar renovar com o token antigo.
+    with bloqueio:
+        dado = (next((item for item in contas(settings, identificador) if item["id"] == conta_id), None)
+                if conta_id else guardado(settings, identificador))
+        if dado is None:
+            return None
+        expira = dado.get("expiraEm")
+        if expira:
+            try:
+                quando = datetime.fromisoformat(expira)
+            except ValueError:
+                quando = None
+            if quando is not None and quando > datetime.now(tz=timezone.utc):
+                return dado
+        if not dado.get("refresh"):
             return dado
-    if not dado.get("refresh"):
+        try:
+            novo = _renovar(identificador, dado)
+        except Exception:  # noqa: BLE001 — renovar é otimização, não pode derrubar a leitura
+            novo = None
+        if novo:
+            dado.update(novo)
+            _gravar(settings, identificador, dado)
         return dado
-    try:
-        novo = _renovar(identificador, dado)
-    except Exception:  # noqa: BLE001 — renovar é otimização, não pode derrubar a leitura
-        novo = None
-    if novo:
-        dado.update(novo)
-        _gravar(settings, identificador, dado)
-    return dado
 
 
 def _renovar(identificador: str, dado: dict[str, Any]) -> dict[str, Any] | None:
     config = FLUXOS.get(identificador)
     if config is None or not dado.get("refresh"):
         return None
+    if config.get("tipo") == "codebuddy":
+        try:
+            with httpx.Client(timeout=30) as cliente:
+                resposta = cliente.post(config["refresh_url"], json={}, headers={
+                    **_cabecalhos_codebuddy(config), "x-refresh-token": dado["refresh"],
+                    "x-auth-refresh-source": "plugin",
+                })
+                resposta.raise_for_status()
+                recebido = resposta.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        novo = recebido.get("data") if isinstance(recebido, dict) else None
+        if not isinstance(recebido, dict) or recebido.get("code") != 0 or not isinstance(novo, dict) or not novo.get("accessToken"):
+            return None
+        return {"access": novo["accessToken"], "refresh": novo.get("refreshToken") or dado["refresh"],
+                "expiraEm": _expira_em({"expires_in": novo.get("expiresIn") or 86400})}
+    if config.get("tipo") == "aws_sso":
+        credenciais = dado.get("specific") or {}
+        client_id = credenciais.get("clientId")
+        client_secret = credenciais.get("clientSecret")
+        if not client_id or not client_secret or not config.get("oidc"):
+            return None
+        try:
+            with httpx.Client(timeout=30) as cliente:
+                resposta = cliente.post(
+                    f"{str(config['oidc']).rstrip('/')}/token",
+                    json={"clientId": client_id, "clientSecret": client_secret,
+                          "grantType": "refresh_token", "refreshToken": dado["refresh"]},
+                )
+                if resposta.status_code >= 400:
+                    return None
+                novo = resposta.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not novo.get("accessToken"):
+            return None
+        resultado = {
+            "access": novo["accessToken"],
+            "refresh": novo.get("refreshToken") or dado.get("refresh"),
+            "expiraEm": _expira_em({"expires_in": novo.get("expiresIn")}),
+        }
+        if novo.get("profileArn"):
+            resultado["specific"] = {**credenciais, "profileArn": novo["profileArn"]}
+        return resultado
+    if config.get("tipo") == "cline" and config.get("refresh_url"):
+        try:
+            with httpx.Client(timeout=30) as cliente:
+                resposta = cliente.post(
+                    config["refresh_url"], headers={"accept": "application/json"},
+                    json={"refreshToken": dado["refresh"], "grantType": "refresh_token", "clientType": "extension"},
+                )
+                if resposta.status_code >= 400:
+                    return None
+                recebido = resposta.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not isinstance(recebido, dict):
+            return None
+        novo = recebido.get("data") if isinstance(recebido.get("data"), dict) else recebido
+        if not novo.get("accessToken"):
+            return None
+        return {
+            "access": novo["accessToken"], "refresh": novo.get("refreshToken") or dado["refresh"],
+            "expiraEm": (_expiracao_absoluta(novo.get("expiresAt"))
+                         or _expira_em({"expires_in": novo.get("expiresIn") or 3600})),
+        }
     # Nem todo fluxo tem `client_id` fixo (o AWS SSO registra o cliente na hora, o Qoder usa o
     # par device/machine). Sem ele não há renovação por aqui — e isso não pode derrubar a
     # listagem inteira, que era o que acontecia (KeyError → 500 em `/api/provedores`).
@@ -1154,14 +1867,17 @@ def _renovar(identificador: str, dado: dict[str, Any]) -> dict[str, Any] | None:
         corpo["client_secret"] = config["client_secret"]
     if config.get("refresh_scope"):
         corpo["scope"] = config["refresh_scope"]
+    cabecalhos = {"accept": "application/json"}
+    if config.get("identidade") == "kimi":
+        cabecalhos.update(koda_headers.kimi((dado.get("specific") or {}).get("deviceId")))
+    elif config.get("identidade") == "grok-cli":
+        cabecalhos["user-agent"] = "grok-cli/0.2.1"
     try:
         with httpx.Client(timeout=30) as cliente:
             if config.get("refresh_body", "form") == "json":
-                resposta = cliente.post(config["token"], json=corpo,
-                                        headers={"accept": "application/json"})
+                resposta = cliente.post(config["token"], json=corpo, headers=cabecalhos)
             else:
-                resposta = cliente.post(config["token"], data=corpo,
-                                        headers={"accept": "application/json"})
+                resposta = cliente.post(config["token"], data=corpo, headers=cabecalhos)
             if resposta.status_code >= 400:
                 return None
             novo = resposta.json()

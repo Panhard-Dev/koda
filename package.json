@@ -8,7 +8,7 @@
     "dev": "vite",
     "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787",
     "build": "tsc -b && vite build",
-    "lint": "oxlint --ignore-pattern \"backend/app/*_9router.mjs\"",
+    "lint": "oxlint",
     "verificar": "tsc -b --pretty false && npm run lint",
     "preview": "vite preview",
     "tauri": "tauri",
