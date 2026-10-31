@@ -94,6 +94,7 @@ import type {
   ApiAnexo,
   ApiMcp,
   ApiProject,
+  ApiSaldoDoProvedor,
   ApiSkill,
   DecisaoPermissao,
   ModoPermissao,
@@ -278,6 +279,20 @@ const LIMITE_DE_ANEXO_MB = 32
 const PILL_BASE =
   'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium ring-1 transition-colors duration-150 focus-visible:ring-koda-accent focus-visible:outline-none'
 
+const formatadorDeCreditos = new Intl.NumberFormat('pt-BR', {
+  maximumFractionDigits: 2,
+  useGrouping: false,
+})
+
+function textoDoSaldoExterno(saldo: ApiSaldoDoProvedor | 'carregando'): string {
+  if (saldo === 'carregando') return '…'
+  if (saldo.tipo === 'indisponivel' || typeof saldo.valor !== 'number') return '—'
+  if (saldo.tipo === 'creditos') return formatadorDeCreditos.format(saldo.valor)
+  const percentual =
+    Number.isInteger(saldo.valor) ? String(saldo.valor) : saldo.valor.toFixed(1)
+  return `${percentual}%`
+}
+
 function TogglePill({ label, active, onClick, children }: TogglePillProps) {
   return (
     <button
@@ -329,6 +344,7 @@ export function Composer({
   contextoPorModelo = {},
   contextoJanela = null,
   moedas = null,
+  provedorAtivo = null,
   agentes = [],
   skills = [],
   mcps = [],
@@ -389,6 +405,13 @@ export function Composer({
    * sonda de sessão que ainda não respondeu) cai na constante do Free, que é o degrau de baixo.
    */
   moedas?: number | null
+  /** Cota ou créditos da conta externa escolhida no seletor de modelo. */
+  provedorAtivo?: {
+    id: string
+    nome: string
+    logo: string | null
+    saldo: ApiSaldoDoProvedor | 'carregando'
+  } | null
   /** Sub-agentes, skills e MCPs: o que o menu do `@` pode marcar. */
   agentes?: ApiAgente[]
   skills?: ApiSkill[]
@@ -970,22 +993,53 @@ export function Composer({
            * Sem fundo próprio: na faixa de 34px qualquer retângulo pesa mais que a própria
            * moeda. A peça só acende no hover, e o `mr-0.5` a mantém separada da moeda.
            */}
-          <button
-            type="button"
-            aria-label={compacto ? 'Mostrar o tempo do dia' : 'Mostrar as moedas'}
-            aria-pressed={compacto}
-            onClick={() => setCompacto((atual) => !atual)}
-            className="mr-0.5 flex w-3 flex-col items-center rounded text-koda-fg/40 transition-colors duration-150 hover:text-koda-fg focus-visible:ring-1 focus-visible:ring-koda-accent focus-visible:outline-none"
-          >
-            <ArrowLeft className="h-2.5 w-2.5" strokeWidth={2.2} />
-            <ArrowRight className="-mt-1 h-2.5 w-2.5" strokeWidth={2.2} />
-          </button>
+          {provedorAtivo ? (
+            <>
+              {provedorAtivo.logo ? (
+                <img
+                  src={provedorAtivo.logo}
+                  alt=""
+                  aria-hidden="true"
+                  className="h-4 w-4 object-contain"
+                />
+              ) : (
+                <Gauge className="h-4 w-4 text-koda-fg/55" strokeWidth={1.8} />
+              )}
+              <span
+                aria-live="polite"
+                aria-label={`${provedorAtivo.nome}: ${textoDoSaldoExterno(provedorAtivo.saldo)}`}
+                title={
+                  provedorAtivo.saldo === 'carregando'
+                    ? `Consultando ${provedorAtivo.nome}…`
+                    : `${provedorAtivo.nome}: ${provedorAtivo.saldo.motivo}`
+                }
+                className="max-w-28 truncate text-[12px] tabular-nums text-koda-fg/60"
+              >
+                {textoDoSaldoExterno(provedorAtivo.saldo)}
+              </span>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                aria-label={compacto ? 'Mostrar o tempo do dia' : 'Mostrar as moedas'}
+                aria-pressed={compacto}
+                onClick={() => setCompacto((atual) => !atual)}
+                className="mr-0.5 flex w-3 flex-col items-center rounded text-koda-fg/40 transition-colors duration-150 hover:text-koda-fg focus-visible:ring-1 focus-visible:ring-koda-accent focus-visible:outline-none"
+              >
+                <ArrowLeft className="h-2.5 w-2.5" strokeWidth={2.2} />
+                <ArrowRight className="-mt-1 h-2.5 w-2.5" strokeWidth={2.2} />
+              </button>
 
-          <MoedaKoda className="h-4 w-4" />
+              <MoedaKoda className="h-4 w-4" />
 
-          <span className="text-[12px] tabular-nums text-koda-fg/50">
-            {compacto ? moedasEmTexto(moedas ?? PLANO_FREE.moedasPorMes) : tempoEmTexto(segundosDoDia)}
-          </span>
+              <span className="text-[12px] tabular-nums text-koda-fg/50">
+                {compacto
+                  ? moedasEmTexto(moedas ?? PLANO_FREE.moedasPorMes)
+                  : tempoEmTexto(segundosDoDia)}
+              </span>
+            </>
+          )}
         </div>
 
         {/* A área de escrever — a única que fica **clara**. A faixa de baixo (controles e

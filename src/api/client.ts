@@ -1508,6 +1508,16 @@ export type ApiProvedor = {
 
 export const provedoresDeLogin = () => request<ApiProvedor[]>('/api/provedores')
 
+export type ApiSaldoDoProvedor = {
+  tipo: 'percentual' | 'creditos' | 'indisponivel'
+  valor?: number
+  motivo: string
+  atualizadoEm?: string
+}
+
+export const saldoDoProvedor = (id: string) =>
+  request<ApiSaldoDoProvedor>(`/api/provedores/${encodeURIComponent(id)}/saldo`)
+
 export const testarProvedor = (id: string) =>
   request<{ ok: boolean; detalhe: string; estado?: ApiProvedor }>(
     `/api/provedores/${encodeURIComponent(id)}/testar`,

@@ -628,8 +628,8 @@ respondendo) e o provider local. São **dois**, e não há um terceiro.
   com autorização remota recusa com 401 quem não manda chave — e 401 aqui já foi confundido
   com "host fora do ar", jogando o `auto` no provider local e sumindo com as ferramentas.
 
-  O modelo padrão é **`liz-4`** (o maior do catálogo, e o primeiro da lista no seletor).
-  `KODA_HOST_MODEL` troca o padrão. O Koda envia as ferramentas disponíveis sem
+  O modelo padrão é **`liz-4-5-super`** (o maior do catálogo, e o primeiro da lista no
+  seletor). `KODA_HOST_MODEL` troca o padrão. O Koda envia as ferramentas disponíveis sem
   `tool_choice` e deixa cada modelo decidir quando e qual ferramenta chamar.
 
   Subindo o `c-host.exe` **à mão** (fora do app), ele precisa de duas coisas que o app
@@ -640,6 +640,28 @@ respondendo) e o provider local. São **dois**, e não há um terceiro.
   guarda credencial nenhuma.
 
       SERVE_LIZ_AUTH_URL=https://koda-cloud-api.studiosluxgames.workers.dev ./c-host.exe
+
+#### A senha dinâmica do dia (duas formas de autorizar, as duas valendo)
+
+Desde 23/10/2026 o host aceita **duas** credenciais, e nenhuma substitui a outra:
+
+1. a **sessão da conta** — o que sempre existiu: o host pergunta ao painel
+   (`/api/public/host/authorize`) se o token apresentado vive. Banimento no painel
+   derruba o acesso na hora.
+2. a **senha dinâmica do dia** — o painel deriva uma senha que gira à meia-noite UTC
+   (`GET /api/host/senha-dinamica`, com a sessão de quem está logado) e entrega o JSON
+   `{senha, girada, validade}`. O backend grava em `koda-host-dinamica.json` na pasta de
+   dados e o `c-host` — apontado para o arquivo por `SERVE_LIZ_DYNAMIC_KEY_FILE` —
+   autoriza quem apresentar a senha **sem falar com ninguém**. É a forma "só API":
+   um `curl -H "Authorization: Bearer <senha>"` resolve, e o host continua autorizando
+   mesmo com o painel fora do ar.
+
+Quem escreve o arquivo é o backend quando a sessão chega (`POST /api/host/sessao`) e na
+reescolha do provider; quem apaga é o logout. O host relê o arquivo quando ele muda, então
+a rodada diária não reinicia nada. Em **dev**, o backend precisa do mesmo caminho que o
+shell passa ao host — exporte `KODA_DYNAMIC_KEY_FILE` antes de subir o `uvicorn` (no app
+instalado o launcher já faz isso pelos dois). O painel de admin tem a mesma senha em
+`GET /admin/api/host/senha-dinamica` para testar com curl.
 
 Duas decisões que o provider do serviço toma e que não são óbvias:
 

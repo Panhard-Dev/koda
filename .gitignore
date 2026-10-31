@@ -19,10 +19,11 @@ backend/.env
 __pycache__
 *.pyc
 .pytest_cache
+*.pre-audit-*.bak
 
 # Os binários do Koda são distribuídos à parte e ficam em `host/` — não vão para o
 # repositório (são grandes e binários).
-host/*.exe*
+/host/
 
 # Artefatos locais descartáveis
 .workbuddy-ai/
@@ -42,9 +43,18 @@ backend/pytest-of-*/
 backend/.pytest-local/
 backend/.tmp-pytest-*/
 backend/tmp*/
+backend/.test-temp/
+backend/koda-portoes-*/
+backend/koda-store-check-*/
+backend/koda-stream-repro-*/
 
 # Backups locais de binários (o host .exe é grande e não vai para o repositório)
 backups/
+
+# Extrações e caches locais do runtime Python
+*.pyd
+*.pkl
+*.npy
 
 # Saídas locais
 out.txt

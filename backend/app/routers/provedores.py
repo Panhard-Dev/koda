@@ -38,6 +38,11 @@ def modelos(identificador: str, request: Request) -> dict:
     return provedores.modelos(identificador, _settings(request))
 
 
+@router.get("/provedores/{identificador}/saldo")
+def saldo(identificador: str, request: Request) -> dict:
+    return provedores.saldo_do_provedor(identificador, _settings(request))
+
+
 @router.post("/provedores/{identificador}/modelos/{modelo}/testar")
 def testar_modelo(identificador: str, modelo: str, request: Request) -> dict:
     """Pergunta ao fornecedor, com o token da conta, se ela alcança este modelo."""
