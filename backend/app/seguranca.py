@@ -23,7 +23,8 @@ exceções são três, e cada uma tem motivo:
 - `GET /api/handshake` — o desafio do launcher (ver `hmac_do_nonce`).
 
 Em dev (`uv run uvicorn`, sem launcher) o token vem de `KODA_API_TOKEN` — variável que só
-vale **fora** do empacotado — ou é sorteado e impresso no terminal.
+vale **fora** do empacotado —, do `VITE_API_TOKEN` do `.env.local`, ou é sorteado e anunciado
+no terminal. O valor do token nunca vai para o log.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import os
 import secrets
 import sys
 import threading
+from pathlib import Path
 
 #: Rotas que respondem sem token. Comparação é **exata**: `/api/health/detalhado` não entra
 #: aqui por não ser `/api/health`.
@@ -149,30 +151,67 @@ def do_ambiente() -> str | None:
     """
     if empacotado():
         return None
-    valor = os.environ.get("KODA_API_TOKEN")
-    return valor.strip() if valor and valor.strip() else None
+    return _primeiro_token(
+        os.environ.get("KODA_API_TOKEN"),
+        ler_vite_api_token(),
+    )
+
+
+def _primeiro_token(*valores: str | None) -> str | None:
+    for valor in valores:
+        limpo = (valor or "").strip()
+        if limpo:
+            return limpo
+    return None
+
+
+def ler_vite_api_token() -> str | None:
+    """Lê só o token de desenvolvimento do `.env.local`, sem carregar o arquivo inteiro.
+
+    `npm run dev:api` e `npm run dev` são processos separados. O Vite lê
+    `VITE_API_TOKEN`; se o backend sortear o próprio token, a interface recebe 401 em
+    todas as rotas `/api`. Isto faz os dois concordarem sem exigir que o desenvolvedor
+    exporte a mesma variável duas vezes. O app empacotado nunca entra aqui: o launcher
+    continua entregando um token novo por execução pelo stdin.
+    """
+    if empacotado():
+        return None
+    raiz = Path(__file__).resolve().parents[2]
+    arquivo = raiz / ".env.local"
+    try:
+        linhas = arquivo.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for linha in linhas:
+        texto = linha.strip()
+        if texto.startswith("VITE_API_TOKEN="):
+            return texto.split("=", 1)[1].strip().strip('"').strip("'") or None
+    return None
 
 
 def preparar() -> str:
     """Resolve o token desta execução. Chamado uma vez, na subida do app.
 
-    Ordem: stdin (o launcher) → `KODA_API_TOKEN` (só em dev) → sorteio. Se alguém já fixou
-    o token (o teste, por exemplo), ele é respeitado.
+    Ordem: stdin (o launcher) → `KODA_API_TOKEN` (só em dev) → `VITE_API_TOKEN` do
+    `.env.local` → sorteio. Se alguém já fixou o token (o teste, por exemplo), ele é
+    respeitado.
     """
     global _TOKEN
     if _TOKEN is None:
-        _TOKEN = do_stdin() or do_ambiente() or sortear()
-        _anunciar()
+        do_launcher = do_stdin()
+        _TOKEN = do_launcher or do_ambiente() or sortear()
+        _anunciar(do_launcher is not None)
     return _TOKEN
 
 
-def _anunciar() -> None:
-    """Diz no terminal de onde veio o token — só faz sentido em dev, onde não há launcher."""
-    if empacotado():
+def _anunciar(veio_do_launcher: bool = False) -> None:
+    """Diz de onde veio o token, sem imprimir o valor — só faz sentido em dev."""
+    if empacotado() or veio_do_launcher:
         return
-    origem = "KODA_API_TOKEN" if os.environ.get("KODA_API_TOKEN") == _TOKEN else "sorteado agora"
-    print(
-        f"[koda] token da API local ({origem}): {_TOKEN}\n"
-        "[koda] a interface precisa do mesmo valor (VITE_API_TOKEN) fora do app desktop",
-        flush=True,
-    )
+    if os.environ.get("KODA_API_TOKEN", "").strip() == _TOKEN:
+        origem = "KODA_API_TOKEN"
+    elif ler_vite_api_token() == _TOKEN:
+        origem = ".env.local (VITE_API_TOKEN)"
+    else:
+        origem = "sorteado agora; configure VITE_API_TOKEN para usar a interface no navegador"
+    print(f"[koda] token da API local: {origem}", flush=True)

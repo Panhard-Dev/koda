@@ -453,8 +453,10 @@ def usage(
         inicio = _window_start_ms(now_ms, tz_offset_minutes, kind)
 
         tempo = conn.execute(
-            "SELECT COALESCE(SUM(elapsed_ms), 0) AS ms FROM messages"
-            " WHERE at >= ? AND conta IS ?",
+            "SELECT COALESCE(SUM(CASE WHEN m.model LIKE 'provedor:%' THEN 0 "
+            "WHEN m.model LIKE 'combo:%' THEN COALESCE(c.tempo_ms, 0) ELSE m.elapsed_ms END), 0) AS ms "
+            "FROM messages m LEFT JOIN combo_uso_koda c ON c.message_id = m.id "
+            "WHERE m.at >= ? AND m.conta IS ?",
             (inicio, conta),
         ).fetchone()
 
@@ -462,9 +464,11 @@ def usage(
         # reenviado em cada passo. É dele que sai a conta das moedas na ficha da resposta, e é
         # ele que tem de sair daqui também, senão a tela de uso e a ficha discordariam.
         modelos = conn.execute(
-            "SELECT model, COALESCE(SUM(tokens_total), 0) AS tokens FROM messages"
-            " WHERE at >= ? AND model IS NOT NULL AND conta IS ?"
-            " GROUP BY model",
+            "SELECT CASE WHEN m.model LIKE 'combo:%' THEN c.modelo ELSE m.model END AS model, "
+            "COALESCE(SUM(CASE WHEN m.model LIKE 'combo:%' THEN c.tokens ELSE m.tokens_total END), 0) AS tokens "
+            "FROM messages m LEFT JOIN combo_uso_koda c ON c.message_id = m.id "
+            "WHERE m.at >= ? AND m.model IS NOT NULL AND m.model NOT LIKE 'provedor:%' AND m.conta IS ? "
+            "GROUP BY CASE WHEN m.model LIKE 'combo:%' THEN c.modelo ELSE m.model END",
             (inicio, conta),
         ).fetchall()
 
@@ -473,7 +477,7 @@ def usage(
             tokens_por_modelo={
                 str(linha["model"]): int(linha["tokens"])
                 for linha in modelos
-                if int(linha["tokens"]) > 0
+                if linha["model"] is not None and int(linha["tokens"]) > 0
             },
         )
 

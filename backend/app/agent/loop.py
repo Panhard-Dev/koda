@@ -24,11 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .. import caminhos_marcados
 from ..tools import ferramentas, registry
-from .. import mcp
+from .. import economia, mcp, ui_documento
 from ..config import Settings, get_settings
 from ..policy import guards
-from . import contexto, repeticao, subagente
+from . import contexto, dsml, historico_ferramentas, instrucoes_projeto, repeticao, subagente, validacao_ferramentas
 from ..limits import LIMITES
 from ..contracts.turn import StepResult, ToolCall, ToolStep, texto_do_conteudo
 from ..contracts.tool_result import ToolResult
@@ -67,10 +68,14 @@ CARACTERES_PARA_PLANO = 600
 DIVIDIR_TAREFA = (
     "Antes de executar: esta tarefa é grande. Divida agora em itens curtos e concretos e "
     "registre o plano com `update_todos` (todos os itens de uma vez, o primeiro com "
-    "`atual: true`). Em seguida apresente o plano num bloco `plano` (com `o_que_e`, "
-    "`pra_que`, `por_que`, `como`, `mudancas` e `resultado` — todos) e pergunte se pode "
-    "começar — só execute depois do sim. Quando a pessoa aceitar, execute item a item e, a "
-    "cada item terminado, chame `update_todos` de novo com a lista atualizada."
+    "`atual: true`). Em seguida abra o cartão chamando a ferramenta **`mostrar_plano`** "
+    "com `titulo`, `o_que_e`, `pra_que`, `por_que`, `como` (lista de "
+    '{"titulo":"...","texto":"..."}), `mudancas` (lista de '
+    '{"arquivo":"...","texto":"..."}) e `resultado`. A ferramenta desenha o cartão — não '
+    "escreva o plano em prosa. Se `mostrar_plano` não estiver no catálogo, use o bloco "
+    "```koda-plano``` com o mesmo JSON. Pergunte se pode começar — só execute depois do "
+    "sim. Quando a pessoa aceitar, execute item a item e, a cada item terminado, chame "
+    "`update_todos` de novo com a lista atualizada."
 )
 
 EXIGIR_PLANO = (
@@ -79,14 +84,123 @@ EXIGIR_PLANO = (
     "próximo com `atual: true`) e siga daí, mantendo a lista em dia."
 )
 
+
+# ---------------------------------------------------------------- erros do provedor
+
+#: Onde os provedores costumam guardar a frase legível dentro do corpo do erro.
+_CHAVES_DE_MENSAGEM = (
+    "message",
+    "mensagem",
+    "msg",
+    "detail",
+    "error_description",
+    "reason",
+    "description",
+    "text",
+)
+
+
+def _texto_de_erro(valor: Any, profundidade: int = 0) -> str | None:
+    """A frase legível de um corpo de erro, seja qual for o formato do provedor."""
+    if profundidade > 3:
+        return None
+    if isinstance(valor, str):
+        texto = valor.strip()
+        return texto or None
+    if isinstance(valor, dict):
+        for chave in _CHAVES_DE_MENSAGEM:
+            achado = _texto_de_erro(valor.get(chave), profundidade + 1)
+            if achado:
+                return achado
+        if "error" in valor:
+            return _texto_de_erro(valor["error"], profundidade + 1)
+    if isinstance(valor, list) and valor:
+        return _texto_de_erro(valor[0], profundidade + 1)
+    return None
+
+
+def _codigo_do_erro(valor: Any, profundidade: int = 0) -> str | None:
+    """O código do erro (`insufficient_credits`, `invalid_api_key`…), quando existe."""
+    if profundidade > 3:
+        return None
+    if isinstance(valor, dict):
+        for chave in ("code", "codigo", "type"):
+            codigo = valor.get(chave)
+            if isinstance(codigo, str) and codigo.strip():
+                return codigo.strip()
+        if "error" in valor:
+            return _codigo_do_erro(valor["error"], profundidade + 1)
+    if isinstance(valor, list) and valor:
+        return _codigo_do_erro(valor[0], profundidade + 1)
+    return None
+
+
+def _recusa_em_portugues(codigo: str, detalhe: str) -> str:
+    """Traduz as recusas mais comuns; o resto sai como o provedor escreveu."""
+    baixo = f"{codigo} {detalhe}".lower()
+    if (
+        "insufficient_credits" in baixo
+        or "insufficient balance" in baixo
+        or "no credit" in baixo
+        or "credit balance" in baixo
+        or "insufficient_quota" in baixo
+        or "quota exhausted" in baixo
+        or "exceeded your current quota" in baixo
+    ):
+        return "a conta do provedor está sem créditos — recarregue e tente de novo"
+    if (
+        "invalid_api_key" in baixo
+        or "invalid api key" in baixo
+        or "unauthorized" in baixo
+        or "authentication" in baixo
+    ):
+        return "a credencial da conta do provedor foi recusada — reconecte a conta no Koda"
+    if "rate_limit" in baixo or "rate limit" in baixo or "too many requests" in baixo:
+        return "o provedor está limitando os pedidos agora — espere um pouco e tente de novo"
+    return detalhe
+
+
+def motivo_do_provedor(erro: BaseException | str) -> str:
+    """O que mostrar quando o provedor recusa: uma frase, nunca o JSON cru.
+
+    Vários adaptadores colocam o corpo HTTP inteiro dentro do `ProviderError`. Sem
+    isto, a conversa exibia `{"error":{"code":...}}` como se fosse a resposta — o
+    celular parecia quebrado. Aqui o JSON vira a explicação de dentro dele; o
+    cabeçalho humano do adaptador («o provedor respondeu 402») é mantido.
+    """
+    texto = str(erro).strip()
+    inicio = texto.find("{")
+    if inicio < 0:
+        return texto[:600]
+    try:
+        corpo, _ = json.JSONDecoder().raw_decode(texto[inicio:])
+    except (ValueError, TypeError):
+        return texto[:600]
+
+    detalhe = _texto_de_erro(corpo)
+    codigo = _codigo_do_erro(corpo)
+    prefixo = texto[:inicio].strip().rstrip(":;,-")
+    if detalhe:
+        frase = _recusa_em_portugues(codigo or "", detalhe)
+        return (f"{prefixo}: {frase}" if prefixo else frase)[:600]
+    if codigo:
+        frase = _recusa_em_portugues(codigo, "")
+        return (f"{prefixo}: {frase}" if prefixo else frase)[:600]
+    if prefixo:
+        return prefixo[:600]
+    return "o provedor recusou o pedido sem explicar o motivo"
+
 #: Cobrança interna quando o plano foi registrado mas **não** foi apresentado no bloco
 #: visual — o caso do plano que sai em prosa e a pessoa nem vê a interface. Depois dela,
 #: o próximo texto do modelo tem de ser o bloco (e nada de ferramenta).
 EXIGIR_BLOCO_PLANO = (
-    "Você registrou o plano, mas não o apresentou no bloco visual — e é nele que a "
-    "pessoa decide. Reapresente o MESMO plano num único bloco ```koda-plano```, com as "
-    "seis partes (o_que_e, pra_que, por_que, como, mudancas e resultado), e PARE. "
-    "Nenhuma ferramenta a partir de agora: quem autoriza o começo é a pessoa, não você."
+    "O plano desta tarefa não está no cartão visual — e é nele que a pessoa decide. "
+    "Chame agora a ferramenta `mostrar_plano` com `titulo`, `o_que_e`, `pra_que`, "
+    "`por_que`, `como` (lista de `{titulo, texto}`), `mudancas` (lista de "
+    "`{arquivo, texto}`) e `resultado`. Se ela não estiver no catálogo, apresente o mesmo "
+    "plano num único bloco ```koda-plano``` com **JSON válido** (nada de lista em prosa "
+    "dentro do bloco). Depois PARE: nenhuma outra ferramenta, porque quem autoriza o "
+    "começo é a pessoa, não você."
 )
 
 #: O plano apresentado no cartão interativo. É esta marca (e não vocabulário de "plano")
@@ -420,6 +534,18 @@ RETOMAR_TAREFA = (
     "passo; não explore arquivos ou tarefas sem relação com esse pedido."
 )
 
+#: O botão **Fazer** do cartão de plano. Diferente do Retomar: aqui não se planeja de
+#: novo — o plano já foi lido e aprovado, e a rodada seguinte é a execução dele. Sem esta
+#: distinção o modelo relia o pedido original ("monte um plano") e apresentava o plano
+#: outra vez, agora sem botão, em vez de fazer o trabalho.
+EXECUTAR_PLANO_APROVADO = (
+    "A pessoa aprovou o plano que você apresentou, clicando em Fazer. Execute agora esse "
+    "plano, do começo ao fim, com as ferramentas disponíveis: não reapresente o plano, "
+    "não chame `mostrar_plano` de novo, não peça outra confirmação e não repita etapas "
+    "já concluídas. Ao terminar, entregue o resultado do pedido original reproduzido "
+    "nesta mensagem."
+)
+
 #: As ferramentas que **mexem no disco**. É delas que sai a lista de "o que foi alterado"
 #: que o portão de conferência lê — e o que a interface usa para saber se pode afirmar que
 #: o trabalho já feito foi mantido.
@@ -703,7 +829,41 @@ def _chave_de_repeticao(
 
 #: Pergunta de verdade: "o que faz esse arquivo?" não precisa de ferramenta nenhuma.
 PERGUNTA = re.compile(
-    r"^\s*(o que|que|como|por que|porque|qual|quais|quando|onde|quem|quanto|quanta)\b",
+    r"^\s*(o que|que|como|por que|porque|pq|qual|quais|quando|onde|quem|quanto|quanta)\b",
+    re.IGNORECASE,
+)
+
+#: Pergunta **conceitual** — definição, diferença, funcionamento — mesmo quando cita uma
+#: palavra do projeto ("o que é uma função?", "qual a diferença entre lista e tupla?",
+#: "como funciona o git?"). É conversa: o modelo responde com o que sabe, sem catálogo.
+#: Vem antes dos marcadores de projeto porque "função", "classe", "teste" e "git" estão
+#: lá, e sem isto uma pergunta de estudo ganhava ferramenta sem precisar. Um verbo de ação
+#: em qualquer lugar ("...? arruma isso") continua vencendo, como manda a regra do dono.
+PERGUNTA_CONCEITUAL = re.compile(
+    r"^\s*(?:"
+    r"o\s+que\s+(?:[ée]|s[ãa]o|significa)\b|"
+    r"qual\s+(?:[ée]\s+)?(?:a\s+)?diferen[çc]a\b|"
+    r"me\s+(?:explica|explique|ensina|ensine)\s+(?:o\s+que\s+)?(?:[ée]|s[ãa]o|significa)\b|"
+    r"me\s+(?:explica|explique)\s+(?:a\s+)?diferen[çc]a\b|"
+    r"(?:explica|explique|define|defina)\s+(?:o\s+que\s+)?(?:[ée]|s[ãa]o|significa)\b|"
+    r"(?:explica|explique)\s+(?:a\s+)?diferen[çc]a\b|"
+    r"como\s+funciona\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: A pergunta sobre **função** usa o verbo "faz" sem pedir ação: "o que faz esse arquivo?"
+#: é conversa, e tratar o "faz" como tarefa fazia o loop cobrar ferramenta de quem só
+#: queria uma explicação. A remoção vale só para a pergunta: o que vier depois dela
+#: ("...? arruma ele") continua sendo pedido de trabalho.
+PERGUNTA_SOBRE_FUNCAO = re.compile(
+    r"\bo\s+que\b[^?.\n]{0,80}\bfaz\b",
+    re.IGNORECASE,
+)
+
+# Uma pergunta sobre capacidade descreve ação hipotética, sem pedir execução.
+PERGUNTA_DE_CAPACIDADE = re.compile(
+    r"\b(?:o\s*que|oque)\s+(?:(?:voc[êe]|vc|tu)\s+)?(?:pode|consegue|sabe)\s+fazer\b",
     re.IGNORECASE,
 )
 
@@ -712,7 +872,14 @@ PERGUNTA = re.compile(
 TAREFA_DE_ACAO = re.compile(
     r"\b(cria|crie|criar|adiciona|adicione|adicionar|implementa|implemente|implementar|"
     r"refatora|refatore|refatorar|corrige|corrija|corrigir|arruma|arrume|arrumar|"
-    r"conserta|conserte|consertar|edita|edite|editar|altera|altere|alterar|muda|mude|mudar|"
+    r"conserta|conserte|consertar|resolve|resolva|resolver|"
+    r"edita|edite|editar|altera|altere|alterar|muda|mude|mudar|"
+    # "mexe" é o verbo que o dono usa para pedir trabalho ("mexe em algo"), e não estava
+    # em nenhuma régua: o pedido caía como conversa e a rodada ia sem catálogo.
+    r"mexe|mexa|mexer|meche|mecha|mecher|põe|poe|ponha|pôr|coloca|coloque|colocar|"
+    r"tira|tire|tirar|remove|remova|remover|deixa|deixe|deixar|ajusta|ajuste|ajustar|"
+    r"configura|configure|configurar|ativa|ative|ativar|desativa|desative|desativar|"
+    r"limpa|limpe|limpar|"
     r"move|mova|mover|renomeia|renomeie|renomear|copia|copie|copiar|apaga|apague|apagar|"
     r"escreve|escreva|escrever|grava|grave|gravar|instala|instale|instalar|desinstala|"
     # "lista" faltava, e era o buraco do pedido mais comum de todos: "lista o que tem na
@@ -720,8 +887,17 @@ TAREFA_DE_ACAO = re.compile(
     # (sem catálogo) e o modelo respondia que não existe fisicamente — não porque escolheu
     # não usar ferramenta, mas porque não tinha nenhuma. Medido: 2 de 3 frases do relatório
     # do dono caíam aqui.
-    r"lista|liste|listar|"
-    r"roda|rode|rodar|executa|execute|executar|testa|teste|testar|builda|compila|compile|"
+    # "lista" e "teste" também são substantivos ("lista e tupla", "teste unitário"). Como
+    # verbo, vêm seguidos de um complemento; sem esta condição, uma pergunta conceitual
+    # ganhava catálogo só pela palavra — e o inverso ("lista o que tem na pasta") continua
+    # casando porque o complemento está lá.
+    r"lista\s+(?=(?:o|a|os|as|me|tudo|todos|todas|quais|onde|o\s+que|se|isso|aquilo|que|"
+    r"a[íi]|pra|para|arquivos?|pastas?|diret[óo]rios?|comandos?|processos?|servi[çc]os?|"
+    r"modelos?|contas?|provedores?|ferramentas?|skills?|agentes?|commits?|branches?)\b)"
+    r"|liste|listar|"
+    r"roda|rode|rodar|executa|execute|executar|testa|"
+    r"teste\s+(?=(?:o|a|os|as|me|tudo|isso|se|que|no|na|com|essa|esse|ele|ela|aquilo|"
+    r"a[íi]|pra|para)\b)|testar|builda|compila|compile|"
     r"compilar|monta|monte|montar|converte|converta|converter|faz|fa\u00e7a|fazer|reorganiza|"
     r"termina|termine|terminar|continua|continue|continuar|"
     # Abrir, subir, ligar, iniciar e fechar: era o buraco do pedido real do dono —
@@ -732,6 +908,15 @@ TAREFA_DE_ACAO = re.compile(
     r"para|pare|parar|mostra|mostre|mostrar|confere|confira|conferir|"
     r"verifica|verifique|verificar|atualiza|atualize|atualizar|manda|mande|mandar|"
     r"envia|envie|enviar|baixa|baixe|baixar|abre|open|start|launch|close)\b",
+    re.IGNORECASE,
+)
+
+# Uma correção do usuário não autoriza a ação mencionada nela. Remover só a
+# negação preserva uma nova instrução explícita na mesma mensagem.
+NEGACAO_DE_PEDIDO = re.compile(
+    r"\bn[ãa]o\s+pedi\s+(?:(?:para|pra)\s+)?(?:(?:voc[êe]|vc)\s+)?"
+    r"(?:fazer|faz(?:er)?|executar|executa[r]?|mexer|mexe[r]?)\s+"
+    r"(?:nada|isso|aquilo)\b",
     re.IGNORECASE,
 )
 
@@ -798,9 +983,25 @@ def pedido_grande(mensagens: list[dict[str, Any]]) -> bool:
 #: na lista de verbos de ação, então o loop tratava aquilo como tarefa e **cobrava**
 #: ferramenta ("nenhuma ferramenta funcionou até aqui") quando ele respondia só "ok".
 PEDIDO_DE_RESPOSTA = re.compile(
-    r"^\s*(teste|testar|testando|responda|responde|me\s+responda|diga|diz|fale|me\s+diga|"
-    r"me\s+fale|apenas|só|so|somente|oi|olá|ola|bom\s+dia|boa\s+tarde|boa\s+noite|"
-    r"obrigado|valeu|ok)\b",
+    r"^\s*(responda|responde|me\s+responda|diga|diz|fale|me\s+diga|"
+    r"me\s+fale|me\s+explica|me\s+explique|explica|explique|ensina|ensine|"
+    r"resume|resuma|me\s+conta|conta|"
+    # "escreva 6 frases curtas sobre patos": pedido de palavras com verbo de escrita.
+    # Só quando o complemento é texto (frases/linhas/parágrafos/poema) — "escreva um
+    # arquivo" continua sendo trabalho.
+    r"escreva?\s+(?:\d+\s+)?(?:frases?|linhas?|par[áa]grafos?|um\s+poema|um\s+texto|um\s+resumo)|"
+    r"apenas|só|so|somente|oi|olá|ola|opa|salve|e\s+a[íi]|tudo\s+bem|tudo\s+bom|"
+    r"bom\s+dia|boa\s+tarde|boa\s+noite|obrigado|valeu|vlw|beleza|blz|ok)\b",
+    re.IGNORECASE,
+)
+
+#: "teste de funcionamento responda com um ok": o "teste" aqui pede palavras, não execução.
+#:
+#: Só vale quando o próprio pedido diz que quer resposta. "teste o app" é tarefa e não
+#: pode cair nesta régua — era o que acontecia quando "teste" estava na lista genérica de
+#: respostas: o verbo de ação era engolido e a rodada ia sem catálogo.
+TESTE_DE_RESPOSTA = re.compile(
+    r"^\s*(teste|testar|testando)\b[^\n]*\b(responda|responde|diga|diz|fale|informe|ok)\b",
     re.IGNORECASE,
 )
 
@@ -821,17 +1022,29 @@ SOMENTE_RESPOSTA = re.compile(
     re.IGNORECASE,
 )
 
+#: "Ferramentas de web", "ferramentas de arquivo": a proibição é **daquele grupo**, não de
+#: todas. Sem esta exclusão, "não use ferramentas de web" desligava o catálogo inteiro — a
+#: rodada ficava sem terminal, sem arquivo e sem nada, e o modelo respondia que não podia
+#: usar ferramenta. Era um dos caminhos do defeito que o dono relatou em 02/11/2026.
+_FERRAMENTA_ESPECIFICA = r"(?!\s*(?:de|do|da|dos|das|para|pra|nem|exceto|al[ée]m|como)\b)"
+
 #: "Não use ferramenta nenhuma", "sem usar ferramenta", "responda apenas" — a rodada roda
 #: **sem catálogo**: a ferramenta não é oferecida, e o modelo não tem como chamá-la.
 #:
 #: É a forma mais honesta de honrar uma instrução negativa. Antes, "não usar web nem
 #: arquivos" era só uma frase no meio do pedido: o modelo recebia o catálogo inteiro,
 #: escolhia `list_dir` e a resposta exibia os nomes das pastas e dos arquivos da pessoa.
+#:
+#: A proibição **absoluta** é só quando não vem um complemento: "não use ferramentas de
+#: web" é uma restrição de web, e quem a escreve continua podendo usar o terminal.
 SEM_FERRAMENTA_NENHUMA = re.compile(
     r"\b(n[ãa]o|sem)\s+(us\w*|utiliz\w*|cham\w*|acion\w*)\s+"
-    r"(nenhuma\s+ferramenta|nenhum\s+instrumento|ferramenta|ferramentas)\b"
-    r"|\bsem\s+usar\s+(ferramenta|ferramentas|nenhuma\s+ferramenta)\b"
-    r"|\bsem\s+(ferramenta|ferramentas|nenhum\s+instrumento)\b",
+    r"(?:(?:nenhuma|nenhum)\s+)?(?:ferramenta|ferramentas|instrumento)\b"
+    + _FERRAMENTA_ESPECIFICA
+    + r"|\bsem\s+usar\s+(?:(?:nenhuma)\s+)?(?:ferramenta|ferramentas)\b"
+    + _FERRAMENTA_ESPECIFICA
+    + r"|\bsem\s+(?:ferramenta|ferramentas|nenhum\s+instrumento)\b"
+    + _FERRAMENTA_ESPECIFICA,
     re.IGNORECASE,
 )
 
@@ -856,13 +1069,16 @@ ABERTURA_DE_NEGACAO = (
 SEM_ARQUIVOS = re.compile(
     ABERTURA_DE_NEGACAO
     + r"(us\w*|utiliz\w*|cham\w*|acion\w*|acess\w*|abr\w*|baix\w*|le\w*|"
-    r"list\w*|olh\w*|mex\w*|varr\w*|consult\w*)\s+(?:(?:n[oa]s?|o|a|os|as|meus?|seus?)\s+)?"
+    r"list\w*|olh\w*|mex\w*|varr\w*|consult\w*)\s+"
+    # "não use **ferramentas de** arquivo": o grupo é o que fica proibido, não o catálogo.
+    r"(?:(?:ferramentas?|recursos?)\s+de\s+)?(?:(?:n[oa]s?|o|a|os|as|meus?|seus?)\s+)?"
     r"(arquivos?|pastas?|diret[óo]rios?|disco|workspace|projeto|desktop|[áa]rea\s+de\s+trabalho|"
     # "não acesse **recursos locais**", "não acesse a máquina", "não mexa no meu computador":
     # a proibição de acesso local dita com estas palavras também conta. Sem elas, o pedido
     # do dono ("não acesse recursos locais") passava batido pela régua inteira.
     r"recursos?\s+locais?|nada\s+local|m[áa]quina|computador|sistema)\b"
-    r"|\b(sem|n[ãa]o\s+consultar)\s+(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b"
+    r"|\b(sem|n[ãa]o\s+consultar)\s+(?:(?:ferramentas?|recursos?)\s+(?:de\s+)?)?"
+    r"(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b"
     # "não use web **nem arquivos**": a segunda metade da lista negada também conta.
     r"|\bnem\s+(arquivos?|pastas?|diret[óo]rios?|o\s+disco)\b"
     r"|\bnem\s+(recursos?\s+locais?|nada\s+local)\b",
@@ -877,9 +1093,11 @@ SEM_ARQUIVOS = re.compile(
 SEM_SHELL = re.compile(
     ABERTURA_DE_NEGACAO
     + r"(us\w*|utiliz\w*|cham\w*|acion\w*|abr\w*|rod\w*|execut\w*)\s+"
-    r"(?:(?:n[oa]s?|o|a|os|as)\s+)?(shell|terminal|console|linha\s+de\s+comando|"
+    # "não use **ferramentas de** shell": sai só o grupo de shell.
+    r"(?:(?:ferramentas?|recursos?)\s+de\s+)?(?:(?:n[oa]s?|o|a|os|as)\s+)?"
+    r"(shell|terminal|console|linha\s+de\s+comando|"
     r"comandos?|bash|cmd|powershell)\b"
-    r"|\bsem\s+(shell|terminal|comandos?)\b"
+    r"|\bsem\s+(?:(?:ferramentas?|recursos?)\s+(?:de\s+)?)?(shell|terminal|comandos?)\b"
     r"|\bnem\s+(o\s+)?(shell|terminal)\b",
     re.IGNORECASE,
 )
@@ -897,6 +1115,8 @@ SEM_AMBIENTE = re.compile(
     + r"(us\w*|utiliz\w*|cham\w*|acion\w*|acess\w*|abr\w*|le\w*|list\w*|"
     r"olh\w*|varr\w*|consult\w*|inspecion\w*|investig\w*|examin\w*|detect\w*|descubr\w*|"
     r"enxerg\w*|ver|veja|mostr\w*|inform\w*|diga|diz|fale)\s+"
+    # "não use **ferramentas de** ambiente": o grupo é o que fica proibido.
+    r"(?:(?:ferramentas?|recursos?)\s+de\s+)?"
     # "não leia **minhas** variáveis", "não veja **os** processos", "sem acesso **ao** sistema".
     r"(?:(?:n[oa]s?|aos?|à|às|o|a|os|as|meus?|minhas?|seus?|suas?|nossas?|sobre)\s+)?"
     # "não acesse **informações do** servidor".
@@ -904,7 +1124,9 @@ SEM_AMBIENTE = re.compile(
     r"(vari[áa]veis?\s+de\s+ambiente|ambiente|env|processos?|sistema\s+operacional|so|"
     r"hardware|servidor|servidores|m[áa]quina|computador|sistema|"
     r"vers[ãa]o\s+do\s+(python|node|git)|configura[çc][õo]es\s+do\s+sistema)\b"
-    r"|\bsem\s+(ver|olhar|ler)\s+(o\s+)?(ambiente|sistema|processos?)\b"
+    r"|\bsem\s+(?:(?:ferramentas?|recursos?)\s+(?:de\s+)?)?"
+    r"(ver|olhar|ler)\s+(o\s+)?(ambiente|sistema|processos?)\b"
+    r"|\bsem\s+(?:(?:ferramentas?|recursos?)\s+(?:de\s+)?)?(ambiente|processos?)\b"
     r"|\bnem\s+(as\s+)?(vari[áa]veis?\s+de\s+ambiente|processos?|o\s+sistema)\b",
     re.IGNORECASE,
 )
@@ -912,8 +1134,11 @@ SEM_AMBIENTE = re.compile(
 #: "Não use a web", "não pesquise", "sem internet": as ferramentas de web saem da rodada.
 SEM_WEB = re.compile(
     r"\b(n[ãa]o|sem)\s+(us\w*|utiliz\w*|pesquis\w*|naveg\w*|acess\w*|abr\w*|baix\w*)\s+"
-    r"(?:(?:n[oa]s?|o|a|os|as)\s+)?(web|internet|rede|online|p[áa]ginas?|sites?|navegador|google)\b"
-    r"|\bsem\s+(web|internet|pesquisa|conex[ãa]o)\b"
+    # "não use **ferramentas de** web": sai só o grupo de web, e o terminal continua.
+    r"(?:(?:ferramentas?|recursos?)\s+de\s+)?(?:(?:n[oa]s?|o|a|os|as)\s+)?"
+    r"(web|internet|rede|online|p[áa]ginas?|sites?|navegador|google)\b"
+    r"|\bsem\s+(?:(?:ferramentas?|recursos?)\s+(?:de\s+)?)?"
+    r"(web|internet|pesquisa|conex[ãa]o)\b"
     r"|\bnem\s+(a\s+)?(web|internet|rede|online)\b",
     re.IGNORECASE,
 )
@@ -947,6 +1172,8 @@ def restricoes_do_pedido(mensagens: list[dict[str, Any]]) -> tuple[set[str], boo
     uma regra que fica valendo para a conversa inteira.
     """
     pedido = pedido_do_usuario(mensagens)
+    if caminhos_marcados.marcador_presente(pedido):
+        return set(), False
     if not pedido:
         return set(), False
     if SEM_FERRAMENTA_NENHUMA.search(pedido) or (
@@ -1006,14 +1233,10 @@ def _explicar_restricoes(
         )
     elif modo == MODO_RESPOSTA:
         aviso = (
-            "ESTA RODADA É DE RESPOSTA, NÃO DE TRABALHO. O pedido não tem relação com a "
-            "pasta de trabalho, então nesta rodada não vêm ferramenta de arquivo, shell, web "
-            "nem código. Responda exatamente o que foi pedido, direto, em português do "
-            "Brasil — sem listar, ler, criar ou alterar nada, e sem oferecer para fazê-lo. "
-            "Não diga que você não tem ferramentas nem que não pode usá-las: não é uma "
-            "limitação sua nem da sessão, é o recorte desta rodada. Se a pessoa pedir "
-            "trabalho, as ferramentas vêm na rodada seguinte — sem precisar abrir conversa "
-            "nova."
+            "ESTA RODADA É SÓ CONVERSA. Responda exatamente o que foi pedido, direto, em "
+            "português do Brasil, com o que você já sabe — sem listar, ler, criar ou "
+            "alterar nada. Não fale sobre ferramentas, permissões ou limitações: apenas "
+            "responda."
         )
     elif proibidas:
         grupos: list[str] = []
@@ -1184,25 +1407,84 @@ def _recusou(texto: str) -> bool:
     return bool(RECUSA.search(texto or ""))
 
 
+def _teste_de_resposta(pedido: str) -> bool:
+    """O pedido começa com "teste" **e** diz que quer palavras ("responda com um ok")?
+
+    Vale só quando o resto da frase não manda fazer nada: "teste o app" é trabalho, e
+    "teste de funcionamento responda com um ok" é resposta. A distinção existe porque
+    "teste" é também marcador de projeto — sem ela, o pedido de resposta caía em
+    `MODO_CODIGO` e o loop cobrava ferramenta de quem só queria um "ok".
+    """
+    texto = PERGUNTA_SOBRE_FUNCAO.sub("", pedido).strip()
+    casamento = TESTE_DE_RESPOSTA.match(texto)
+    if not casamento or len(texto) > CARACTERES_DE_RESPOSTA:
+        return False
+    return not TAREFA_DE_ACAO.search(texto[casamento.end():])
+
+
+#: Instrução de **formato da resposta** dita com verbo que a régua de ação pega: "termine
+#: com a palavra Pronto!", "responda em 1 frase", "escreva 6 frases curtas numeradas".
+#: São verbos de ação aplicados ao **texto da resposta** — não à máquina. O dono viu o
+#: resultado: "responda em 1 frase: o que é um pato? termine com Pronto!" virava tarefa
+#: (`de_acao`), o loop cobrava ferramenta de uma pergunta pura, e o modelo respondia de
+#: novo a cada cobrança — a mesma resposta três vezes no mesmo balão, com vários
+#: provedores, porque quem repete é o laço, não o provedor.
+FORMATO_DE_RESPOSTA = re.compile(
+    r"\b(termine|termina|terminar|acabe|acaba|finalize|finaliza)\s+com\b"
+    r"|\bresponda?(?:\s+\w+){0,3}?\s+em\s+(?:\d+\s+)?(?:frase|frases|linha|linhas|par[áa]grafo|par[áa]grafos|palavra|palavras)\b"
+    r"|\bescreva?\s+(?:\d+\s+)?(?:frases?|linhas?|par[áa]grafos?)\b"
+    r"|\bsem\s+formata[çc][ãa]o\b"
+    r"|\bem\s+formato\s+de\s+(?:lista|tabela|texto|frases?)\b"
+    r"|\bnumerad[oa]s?\b",
+    re.IGNORECASE,
+)
+
+
+def _sem_formato(texto: str) -> str:
+    """O texto sem as instruções de formato da resposta — para as réguas de ação e de
+    resposta olharem o que sobra, e não o verbo de formatação."""
+    return FORMATO_DE_RESPOSTA.sub(" ", texto)
+
+
+def _pedido_de_resposta(pedido: str) -> bool:
+    """O pedido se apresenta como pedido de **palavras**, e não de trabalho?
+
+    "responda com um ok" e "oi" pedem conversa. "ok, agora arruma" não: o resto tem verbo
+    de ação, e ele manda. A pergunta sobre função sai antes — "o que faz esse arquivo?" usa
+    "faz" sem pedir ação. As instruções de formato da resposta ("termine com Pronto!",
+    "sem formatação") saem junto: elas usam verbo de ação sobre o texto, e não sobre a
+    máquina.
+    """
+    texto = PERGUNTA_SOBRE_FUNCAO.sub("", pedido)
+    casamento = PEDIDO_DE_RESPOSTA.match(texto) or TESTE_DE_RESPOSTA.match(texto)
+    if not casamento or len(texto) > CARACTERES_DE_RESPOSTA:
+        return False
+    resto = _sem_formato(texto[casamento.end():])
+    return not TAREFA_DE_ACAO.search(resto)
+
+
 def pedido_de_acao(mensagens: list[dict[str, Any]]) -> bool:
-    """A pessoa pediu uma mudança de verdade, e não uma explicação nem uma resposta?"""
+    """A pessoa pediu uma mudança de verdade, e não uma explicação nem uma resposta?
+
+    O verbo pode estar em **qualquer lugar** do pedido: "o app quebrou, arruma ele" é
+    tarefa mesmo com a primeira linha sendo uma constatação, e "o que faz esse arquivo?
+    muda ele" é tarefa mesmo começando por pergunta. A única exceção é a pergunta sobre
+    **função** ("o que faz esse arquivo?"), que usa "faz" sem pedir ação — ela sai antes da
+    busca, mas só ela: o que vier depois continua valendo.
+    """
     pedido = pedido_do_usuario(mensagens)
     if not pedido:
-        return False
-    primeira = pedido.split("\n", 1)[0].strip()
-    if PERGUNTA.match(primeira):
         return False
     # "Agora responda apenas: restrições registradas": o pedido termina pedindo palavras.
     # Um verbo de ação solto no meio ("teste", "guarde") não pode transformar isto numa
     # tarefa — era o que fazia o loop cobrar ferramenta de quem só queria a resposta.
     if SOMENTE_RESPOSTA.search(pedido):
         return False
-    # Pedido curto que começa pedindo resposta ("responda com um ok", "teste de
-    # funcionamento", "oi") não é tarefa: cobrar ferramenta aqui é o que fazia o agente
-    # sair investigando o projeto à toa.
-    if len(pedido) <= CARACTERES_DE_RESPOSTA and PEDIDO_DE_RESPOSTA.match(primeira):
+    if _pedido_de_resposta(pedido):
         return False
-    return bool(TAREFA_DE_ACAO.search(pedido))
+    texto = PERGUNTA_DE_CAPACIDADE.sub("", _sem_formato(pedido))
+    texto = NEGACAO_DE_PEDIDO.sub("", PERGUNTA_SOBRE_FUNCAO.sub("", texto))
+    return bool(TAREFA_DE_ACAO.search(texto))
 
 
 #: Vocabulário do trabalho. Tocar em qualquer um destes tira o pedido da categoria de
@@ -1220,7 +1502,9 @@ MARCADORES_DE_PROJETO = re.compile(
     r"c[óo]digos?|programas?|scripts?|fun[çc][ãa]o|fun[çc][õo]es|classes?|componentes?|"
     r"m[óo]dulos?|testes?|build|compil\w*|git|commit|branch|merge|deploy|servidores?|"
     r"apis?|bancos?\s+de\s+dados|instala\w*|depend[êe]ncias?|pacotes?|npm|node|python|"
-    r"typescript|javascript|terminal|shell|comandos?|logs?|erros?|bugs?|refator\w*|"
+    r"typescript|javascript|terminal|shell|comandos?|logs?|erros?|bugs?|problemas?|"
+    r"quebrou|quebrad[oa]|travando|travou|n[ãa]o\s+funciona\w*|parou\s+de\s+funcionar|"
+    r"refator\w*|"
     r"migra\w*|docker|json|ya?ml|csv|xml|zip|download|upload|planilha|"
     r"readme|configura\w*|vari[áa]veis?)\b"
     # Nome de arquivo (pelo menos uma extensão conhecida) ou caminho com barra.
@@ -1259,84 +1543,12 @@ ARQUIVO_NOMEADO = re.compile(
 #: que ela perguntou, e uma skill é um pacote de **instruções** — aplicá-la a uma pergunta
 #: é responder melhor, não mexer na máquina. Arquivo da pasta, shell, web e código saem — é
 #: o "nada além" levado a sério.
-FERRAMENTAS_DE_RESPOSTA = frozenset({"read_attachment", "use_skill"})
-
-
-#: Pedido curto que manda **seguir** o que já foi combinado, sem dizer o que fazer.
-#:
-#: É o vocabulário do "pode", "beleza", "agora aplica", "vai fundo", "coloca em prática".
-#: Nenhuma destas frases tem marcador de projeto nem verbo de ação reconhecido — e era por
-#: isso que a rodada virava **conversa** e o catálogo ia sem ferramenta nenhuma.
-CONTINUACAO = re.compile(
-    r"\b(beleza|blz|ok|okay|sim|isso|pode|manda|vai|segue|continua|continue|faz|toca|bora|"
-    r"fechou|show|top|perfeito|certo|apli\w+|execut\w+|implement\w+|roda|rode|"
-    r"coloca em pr[áa]tica|m[ãa]os [àa] obra|p[õo]e pra (?:rodar|funcionar)|"
-    r"t[áa] bom|t[áa] certo|agora vai|agora sim|vai fundo|vai l[áa]|segue o baile)\b",
-    re.IGNORECASE,
-)
-
-#: Teto de tamanho de um pedido de continuação.
-#:
-#: Acima disto há texto demais para ser só "segue": é uma pergunta nova, um pedido novo ou
-#: uma correção — e aí quem decide é a régua normal. Sem o teto, "ok, mas me explica o que
-#: é um loop for" viraria trabalho por causa do "ok" no começo.
-LIMITE_DE_CONTINUACAO = 60
-
-#: O que **desmancha** a continuação: a pessoa pegou o "ok" e virou a conversa para outro
-#: lado. Sem isto, qualquer frase que comece com uma confirmação — "ok, mas me explica…" —
-#: seria lida como ordem de seguir, e a pessoa receberia trabalho onde pediu explicação.
-DESVIA_DA_CONTINUACAO = re.compile(
-    r"\b(mas|por[ée]m|entretanto|s[óo]\s+que|ali[áa]s|outra\s+coisa|muda\s+de\s+assunto)\b"
-    r"|\b(me\s+)?(explica|explique|explicar|ensina|ensine|resume|resuma|conta|contar)\b",
-    re.IGNORECASE,
-)
-
-
-def _falas_da_pessoa(mensagens: list[dict[str, Any]]) -> list[str]:
-    """Só as falas **da pessoa**, na ordem — as internas do loop e o resumo ficam de fora."""
-    falas: list[str] = []
-    for mensagem in mensagens:
-        if mensagem.get("role") != "user":
-            continue
-        texto = contexto.sem_anotacoes(contexto.texto_do_conteudo(mensagem.get("content")))
-        if not texto or texto.startswith("[contexto compactado]"):
-            continue
-        if texto in (NARRAR, CONTINUAR, CONSERTAR_FERRAMENTA, RETOMAR_TAREFA):
-            continue
-        falas.append(texto)
-    return falas
-
-
-def _continuacao_de_trabalho(mensagens: list[dict[str, Any]], pedido: str) -> bool:
-    """O pedido é um "segue o que combinamos", numa conversa que **já estava rolando**?
-
-    O caso que isto conserta (relatado pelo dono em 03/10/2026): ele conversa, monta o plano
-    e manda "pode", "beleza" ou "agora aplica". A régua olhava só o texto do pedido, não
-    achava marcador de projeto nem verbo de ação — e classificava a rodada como **conversa**.
-    O catálogo ia sem ferramenta nenhuma e o modelo respondia que "nesta sessão não posso
-    usar ferramentas". Não era o modelo inventando: ele realmente não tinha nenhuma.
-
-    Três condições, e as três precisam valer:
-
-    - a conversa já tem uma fala **anterior** da pessoa (na primeira mensagem não há o que
-      continuar, e é ali que "oi" precisa continuar sendo conversa);
-    - o pedido é curto (ver `LIMITE_DE_CONTINUACAO`);
-    - e ele manda seguir, sem ser pergunta.
-
-    O erro aqui é assimétrico, e a escolha é deliberada: oferecer ferramenta a quem só
-    agradeceu custa uma resposta que não as usa; negar ferramenta a quem mandou executar
-    trava o trabalho e é o defeito que este código existe para não repetir.
-    """
-    if len(_falas_da_pessoa(mensagens)) < 2:
-        return False
-    if len(pedido) > LIMITE_DE_CONTINUACAO:
-        return False
-    if PERGUNTA.search(pedido) or "?" in pedido:
-        return False
-    if DESVIA_DA_CONTINUACAO.search(pedido):
-        return False
-    return bool(CONTINUACAO.search(pedido))
-
+FERRAMENTAS_DE_RESPOSTA = frozenset({
+    "read_attachment", "use_skill", "mostrar_interface",
+    # Dados reais que respondem a uma pergunta avulsa sem tocar na máquina. Sem elas,
+    # "qual o clima em São Paulo?" caía no modo resposta e o modelo inventava o número.
+    "clima", "cotacao", "buscar_imagens",
+})
 
 def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     """O pedido é uma **resposta** (texto avulso) ou **trabalho no projeto**?
@@ -1351,17 +1563,22 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
       que pede uma mudança de verdade → `MODO_CODIGO`: catálogo completo, e o trabalho é
       para ser feito **por inteiro**, validado antes de entregar.
 
-    Na dúvida, a resposta depende de **onde** a dúvida aparece, e o critério é a assimetria
-    do erro: negar ferramenta a quem pediu trabalho trava o trabalho, enquanto oferecer
-    ferramenta a quem pediu conversa custa, no máximo, uma resposta que não as usa. Por isso,
-    numa conversa já em andamento a dúvida resolve para `MODO_CODIGO` — inclusive o pedido
-    que nenhuma régua reconheceu. Só a **primeira** mensagem resolve para `MODO_RESPOSTA`:
-    ali não há o que continuar, e é o que impede um "oi" de virar uma varredura da pasta de
-    trabalho da pessoa.
+    Na dúvida, o critério é a assimetria do erro: negar ferramenta a quem pediu trabalho
+    trava o trabalho, enquanto oferecer ferramenta a quem pediu conversa custa, no máximo,
+    uma resposta que não as usa. Por isso, pergunta pura — sem verbo de ação em lugar
+    nenhum — continua `MODO_RESPOSTA`; e **todo o resto** que nenhuma régua reconheceu
+    resolve para `MODO_CODIGO`, inclusive na primeira mensagem. Era aqui o defeito que o
+    dono relatou em 10/10/2026 e de novo em 02/11/2026: ele pedia algo que nenhuma régua
+    previa e recebia "sem acesso às ferramentas nesta rodada" — o modelo não estava
+    inventando, a rodada ia sem catálogo mesmo.
     """
     pedido = pedido_do_usuario(mensagens)
+    if caminhos_marcados.marcador_presente(pedido):
+        return MODO_CODIGO
     if not pedido:
         return MODO_CODIGO
+    if NEGACAO_DE_PEDIDO.search(pedido) and not pedido_de_acao(mensagens):
+        return MODO_RESPOSTA
     # Proibição de ferramenta é **absoluta**: nenhum arquivo citado a reabre. Se a pessoa
     # escreveu "não use ferramenta nenhuma", a rodada é de resposta e ponto — é a forma mais
     # honesta de honrar uma instrução negativa.
@@ -1373,25 +1590,41 @@ def classificar_pedido(mensagens: list[dict[str, Any]]) -> str:
     # ferramenta é o caminho para o número pedido.
     if SOMENTE_RESPOSTA.search(pedido) and not ARQUIVO_NOMEADO.search(pedido):
         return MODO_RESPOSTA
+    # "Teste de funcionamento responda com um ok": o "teste" aqui é o nome do teste, e a
+    # própria frase diz que quer palavras. Vem antes do marcador de projeto porque "teste"
+    # está lá; sem esta ordem, o pedido de resposta caía em MODO_CODIGO. Arquivo nomeado de
+    # verdade continua pedindo ferramenta ("quantas linhas tem o app.py?").
+    if _teste_de_resposta(pedido) and not ARQUIVO_NOMEADO.search(pedido):
+        return MODO_RESPOSTA
+    # Pergunta conceitual sem verbo de ação em lugar nenhum: conversa, mesmo citando
+    # "função", "classe", "teste" ou "git" — palavras que os marcadores de projeto pegam.
+    # O pedido de ação em qualquer lugar vence: "o que é X? arruma Y" continua trabalho.
+    if (
+        PERGUNTA_CONCEITUAL.match(pedido)
+        and not pedido_de_acao(mensagens)
+        and not ARQUIVO_NOMEADO.search(pedido)
+    ):
+        return MODO_RESPOSTA
     if MARCADORES_DE_PROJETO.search(pedido):
         return MODO_CODIGO
     if pedido_de_acao(mensagens) or pedido_grande(mensagens):
         return MODO_CODIGO
-    # Nenhuma régua reconheceu o pedido. Aqui vale a assimetria que este módulo declara:
-    # negar ferramenta a quem pediu trabalho **trava o trabalho**, e oferecer ferramenta a
-    # quem pediu conversa custa, no máximo, uma resposta que não as usa. Então a dúvida só
-    # resolve para "sem ferramenta" na **primeira** mensagem da conversa, onde não há nada
-    # em andamento para continuar — é o que impede um "oi" de virar varredura da pasta.
-    #
-    # Numa conversa já em andamento, a dúvida resolve para trabalho. Era aqui o defeito que
-    # o dono relatou em 10/10/2026: ele pedia algo que nenhuma régua previa e recebia "sem
-    # acesso às ferramentas nesta rodada" — o modelo não estava inventando, a rodada ia sem
-    # catálogo mesmo. Pedido não reconhecido em conversa em andamento é trabalho até prova
-    # em contrário: quem quiser resposta pura diz isso, e aí `SEM_FERRAMENTA_NENHUMA` ou
-    # `SOMENTE_RESPOSTA` pegam acima.
-    if _continuacao_de_trabalho(mensagens, pedido):
-        return MODO_CODIGO
-    return MODO_RESPOSTA
+    # "Responda com um ok", "oi", "obrigado": pedido curto que se apresenta como conversa e
+    # não toca em nada do projeto. Vem depois dos marcadores para "oi, o app quebrou" não
+    # virar conversa só por causa do cumprimento.
+    if _pedido_de_resposta(pedido) and not ARQUIVO_NOMEADO.search(pedido):
+        return MODO_RESPOSTA
+    # Pergunta pura, sem ação em lugar nenhum: é conversa mesmo numa conversa em andamento.
+    # A pergunta sobre função já saiu em `pedido_de_acao` — "o que faz esse arquivo?" não é
+    # ação —, então "o que é um loop for?" não recebe catálogo só porque a conversa começou.
+    if PERGUNTA.match(pedido.split("\n", 1)[0].strip()):
+        return MODO_RESPOSTA
+    # Nenhuma régua reconheceu o pedido: trabalho até prova em contrário. Quem quer resposta
+    # pura diz isso, e aí `SEM_FERRAMENTA_NENHUMA`, `SOMENTE_RESPOSTA`, `_teste_de_resposta`,
+    # `_pedido_de_resposta` ou a pergunta pura pegam acima. A dúvida nunca resolve para
+    # "sem ferramenta": negar ferramenta a quem pediu trabalho trava o trabalho, enquanto
+    # oferecer ferramenta a quem pediu conversa custa uma resposta que não as usa.
+    return MODO_CODIGO
 
 
 def precisa_cobrar(
@@ -1802,6 +2035,11 @@ async def executar(
     tetos, o diretório de skills). Sem ela, vale a do ambiente; em produção é a mesma coisa,
     porque o app nasce de `get_settings()`.
     """
+    # Economia de tokens: o estado é lido **uma vez por rodada**. Ligado aqui vale para
+    # qualquer motor — o prompt de sistema é o mesmo que o provedor da casa, a API oficial
+    # e as contas recebem — e as instruções entram antes do primeiro passo, não no meio.
+    estado_economia = economia.ler(settings)
+
     # Todo evento de ferramenta sai com o **endereço de origem**, quando é de servidor MCP:
     # a interface mostra o nome real do servidor e da ferramenta (`[MCP · eco-server]`), e
     # não o nome normalizado que o modelo vê. Fica num envoltório só, e não espalhado pelos
@@ -1809,8 +2047,40 @@ async def executar(
     # estourado, argumento inválido, chamada negada) já nasce com o detalhe.
     emit_bruto = emit
 
+    # Costura dos deltas: os avisos do loop (compactação, corte de tokens) e o texto de
+    # cada passo chegam como deltas crus, e **colavam** no que veio antes — «estão na
+    # conversa.All three items...» na tela. Aqui, no gargalo único por onde todo delta
+    # passa, um parágrafo em aberto é fechado antes do delta seguinte que começa frase.
+    # O parágrafo em aberto termina em pontuação + fim de linha; se o delta novo começa
+    # com maiúscula (nova frase) ou cerca/título de markdown, entra um `\n\n`. Nunca
+    # dentro de código: delta que começa com espaços, minúscula, dígito, pontuação ou
+    # cerca aberta passa intacto.
+    _FIM_DE_PARAGRAFO = re.compile(r"[.!?:;»”)\]]\s*$")
+
+    _ultimo_delta = ""
+
     async def emit(evento: str, dados: dict[str, Any]) -> None:
-        if evento in ("tool_call", "tool_result"):
+        nonlocal _ultimo_delta
+        if evento == "delta":
+            texto = str(dados.get("text") or "")
+            if (
+                texto
+                and _ultimo_delta
+                and not _ultimo_delta.endswith(("\n", " ", " "))
+                and (
+                    _FIM_DE_PARAGRAFO.search(_ultimo_delta)
+                    or _ultimo_delta.endswith("```")
+                )
+                and (
+                    texto[0].isupper()
+                    or texto.startswith(("```", "#", "- ", "* ", "|", "**", "1. "))
+                )
+                and texto != "\n\n"
+                and not texto.startswith("\n")
+            ):
+                dados = {**dados, "text": f"\n\n{texto}"}
+            _ultimo_delta = texto
+        elif evento in ("tool_call", "tool_result"):
             detalhe = mcp.detalhar(str(dados.get("name") or ""))
             if detalhe:
                 dados = {**dados, "mcp": detalhe}
@@ -1862,13 +2132,22 @@ async def executar(
                 in servidores_marcados
             ]
         tools = tools + ferramentas_mcp
+    # A ferramenta de consulta só existe quando há algo a consultar. Fora dos modos de
+    # compressão ela seria mais uma definição no catálogo — e catálogo também é token.
+    if not economia.algum_modo_de_compressao(estado_economia):
+        tools = [item for item in tools if item["function"]["name"] != economia.FERRAMENTA]
     # A porteira do despacho (porta do Koda — ver `guards.py`): só o que foi **oferecido**
     # pode ser chamado. Tirar do catálogo é pedido; isto é imposição. Sem ela, um modelo que
     # chama assim mesmo recebe o conteúdo da máquina, e a restrição vira decorativa.
-    guarda = guards.do_catalogo(tools)
+    # A recusa da conversa não culpa a pessoa nem ensina o modelo a falar em "não posso
+    # usar ferramentas" — era essa frase que o dono via na tela.
+    mensagem_da_guarda = (
+        guards.RECUSA_DE_RESPOSTA
+        if modo == MODO_RESPOSTA and not sem_ferramentas
+        else guards.RECUSA_PADRAO
+    )
+    guarda = guards.do_catalogo(tools, mensagem_da_guarda)
     historico = ControlHistory(dict(item) for item in mensagens)
-    if planejar:
-        historico.append({'role':'system','content':PLANEJAMENTO})
     _explicar_restricoes(historico, proibidas, sem_ferramentas, modo)
     _explicar_mcp(historico, ferramentas_mcp)
     _explicar_mencoes(historico, mencoes, skills)
@@ -1930,6 +2209,14 @@ async def executar(
     #: Texto de anúncio já mostrado sem que houvesse progresso. Repetir o mesmo anúncio
     #: numa tentativa interna não acrescenta informação, então seu delta fica suprimido.
     anuncios_exibidos: set[str] = set()
+    #: Última resposta do modelo que já foi para a tela. Uma resposta repetida (o modelo
+    #: respondendo de novo depois de uma cobrança interna) não sai duas vezes: o conteúdo
+    #: já está lá, e repetir era o «a IA fala a mesma coisa várias vezes» que o dono viu
+    #: com vários provedores.
+    ultima_resposta_exibida: str | None = None
+    #: Quantas vezes seguidas o modelo devolveu a mesma resposta. Uma repetição é eco de
+    #: cobrança; a segunda seguida é o modelo preso — a rodada fecha com o que já saiu.
+    repeticoes_da_resposta = 0
     pedido_original = pedido_do_usuario(mensagens)
     finalizacao_solicitada = False
     #: `ferramentas_ok` na última retomada: é o que diz se houve progresso desde então.
@@ -1975,6 +2262,9 @@ async def executar(
     )
     todos: list[dict[str, Any]] = []
     plano_feito = False
+    #: O cartão foi aberto pela ferramenta `mostrar_plano`? É o caminho preferido: o
+    #: modelo preenche os argumentos e a interface desenha, sem depender de cerca no texto.
+    cartao_plano = False
     if grande:
         # A instrução entra como mensagem de pessoa, depois do pedido: é o formato que o
         # provedor aceita, e o modelo lê o "divida antes de executar" junto do pedido.
@@ -2072,6 +2362,11 @@ async def executar(
         # pedir o próximo passo, o que já foi resolvido encolhe — senão o pedido passa do
         # que o provedor aceita e a tarefa morre no meio, sem relação nenhuma com a
         # dificuldade do trabalho.
+        # Headroom: antes da compactação de emergência, as saídas de ferramenta mais
+        # velhas já viram um resumo com o id do original. É o que mantém o contexto
+        # folgado sem esperar o provedor recusar o tamanho.
+        if estado_economia.get("headroom"):
+            economia.enxugar_historico(historico, estado_economia, settings)
         tokens_antes, tokens_depois = contexto.compactar_historico(historico, orcamento)
         if tokens_depois and tokens_depois < tokens_antes:
             # O aviso aparece uma vez por "salto" de tamanho, e não a cada passo: a
@@ -2087,6 +2382,9 @@ async def executar(
                         "resumo)_\n\n"
                     },
                 )
+
+        # Repara chamadas interrompidas sem remover mensagens do histórico.
+        historico_ferramentas.recuperar(historico)
 
         # `estado` conta se o texto deste passo já saiu na tela pedaço a pedaço.
         estado = {"mostrou": False}
@@ -2229,7 +2527,21 @@ async def executar(
 
         vazias = 0
         if resultado.text.strip():
-            await _emitir_texto_do_passo(resultado, estado, emit)
+            # Eco do modelo: a mesma resposta que já foi para a tela. Suprime o delta —
+            # o conteúdo já está lá — e, na segunda repetição seguida, fecha a rodada com
+            # o que já saiu: o modelo está preso num laço de reformular o que entregou,
+            # e cada cobrança interna só rende mais uma cópia.
+            eco = _mesmo_texto(resultado.text, ultima_resposta_exibida)
+            if eco:
+                repeticoes_da_resposta += 1
+                if repeticoes_da_resposta >= 2 and not resultado.calls:
+                    texto_final = ultima_resposta_exibida or resultado.text
+                    completou = True
+                    break
+            else:
+                repeticoes_da_resposta = 0
+                ultima_resposta_exibida = resultado.text
+            await _emitir_texto_do_passo(resultado, estado, emit, pular_texto=eco)
 
         # Recusa é **fechamento**, não trabalho pendente. O modelo disse que não pode
         # fazer ou revelar aquilo — cobrar uma ferramenta aqui é pedir que ele procure
@@ -2358,8 +2670,8 @@ async def executar(
             # quem já entregou não é cutucado, mesmo que a rodada não tenha chamado
             # ferramenta nenhuma. É o caso do quiz/tabela/gráfico entregue pela interface:
             # a entrega é o fim do turno, não um passo no meio.
-            entregou_visual = bool(ENTREGOU_VISUAL.search(resultado.text))
-            if planejar and (BLOCO_PLANO.search(resultado.text) or
+            entregou_visual = entregou_visual or bool(ENTREGOU_VISUAL.search(resultado.text)) or cartao_plano
+            if planejar and (cartao_plano or BLOCO_PLANO.search(resultado.text) or
                     ('"tipo"' in resultado.text and '"plano"' in resultado.text)):
                 texto_final = resultado.text
                 completou = False
@@ -2368,12 +2680,21 @@ async def executar(
             bloco_que_falta = None if entregou_visual else _bloco_perdido(resultado.text)
             sem_entrega = (de_acao and tools and not planejar and not entregou_visual
                            and (not ferramentas_ok or (requires_effect(pedido_original) and not efeitos_ok)))
+            # Em Plan, tarefa de ação grande **entrega o cartão**: um plano em prosa não
+            # fecha a rodada limpa, senão o portão abaixo nunca roda e a pessoa fica sem
+            # os botões Desistir/Fazer (visto em 05/11/2026).
+            falta_cartao = (
+                planejar and grande and de_acao and not aceito
+                and not cartao_plano
+                and not BLOCO_PLANO.search(resultado.text)
+            )
             fechou_limpo = (
                 not pendentes
                 and not comando_rodando
                 and not bloco_que_falta
-                and not (anunciou(resultado.text) and not entregou_visual)
+                and not (modo == MODO_CODIGO and anunciou(resultado.text) and not entregou_visual)
                 and not sem_entrega
+                and not falta_cartao
             )
             if ferramentas_ok > retomada_base:
                 retomada_base = ferramentas_ok
@@ -2392,7 +2713,23 @@ async def executar(
             # Só no modo Plan (`planejar`): no Auto/Livre/Padrão/Manual o portão não
             # existe, e a rodada segue a régua normal — se sobrou item na lista, o
             # `retomar_tarefa` abaixo faz o modelo **executar** em vez de esperar.
-            if planejar and todos and plano_feito and not aceito:
+            # Vale também quando a tarefa é grande e o modelo **não** chamou
+            # `update_todos`: em Plan, a entrega é o cartão, e um plano em prosa deixa a
+            # pessoa sem os botões. O cartão é o contrato do modo, não um extra de quem
+            # lembrou de registrar a lista.
+            if planejar and (grande or (todos and plano_feito)) and not aceito:
+                if cartao_plano or BLOCO_PLANO.search(resultado.text):
+                    texto_final = resultado.text
+                    completou = False
+                    motivo = PARADA_AGUARDANDO_ACEITE
+                    break
+                # O plano fechou em prosa: sem o bloco não há cartão, e sem cartão a
+                # pessoa não tem como aprovar. Cobra o bloco antes de fechar — a mesma
+                # cobrança do passo com ferramenta, agora no fechamento por texto.
+                if cobrancas_plano < MAX_COBRANCAS:
+                    cobrancas_plano += 1
+                    historico.append({"role": "user", "content": EXIGIR_BLOCO_PLANO})
+                    continue
                 texto_final = resultado.text
                 completou = False
                 motivo = PARADA_AGUARDANDO_ACEITE
@@ -2429,7 +2766,7 @@ async def executar(
             elif pendentes:
                 completou = False
                 motivo = PARADA_PENDENTES
-            elif anunciou(resultado.text):
+            elif modo == MODO_CODIGO and anunciou(resultado.text):
                 completou = False
                 motivo = PARADA_ANUNCIO
             break
@@ -2491,7 +2828,8 @@ async def executar(
             # Argumento que não é JSON válido **não** roda: o erro volta explícito para o
             # modelo reenviar, em vez de a ferramenta executar com `{}` e devolver um erro
             # de argumento vazio que não explica nada.
-            problema_de_json = _argumentos_invalidos(chamada)
+            problema_de_json = (_argumentos_invalidos(chamada)
+                                or validacao_ferramentas.erro(chamada.name, argumentos, tools))
             if problema_de_json is not None:
                 passos.append(
                     ToolStep(
@@ -2650,6 +2988,29 @@ async def executar(
                     todos = itens
                     plano_feito = True
                     await emit("todos", {"todos": itens, "step": numero})
+
+            # O cartão de plano é a interface inteligente do Koda: o modelo manda os dados
+            # e a tela desenha. Vale em **todos** os provedores e em todos os modos — é o
+            # caminho que não depende de o modelo acertar a cerca ```koda-plano```.
+            if chamada.name == ferramentas.FERRAMENTA_DO_CARTAO:
+                dados_do_cartao = ferramentas.dados_do_cartao(argumentos)
+                if dados_do_cartao is not None:
+                    cartao_plano = True
+                    plano_feito = True
+                    await emit("plano", {"dados": dados_do_cartao, "step": numero})
+
+            # A interface inteligente (Koda UI): o modelo manda o documento, o servidor
+            # valida e a tela desenha. A validação é a mesma que o handler faz; aqui ela
+            # serve para **não** emitir documento inválido — o erro volta ao modelo como
+            # resultado da ferramenta, e ele corrige na chamada seguinte.
+            if chamada.name == ferramentas.FERRAMENTA_DA_INTERFACE:
+                try:
+                    documento_ui, _avisos_ui = ui_documento.validar(argumentos, run_id=dono)
+                except ui_documento.DocumentoInvalido:
+                    documento_ui = None
+                if documento_ui is not None:
+                    await emit("ui", {"documento": documento_ui, "step": numero})
+                    entregou_visual = True
 
             # Antes de mexer na máquina, a permissão. O que precisa de permissão é
             # decidido por `ferramentas.classificar` + `approvals`; aqui só se espera a
@@ -2812,6 +3173,11 @@ async def executar(
                         f"ERRO: a ferramenta {chamada.name} falhou: "
                         f"{type(exc).__name__}: {exc}"
                     )
+            # A transferência para o celular viaja num evento próprio: o id do arquivo
+            # não entra no texto que a tela e o modelo veem.
+            transferencia = None
+            if chamada.name == "send_to_phone":
+                saida, transferencia = ferramentas.separar_transferencia(saida)
             duracao = int((time.perf_counter() - inicio) * 1000)
             current_budget.get().record_output(saida)
             executada = not negado_por_codigo and not (
@@ -2880,7 +3246,15 @@ async def executar(
                     "step": numero,
                 },
             )
-            historico.append(_resultado_de_ferramenta(chamada.id, saida))
+            if transferencia is not None:
+                await emit("transfer", transferencia)
+            # A tela recebe `saida` inteira; o **modelo** recebe o que a economia deixar.
+            # A compressão acontece só aqui, no ponto em que o resultado entra no
+            # histórico — o passo, o evento SSE e o que fica gravado continuam completos.
+            saida_para_o_modelo = economia.comprimir_saida(
+                saida, chamada.name, estado_economia, settings
+            )
+            historico.append(_resultado_de_ferramenta(chamada.id, saida_para_o_modelo))
 
         # PORTÃO DO PLANO (passo com ferramenta): o plano foi registrado e a pessoa ainda
         # não aceitou — nada mais roda nesta rodada. Se o texto do passo já trouxe o
@@ -2890,8 +3264,8 @@ async def executar(
         #
         # **Só no modo Plan.** Fora dele, registrar a lista não é pedido de licença: é o
         # agente organizando o próprio trabalho, e o turno continua até entregar.
-        if planejar and todos and plano_feito and not aceito:
-            if BLOCO_PLANO.search(resultado.text):
+        if planejar and (grande or (todos and plano_feito)) and not aceito:
+            if cartao_plano or BLOCO_PLANO.search(resultado.text):
                 texto_final = resultado.text
                 completou = False
                 motivo = PARADA_AGUARDANDO_ACEITE
@@ -2975,16 +3349,27 @@ async def executar(
         # modelo não escreveu um fechamento. O que entra é o **aviso de falha** do projeto
         # de origem — nunca uma instrução de uso ("me diga continue"): o texto do loop
         # descrevia o produto para quem estava usando o produto.
-        if not motivo:
-            motivo = PARADA_PASSOS if teto is not None else PARADA_PROVEDOR
-        texto_final = _aviso_de_fechamento(ferramentas_ok, "")
+        #
+        # Esperar o aceite **não é falha**: o cartão do plano é a entrega, e o aviso de
+        # «parte das ações pode ter sido executada» embaixo dele assusta sem motivo.
+        if motivo != PARADA_AGUARDANDO_ACEITE:
+            if not motivo:
+                motivo = PARADA_PASSOS if teto is not None else PARADA_PROVEDOR
+            texto_final = _aviso_de_fechamento(ferramentas_ok, "")
 
     # Última barreira antes de entregar: nenhuma resposta sai com o eco do modelo dentro. Vale
     # para qualquer caminho que tenha preenchido `texto_final` — o aviso é melhor do que
     # 30 mil caracteres repetidos na tela.
-    if texto_final and repeticao.descontrolada(texto_final):
-        texto_final = repeticao.AVISO_DE_REPETICAO
-        motivo = motivo or PARADA_LOOP_DE_TEXTO
+    if texto_final:
+        # O eco de resposta (a mesma lista repetida com frases diferentes entre as cópias)
+        # não é "descontrolada" pela régua antiga: ela exige uma corrida periódica
+        # contígua. Aqui a primeira cópia fica e o resto sai.
+        corte_eco = repeticao.eco_de_resposta(texto_final)
+        if corte_eco is not None:
+            texto_final = texto_final[:corte_eco].rstrip()
+        elif repeticao.descontrolada(texto_final):
+            texto_final = repeticao.AVISO_DE_REPETICAO
+            motivo = motivo or PARADA_LOOP_DE_TEXTO
 
     # O que é de servidor MCP ganha o endereço de origem **aqui**, num lugar só: a interface
     # mostra o nome real do servidor e da ferramenta, e o que fica gravado na mensagem é o
@@ -3106,13 +3491,44 @@ def _chave_de_anuncio(texto: str) -> str:
     return re.sub(r"\s+", " ", texto).strip().casefold()
 
 
+def _mesmo_texto(a: str, b: str | None) -> bool:
+    """Dois textos do modelo são a **mesma resposta**?
+
+    Compara sem espaço, caixa nem pontuação de fim: o provedor reenviando a resposta
+    depois de uma cobrança chega com pequenas diferenças de formatação, e o que importa
+    é o conteúdo. `b` vazio nunca repete.
+    """
+    if not b:
+        return False
+    limpo = lambda t: re.sub(r"[\s\W_]+", "", t, flags=re.UNICODE).lower()  # noqa: E731
+    fa, fb = limpo(a), limpo(b)
+    if not fa or not fb:
+        return False
+    # Igual por inteiro, ou o novo texto começa com o anterior (modelo repetindo a
+    # resposta com um acréscimo mínimo — o conteúdo já está na tela).
+    return fa == fb or (len(fa) > len(fb) and fa.startswith(fb)) or (
+        len(fb) > len(fa) and fb.startswith(fa)
+    )
+
+
 async def _emitir_texto_do_passo(
-    resultado: StepResult, estado: dict[str, bool], emit: Emit
+    resultado: StepResult,
+    estado: dict[str, bool],
+    emit: Emit,
+    pular_texto: bool = False,
 ) -> None:
-    """Publica o texto agregado só se ele ainda não saiu pelo stream."""
+    """Publica o texto agregado só se ele ainda não saiu pelo stream.
+
+    `pular_texto` suprime até o corpo: o passo repetiu uma resposta que já foi para a
+    tela (ver `_mesmo_texto`) — só o separador entre passos interessa, se houver.
+    """
+    sufixo = "\n\n" if resultado.calls else ""
+    if pular_texto:
+        if sufixo:
+            await emit("delta", {"text": sufixo})
+        return
     if not resultado.text.strip():
         return
-    sufixo = "\n\n" if resultado.calls else ""
     if estado["mostrou"]:
         # O texto já saiu pedaço a pedaço durante o passo: repetir aqui duplicaria tudo.
         if sufixo:
@@ -3190,15 +3606,34 @@ async def _executar_passo(
     budget = current_budget.get()
     if budget is not None:
         budget.claim_model()
+    historico = [mensagem for mensagem in historico if mensagem.get("role") not in ("system", "developer")]
     streamar = getattr(modelo, "step_streaming", None)
     if streamar is None:
         result = await modelo.step(historico, tools, model)
-        if budget is not None and result is not None:
-            budget.record_output(result.text)
+        if result is not None:
+            limpo, chamadas = dsml.extrair(result.text)
+            result.text = limpo
+            if chamadas and not result.calls:
+                result.calls = chamadas
+            if budget is not None:
+                budget.record_output(result.text)
+            # Provedor sem stream: o texto inteiro chega de uma vez, e não há delta para
+            # interromper depois. O eco é cortado **antes** de sair, senão a tela recebe
+            # as três cópias e só o banco ficaria certo.
+            corte_eco = repeticao.eco_de_resposta(result.text)
+            if corte_eco is not None:
+                result.text = result.text[:corte_eco].rstrip()
         return result
 
     resultado: StepResult | None = None
     texto: list[str] = []
+    filtro = dsml.FiltroDsml()
+    # O eco de resposta inteira é cortado **durante** o stream: quando a mesma lista
+    # reaparece, a tela para na primeira cópia em vez de esperar o modelo terminar a
+    # terceira. O `StepResult` do provedor não vem depois do `break`, então o passo
+    # devolve o texto já cortado.
+    vigia_eco = repeticao.VigiaDeEco()
+    eco_cortado = False
     async for item in streamar(historico, tools, model, reasoning, effort):
         if isinstance(item, StepResult):
             resultado = item
@@ -3209,15 +3644,61 @@ async def _executar_passo(
             # Raciocínio não é resposta: vai para a tela, mas não conta como "mostrou".
             await emit("reasoning", {"text": item.text})
             continue
-        # O texto do passo fica em buffer até o provedor confirmar que terminou. Se a rede
-        # cair no meio, o laço pode reconectar e repetir o passo sem deixar um pedaço antigo
-        # na tela nem duplicar efeitos de uma chamada de ferramenta incompleta.
-        texto.append(item.text)
-    if resultado is not None and texto and not resultado.text:
-        resultado.text = "".join(texto)
-    if resultado is not None and resultado.text:
+        if not item.text:
+            continue
+        # O filtro segura o pedaço que ainda pode ser um marcador DSML (a chamada que
+        # alguns modelos devolvem como texto) e libera o resto na hora. Sem ele, o
+        # `<｜DSML｜function_calls` aparecia na fala e ficava gravado na conversa.
+        seguro = filtro.alimentar(item.text)
+        if not seguro:
+            continue
+        acumulado = "".join(texto)
+        corte = vigia_eco.alimentar(seguro)
+        if corte is not None:
+            # `corte` é o começo da segunda cópia. O que veio antes dele fica; o eco, não.
+            if corte > len(acumulado):
+                await emit("delta", {"text": (acumulado + seguro)[len(acumulado):corte]})
+            texto = [(acumulado + seguro)[:corte]]
+            estado["mostrou"] = True
+            eco_cortado = True
+            break
+        # Cada pedaço sai na tela assim que chega. Se a rede cair no meio, o pedaço que já
+        # apareceu **não** é repetido: `_com_tentativas` vê `mostrou` e avisa em vez de
+        # reenviar o passo — a alternativa era segurar tudo e perder o streaming.
+        texto.append(seguro)
         estado["mostrou"] = True
-        await emit("delta", {"text": resultado.text})
+        await emit("delta", {"text": seguro})
+    if eco_cortado:
+        return StepResult(text="".join(texto))
+    resto = filtro.finalizar()
+    if resto:
+        texto.append(resto)
+        estado["mostrou"] = True
+        await emit("delta", {"text": resto})
+    if resultado is not None:
+        limpo, chamadas = dsml.extrair(resultado.text)
+        resultado.text = limpo
+        if chamadas and not resultado.calls:
+            resultado.calls = chamadas
+    if resultado is not None and resultado.text:
+        inteiro = "".join(texto)
+        if not inteiro:
+            # Provedor que só devolve o texto no `StepResult` (sem pedaços de texto).
+            # O eco é cortado antes de sair: não há stream para interromper depois.
+            corte_eco = repeticao.eco_de_resposta(resultado.text)
+            if corte_eco is not None:
+                resultado.text = resultado.text[:corte_eco].rstrip()
+            estado["mostrou"] = True
+            await emit("delta", {"text": resultado.text})
+        elif resultado.text.startswith(inteiro) and len(resultado.text) > len(inteiro):
+            # Fechamento que veio depois do último delta: completa sem repetir o já lido.
+            await emit("delta", {"text": resultado.text[len(inteiro):]})
+        elif inteiro.strip() == resultado.text.strip():
+            # Só o espaçamento das pontas mudou na limpeza do DSML: o que já saiu é o
+            # texto inteiro, e repetir o sufixo duplicaria a fala na tela.
+            resultado.text = inteiro
+    elif resultado is not None and texto and not resultado.text:
+        resultado.text = "".join(texto)
     return resultado
 
 
@@ -3245,8 +3726,10 @@ async def _com_tentativas(
     """
     from ..providers.base import ProviderError, TransientProviderError
 
+    quantidade_contas = getattr(modelo, "tentativas_contas", lambda: 1)()
+    tentativas = max(tentativas, quantidade_contas)
     restantes = max(1, tentativas)
-    fatais = 1  # uma segunda chance por erro não-transitório, se houver outra conta
+    fatais = max(1, quantidade_contas - 1)
     ultima_cartada = espera_final > 0
     #: Total de tentativas desta insistência, contando a última cartada quando ela existe.
     #: É o denominador do contador que o app mostra («Reconectando… NN/NN»).
@@ -3265,7 +3748,12 @@ async def _com_tentativas(
             if estado["mostrou"]:
                 await emit(
                     "delta",
-                    {"text": f"\n\n[o provedor caiu no meio do passo {numero}: {error}]\n"},
+                    {
+                        "text": (
+                            f"\n\n[o provedor caiu no meio do passo {numero}: "
+                            f"{motivo_do_provedor(error)}]\n"
+                        )
+                    },
                 )
                 return None
             restantes -= 1
@@ -3313,14 +3801,20 @@ async def _com_tentativas(
                     return None
                 continue
             await emit(
-                "delta", {"text": f"\n\n[erro do provedor no passo {numero}] {error}\n"}
+                "delta",
+                {"text": f"\n\n[erro do provedor no passo {numero}] {motivo_do_provedor(error)}\n"},
             )
             return None
         except ProviderError as error:
             if estado["mostrou"]:
                 await emit(
                     "delta",
-                    {"text": f"\n\n[o provedor caiu no meio do passo {numero}: {error}]\n"},
+                    {
+                        "text": (
+                            f"\n\n[o provedor caiu no meio do passo {numero}: "
+                            f"{motivo_do_provedor(error)}]\n"
+                        )
+                    },
                 )
                 return None
             # Recusa por tamanho é a única falha "de vez" que tem conserto daqui: o loop
@@ -3331,5 +3825,8 @@ async def _com_tentativas(
             if fatais > 0 and await _trocar_conta(modelo, emit, numero):
                 fatais -= 1
                 continue
-            await emit("delta", {"text": f"[erro do provedor no passo {numero}] {error}"})
+            await emit(
+                "delta",
+                {"text": f"[erro do provedor no passo {numero}] {motivo_do_provedor(error)}"},
+            )
             return None

@@ -56,14 +56,18 @@ o host no ar, ele cai na lista da casa, que é esta:
 
 | Família | Modelos |
 | --- | --- |
-| **Liz** | `Liz 4` (padrão) · `Liz 3 Flash` · `Liz Mini 2` · `Liz Mini 1.3` · `Liz Nano` |
-| **Koda** | `Koda 1` |
-| **Layze** | `Layze 2` |
+| **Claude** | `Claude Haiku 5.5` (padrão) |
+| **GLM** | `GLM 5.3 Flash` |
+| **Qwen** | `Qwen 3.8 Flash` · `Qwen 3.8 Flash (Legacy)` |
 
-- **A ordem é do maior para o menor**, e sai do próprio nome do modelo: o tier
-  (`nano` < `mini` < `flash` < sem tier < `pro` < `max`) e, dentro do tier, a geração —
-  `liz-4` → `liz-3-flash` → `liz-mini-2` → `liz-mini-1-3` → `liz-nano`. Modelo novo do host
-  entra na lista sozinho, sem lista fixa no frontend.
+O host é o **`host/gateway-local`**, um gateway OpenAI-compatible. O backend o descobre em
+`8790–8799` (a porta não é fixa: o headless sobe em 8794 e pula para a próxima livre) e o
+sobe sozinho quando o Node está disponível.
+
+- **A ordem é explícita**, do mais forte para o mais fraco: Claude Haiku 5.5 → GLM 5.3 Flash
+  → Qwen 3.8 Flash → Qwen 3.8 Flash (Legacy). Número de geração não é força, e adivinhar
+  pelo nome já colocou um modelo "mini" no meio da fila. Modelo novo do gateway entra em
+  «Outros», sem lista fixa no frontend.
 - **Esforço de raciocínio, por modelo.** Ao lado do seletor de modelo há o de esforço —
   `Automático` (quem decide é o botão *Reasoning*), `Mínimo`, `Baixo`, `Médio` ou `Alto` — e
   cada modelo guarda o seu. Pergunta rápida num modelo leve, tarefa cabeluda num modelo
@@ -148,8 +152,9 @@ desafio (nonce + HMAC) antes de reutilizar — backend de uma execução anterio
 conhecer o token novo, e sai da frente em vez de ser adotado. Sem o backend a interface entra
 no modo offline dela.
 
-Para usar a interface no **navegador** (sem o app desktop) contra um backend à mão, o
-backend imprime o token ao subir e a interface o recebe em `VITE_API_TOKEN`.
+Para usar a interface no **navegador** (sem o app desktop) contra um backend à mão,
+o backend lê o mesmo `VITE_API_TOKEN` do `.env.local` que o Vite usa. Ele informa no
+terminal apenas a origem do token, sem imprimir o valor.
 
 ## Recursos
 

@@ -16,7 +16,8 @@ from typing import Any
 import httpx
 
 from .providers.base import ProviderError, TransientProviderError
-from .windsurf_koda import LeitorGrpcWeb, _campo, _campos, _varint
+from .transport_grpc import LeitorGrpcWeb
+from .windsurf_koda import _campo, _campos, _varint
 from .koda_tool_protocol import _sse
 
 

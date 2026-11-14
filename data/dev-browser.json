@@ -1,0 +1,15 @@
+{
+  "vivo": false,
+  "porta": 43611,
+  "url": "http://127.0.0.1:15174/",
+  "titulo": "Koda",
+  "rolagem": {
+    "topo": 0,
+    "total": 860,
+    "janela": 860,
+    "alvo": null
+  },
+  "ponteiro": null,
+  "viewport": null,
+  "atualizado": 1794289184572
+}

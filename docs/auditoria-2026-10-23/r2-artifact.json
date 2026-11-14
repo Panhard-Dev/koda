@@ -1,0 +1,47 @@
+{
+  "version": "0.7.8",
+  "bucket": "koda-installers",
+  "key": "auditoria/2026-10-23/Koda_0.7.8_x64-setup.exe",
+  "url": "https://pub-4ee7a912e447471186b0543932b4a6b2.r2.dev/auditoria/2026-10-23/Koda_0.7.8_x64-setup.exe",
+  "status": "awaiting_final_build",
+  "scope": "Production Worker and required D1 migrations authorized; installer R2 object only, updater release not activated",
+  "checks": {
+    "python_tests": 100,
+    "python_subtests": 15,
+    "cloud_tests": 10,
+    "server_typescript": "passed",
+    "frontend_build": "passed",
+    "packaged_runtime": "passed",
+    "native_guard_python_3_13": "passed",
+    "staging_remote_D1": "passed",
+    "production_copy_migration_rehearsal": "passed"
+  },
+  "limitations": [
+    "MP sandbox end-to-end not executed; no real charge created",
+    "Full Windows installation wizard in VM not executed",
+    "A19/A23/A24 excluded"
+  ],
+  "production": {
+    "worker_deployed": true,
+    "worker_version": "7dfb054f-a7fd-4268-b87d-f6f694428be7",
+    "migrations_applied": [
+      "0005_mcps.sql",
+      "0006_payment_applications.sql"
+    ],
+    "financial_writes_paused": false,
+    "health_status": 200,
+    "release_activated": false
+  },
+  "bytes": 102560768,
+  "sha256": "b96c2f4dad7baaec3733f8a4167f3adda8651c91a5b74bdaed915e1924bac303",
+  "build": "final_nsis_with_universal_launcher",
+  "launcherVerified": true,
+  "uploadStatus": "uploaded_and_verified",
+  "publicVerification": {
+    "httpStatus": 200,
+    "downloadedBytes": 102560768,
+    "downloadSha256": "b96c2f4dad7baaec3733f8a4167f3adda8651c91a5b74bdaed915e1924bac303",
+    "matchesLocal": true,
+    "verifiedAt": "2026-10-23T17:20:00Z"
+  }
+}

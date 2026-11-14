@@ -1,0 +1,28 @@
+{
+  "at": "2026-10-23T16:17:18.440Z",
+  "productionHealthStatus": 200,
+  "productionHealth": {
+    "ok": true,
+    "servico": "koda-cloud",
+    "api_version": "1.0.0",
+    "ambiente": "production",
+    "hora": "2026-10-23T16:17:16.766Z"
+  },
+  "productionVersionStatus": 200,
+  "productionVersion": {
+    "ok": true,
+    "update_available": false,
+    "latest_version": "0.7.7",
+    "download_url": "https://pub-4ee7a912e447471186b0543932b4a6b2.r2.dev/Koda_0.7.7_x64-setup.exe",
+    "update_required": true,
+    "mandatory": true,
+    "channel": "stable",
+    "notes": "Corrigido o salvamento do raciocínio nas tarefas com ferramentas, reduzindo uma causa do erro 400.\r\nMelhoradas a reconexão, a fila de mensagens, a recuperação de tarefas e a navegação.\r\nAdicionados blocos interativos e ajustes em contas, planos, pagamentos e reembolsos.",
+    "published_at": "2026-10-22T15:50:17.613Z",
+    "checked_version": "0.7.7"
+  },
+  "candidateObjectBefore": 404,
+  "workerDeployed": false,
+  "productionMigrationApplied": false,
+  "releaseActivated": false
+}

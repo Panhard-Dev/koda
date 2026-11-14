@@ -1,0 +1,18 @@
+✔ financial migration gate blocks only writes, preserves reads, and treats typos as closed (56.7436ms)
+✔ owner, product, method, amount and operation must match before any replay is returned (204.9667ms)
+✔ 100 payment deliveries preserve the first renewal and do not resurrect cancellation (260.3695ms)
+✔ a failing subscription write rolls back the application ledger and can retry (49.4815ms)
+✔ out-of-order pending/approved deliveries do not undo refunds (120.6893ms)
+✔ migration with paid legacy data preserves existing subscription and does not apply it again (148.5091ms)
+✔ distinct simultaneous same-plan purchases each add one month; their replays add none (215.111ms)
+✔ a credit purchase is never selected as the subscription refund (166.5596ms)
+✔ refunded credit is excluded from balance while manual credit and the ledger remain (120.851ms)
+✔ mandatory release never forces an up-to-date or newer client to downgrade (246.2013ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 33562.5838

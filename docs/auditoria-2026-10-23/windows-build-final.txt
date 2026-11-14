@@ -1,0 +1,81 @@
+
+> koda@0.7.8 app:build
+> npm run app:host && npm run app:runtime && npm run app:node && tauri build && npm run app:launcher && npm run app:bundle:host
+
+
+> koda@0.7.8 app:host
+> node scripts/verificar-host.mjs
+
+Host do instalador conferido: C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\host\c-host.exe (7.2 MB)
+
+> koda@0.7.8 app:runtime
+> node scripts/gerar-runtime-backend.mjs
+
+interpretador: C:\Users\panhard\.workbuddy-ai\binaries\python\versions\3.13.12
+runtime gerado em src-tauri/runtime/backend (4071 arquivos, 287.1 MB)
+
+> koda@0.7.8 app:node
+> node scripts/gerar-runtime-node.mjs
+
+[koda] node v24.22.0 (x64) empacotado em runtime/node/node.exe (89.5 MB)
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `npm run build && npm run app:host`
+
+> koda@0.7.8 build
+> tsc -b && vite build
+
+vite v8.3.0 building client environment for production...
+transforming...
+✓ 1958 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/blocos.html                         0.51 kB │ gzip:  0.31 kB
+dist/chat.html                           0.59 kB │ gzip:  0.34 kB
+dist/index.html                          0.63 kB │ gzip:  0.34 kB
+dist/assets/FalaDoModelo-D8aOnMIZ.css   95.67 kB │ gzip: 14.89 kB
+dist/assets/chat-Bv710W9B.js             2.67 kB │ gzip:  1.30 kB
+dist/assets/blocos-DRaWhmyl.js          31.20 kB │ gzip:  9.70 kB
+dist/assets/modelo-salvo-Dn1JQZ9X.js    82.83 kB │ gzip: 26.06 kB
+dist/assets/principal-0Xeh9MdR.js      262.57 kB │ gzip: 69.37 kB
+dist/assets/FalaDoModelo-DTWV2Zhd.js   316.09 kB │ gzip: 94.04 kB
+
+✓ built in 2m 6s
+[PLUGIN_TIMINGS] Plugin hooks ran for 119.8s of this 125.9s build (95%).
+The slowest hooks, timed inside each callback (the wait before a callback starts is excluded, the time it awaits is included):
+  - @tailwindcss/vite:generate:build transform (93%, 117.4s, 1 call)
+  - vite:css-post renderChunk (1%, 1.5s, 5 calls)
+Additional hook time came from the hooks below and from hooks under 1s.
+1 hook is listed without a time. Its calls overlapped, so the time inside one call includes work from other calls. To find its cost, profile the build with `node --cpu-prof`:
+  - vite:build-html transform (3 calls)
+See https://rolldown.rs/reference/InputOptions.checks#plugintimings for more details.
+
+
+> koda@0.7.8 app:host
+> node scripts/verificar-host.mjs
+
+Host do instalador conferido: C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\host\c-host.exe (7.2 MB)
+   Compiling koda v0.7.8 (C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri)
+    Finished `release` profile [optimized] target(s) in 20m 20s
+       Built application at: C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\koda.exe
+        Info Patching C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\koda.exe with bundle type information: nsis
+        Info Target: x64
+     Running makensis to produce C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\nsis\Koda_0.7.8_x64-setup.exe
+        Info Patching C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\koda.exe with bundle type information: msi
+        Info Target: x64
+ Downloading https://go.microsoft.com/fwlink/p/?LinkId=2124703
+     Running candle for "C:\\Users\\panhard\\Downloads\\Koda-TUDO-2026-10-17\\koda\\src-tauri\\target\\release\\wix\\x64\\main.wxs"
+     Running light to produce C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\msi\Koda_0.7.8_x64_pt-BR.msi
+    Finished 2 bundles at:
+        C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\nsis\Koda_0.7.8_x64-setup.exe
+        C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\msi\Koda_0.7.8_x64_pt-BR.msi
+
+
+> koda@0.7.8 app:launcher
+> node scripts/criar-launcher-instalador.mjs
+
+Lançador universal já pronto: C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\nsis\Koda_0.7.8_x64-setup.exe (97.8 MB)
+
+> koda@0.7.8 app:bundle:host
+> node scripts/verificar-bundle-host.mjs
+
+Instalador 0.7.8 conferido: NSIS inclui host/c-host.exe e o lançador corrige TEMP/TMP; 97.8 MB em C:\Users\panhard\Downloads\Koda-TUDO-2026-10-17\koda\src-tauri\target\release\bundle\nsis\Koda_0.7.8_x64-setup.exe

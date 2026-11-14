@@ -16,6 +16,8 @@ O token não é gravado em disco nem volta em resposta; o que responde é o esta
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 import httpx
 
@@ -58,7 +60,20 @@ async def _reescolher(request: Request) -> HostSessaoEstado:
     providers = getattr(request.app.state, "providers", None)
     if providers is None:
         providers = request.app.state.providers = {}
-    providers[host_auth.contexto_atual().window] = await call(build_provider, request.app.state.settings)
+    janela = host_auth.contexto_atual().window
+    # `build_provider` roda em outra thread: ContextVar não atravessa
+    # `asyncio.to_thread`. Sem o vínculo explícito, `host_auth.atual()` lia a
+    # sessão global (vazia) e a reescolha depois do login caía no provedor
+    # local, mesmo com a senha do dia já gravada no arquivo.
+    def escolher():  # type: ignore[no-untyped-def]
+        contexto = host_auth.capturar(janela)
+        ficha = host_auth.vincular(contexto)
+        try:
+            return build_provider(request.app.state.settings)
+        finally:
+            host_auth.desvincular(ficha)
+
+    providers[janela] = await call(escolher)
     return await _estado(request)
 
 
@@ -79,24 +94,42 @@ async def definir_sessao(payload: HostSessao, request: Request) -> HostSessaoEst
     if token:
         if not settings.cloud_url:
             raise HTTPException(503, "serviço de identidade indisponível")
+        # A validação da conta e a busca da senha dinâmica usam o mesmo token e não
+        # dependem uma da outra. Executá-las em paralelo evita somar dois round-trips ao
+        # caminho de recuperação depois de um restart.
+        atualizar_senha = asyncio.create_task(
+            call(host_dinamica.atualizar, settings, token)
+        )
         try:
             async with httpx.AsyncClient(timeout=settings.cloud_timeout_s, follow_redirects=False) as client:
                 response = await client.get(settings.cloud_url.rstrip("/") + "/api/account/me",
                                             headers={"Authorization": f"Bearer {token}"})
-            if response.status_code != 200:
+            if response.status_code in (401, 403):
+                atualizar_senha.cancel()
+                await asyncio.gather(atualizar_senha, return_exceptions=True)
                 raise HTTPException(401, "sessão não validada")
+            if response.status_code != 200:
+                await asyncio.gather(atualizar_senha, return_exceptions=True)
+                raise HTTPException(503, "não foi possível validar a sessão")
             account = response.json()["conta"]
             email = str(account["email"]).strip().casefold()
             if not email or not account.get("id"):
                 raise ValueError("identidade incompleta")
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            # A validação e a busca da chave são independentes: uma falha de
+            # transporte em /account/me não deve cancelar uma gravação que já
+            # pode ter acontecido. Não se apaga sessão anterior nem se desloga
+            # a tela por uma oscilação de rede; o ciclo do front tenta de novo.
+            await asyncio.gather(atualizar_senha, return_exceptions=True)
             raise HTTPException(503, "não foi possível validar a sessão") from exc
         host_auth.definir(token, nome=account.get("nome"), email=email, account_id=str(account["id"]))
         await call(_vincular_legado, request, account)
-        # A senha do dia não pode travar a escolha do provider: se o painel
-        # não entregar agora, a sessão continua valendo e a próxima renovação
-        # tenta de novo.
-        await call(host_dinamica.atualizar, settings, token)
+        # A senha do dia é a única credencial aceita pelo LizProxy atual: se a
+        # busca em paralelo falhou por rede, uma segunda tentativa imediata
+        # ainda dentro do login evita mandar o usuário para o provider local.
+        await atualizar_senha
+        if not host_dinamica.vigente(settings):
+            await call(host_dinamica.atualizar, settings, token)
     else:
         host_auth.limpar()
         await call(host_dinamica.esquecer, settings)

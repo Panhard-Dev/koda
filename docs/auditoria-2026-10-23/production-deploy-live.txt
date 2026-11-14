@@ -1,0 +1,32 @@
+
+ ⛅️ wrangler 4.138.0 (update available 4.152.0)
+───────────────────────────────────────────────
+Total Upload: 1215.29 KiB / gzip: 216.79 KiB
+Worker Startup Time: 47 ms
+Your Worker has access to the following bindings:
+Binding                                                                         Resource                  
+env.DB (koda-cloud)                                                             D1 Database               
+env.NODE_ENV ("production")                                                     Environment Variable      
+env.ADMIN_EMAIL ("studios.ai.brasil@gmail.com")                                 Environment Variable      
+env.CORS_ORIGIN ("https://tauri.localhost,http://tauri....")                    Environment Variable      
+env.RATE_LIMIT_WINDOW_MS ("60000")                                              Environment Variable      
+env.RATE_LIMIT_MAX ("120")                                                      Environment Variable      
+env.LOGIN_RATE_LIMIT_MAX ("10")                                                 Environment Variable      
+env.LOGIN_LOCKOUT_THRESHOLD ("5")                                               Environment Variable      
+env.LOGIN_LOCKOUT_WINDOW_MS ("900000")                                          Environment Variable      
+env.LOGIN_LOCKOUT_DURATION_MS ("900000")                                        Environment Variable      
+env.ACCESS_TOKEN_TTL_S ("1200")                                                 Environment Variable      
+env.REFRESH_TOKEN_TTL_S ("604800")                                              Environment Variable      
+env.HASH_ALGO ("bcrypt")                                                        Environment Variable      
+env.BCRYPT_COST ("10")                                                          Environment Variable      
+env.PBKDF2_ITERATIONS ("100000")                                                Environment Variable      
+env.UPLOAD_MAX_BYTES ("1048576")                                                Environment Variable      
+env.ALLOW_INSECURE_HTTP ("false")                                               Environment Variable      
+env.PANEL_ENABLED ("true")                                                      Environment Variable      
+env.CADASTRO_ABERTO ("true")                                                    Environment Variable      
+env.BILLING_MAINTENANCE ("(hidden)")                                            Environment Variable      
+
+Uploaded koda-cloud-api (10.37 sec)
+Deployed koda-cloud-api triggers (2.64 sec)
+  https://koda-cloud-api.studiosluxgames.workers.dev
+Current Version ID: 7dfb054f-a7fd-4268-b87d-f6f694428be7

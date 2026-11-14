@@ -105,6 +105,27 @@ async def _modelo(cliente: httpx.AsyncClient, base: str, credenciais: dict[str, 
     raise ProviderError(f"o modelo {chave} não está no catálogo desta conta Qoder")
 
 
+async def modelos(identificador: str, conta: dict[str, Any]) -> list[dict[str, Any]]:
+    """O catálogo de conversa **da conta** — a lista estática misturava chaves que não existem."""
+    base, openapi = REGIOES[identificador]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as cliente:
+            credenciais = await _credenciais(cliente, conta, openapi)
+            url = base + CAMINHO_MODELOS
+            resposta = await cliente.get(url, headers=_assinar(url, credenciais, ""))
+            resposta.raise_for_status()
+            catalogo = resposta.json()
+    except (httpx.HTTPError, ValueError) as erro:
+        raise ProviderError("não consegui consultar os modelos da conta Qoder") from erro
+    itens = catalogo.get("chat") if isinstance(catalogo, dict) else None
+    return [
+        {"id": str(item["key"]),
+         "name": str(item.get("display_name") or item.get("name") or item["key"])}
+        for item in (itens or [])
+        if isinstance(item, dict) and item.get("key")
+    ]
+
+
 def _texto(conteudo: Any) -> str:
     if isinstance(conteudo, str):
         return conteudo

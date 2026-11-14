@@ -50,6 +50,17 @@ RECUSA_PADRAO = (
     "que não tem acesso em vez de estimar."
 )
 
+#: A recusa da rodada que o classificador marcou como **conversa**.
+#:
+#: Não culpa a pessoa (ela não restringiu nada) e não ensina o modelo a responder que
+#: "não pode usar ferramentas" — a restrição é só o recorte desta rodada, e o dono relatou
+#: essa frase como o defeito. Se o modelo tentar uma ferramenta mesmo assim, a resposta
+#: certa é seguir sem ela.
+RECUSA_DE_RESPOSTA = (
+    "NEGADO: nesta rodada é só conversa, então {tool_name} não está disponível. Não "
+    "insista e não peça permissão: responda com o que você já sabe."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Guarda:

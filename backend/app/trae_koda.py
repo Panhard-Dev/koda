@@ -64,7 +64,20 @@ def _sse(delta: dict[str, Any] | None = None, *, motivo: str | None = None, uso:
     return "data: " + json.dumps(evento, ensure_ascii=False)
 
 
-async def linhas(conta: dict[str, Any], modelo: str, mensagens: list[dict[str, Any]]) -> AsyncIterator[str]:
+async def linhas(
+    conta: dict[str, Any],
+    modelo: str,
+    mensagens: list[dict[str, Any]],
+    ferramentas: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[str]:
+    """Conversa no agente SOLO do Trae.
+
+    O protocolo do SOLO não expõe esquema de ferramenta ao cliente — o agente executa as
+    dele do lado do servidor. `ferramentas` existe para o contrato do laço, mas não é
+    enviada; chamadas e resultados anteriores continuam indo no texto da conversa
+    (ver `_query`), que é o que o modelo enxerga.
+    """
+    del ferramentas
     token = str(conta.get("access") or "")
     if not token:
         raise ProviderError("a conta Trae não tem token de acesso")

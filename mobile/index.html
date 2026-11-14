@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#0d0d0f" />
+    <!-- O APK usa esta marca para saber se a página que o WebView carregou é o Koda
+         ou uma página de erro do túnel (Cloudflare 1033). Sem ela, o celular ficava
+         preso na tela de erro e não voltava para a entrada. -->
+    <meta name="koda-app" content="mobile" />
+    <title>Koda — mobile</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icone-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Koda" />
+    <link rel="stylesheet" href="./mobile.css" />
+    <script type="module" src="./mobile.js"></script>
+  </head>
+  <body>
+    <main class="fundo">
+      <div class="marca" aria-label="KODA">
+        <span class="marca__nome">KODA</span>
+      </div>
+    </main>
+
+    <!-- O navegador fica do outro lado do nome, à esquerda, como um globo. -->
+    <div class="topo-acoes topo-acoes--esquerda" id="topo-acoes-esquerda">
+      <button
+        type="button"
+        class="topo-acoes__botao"
+        id="abrir-navegador"
+        aria-label="Abrir o navegador"
+        title="Navegador"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="19"
+          height="19"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="8.4" />
+          <path d="M3.6 12h16.8" />
+          <path d="M12 3.6c2.2 2.3 3.3 5.1 3.3 8.4s-1.1 6.1-3.3 8.4c-2.2-2.3-3.3-5.1-3.3-8.4S9.8 5.9 12 3.6Z" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Histórico, conversa nova e configuração ficam no topo, ao alcance do polegar. -->
+    <div class="topo-acoes" id="topo-acoes">
+      <button
+        type="button"
+        class="topo-acoes__botao"
+        id="botao-novo-chat"
+        aria-label="Nova conversa"
+        title="Nova conversa"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="19"
+          height="19"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="topo-acoes__botao"
+        id="abrir-historico"
+        aria-label="Histórico de conversas"
+        title="Histórico"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="19"
+          height="19"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M20.4 12a8.4 8.4 0 11-2.7-6.2" />
+          <path d="M20.6 3.6v4.2h-4.2" />
+          <path d="M12 8.4V12l2.9 1.9" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="topo-acoes__botao"
+        id="abrir-config"
+        aria-label="Configuração"
+        title="Configuração"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="19"
+          height="19"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.88.34H9.1a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z" />
+        </svg>
+      </button>
+    </div>
+
+    <!--
+      Navegador: sites, arquivos do PC e hosts locais, com o tamanho de tela escolhido.
+      O palco é um iframe de verdade para sites e o proxy do link para hosts locais; o
+      tamanho do quadro é o viewport que a página enxerga (media queries respondem a ele).
+    -->
+    <section class="tela tela--navegador" id="tela-navegador" hidden aria-label="Navegador">
+      <header class="tela__topo navegador__topo">
+        <button type="button" class="tela__voltar" id="navegador-voltar" aria-label="Voltar">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+        </button>
+        <div class="tela__titulo">
+          <p class="tela__nome">Navegador</p>
+          <p class="tela__sub" id="navegador-estado">Sites, arquivos e hosts do seu PC</p>
+        </div>
+        <button type="button" class="tela__acao" id="navegador-recarregar" aria-label="Recarregar" title="Recarregar">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 12a8 8 0 1 1-2.4-5.7" />
+            <path d="M20.5 4v4.5H16" />
+          </svg>
+        </button>
+        <button type="button" class="tela__acao" id="navegador-externo" aria-label="Abrir fora do Koda" title="Abrir fora">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 4h6v6" />
+            <path d="M20 4l-9 9" />
+            <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+          </svg>
+        </button>
+      </header>
+
+      <form class="navegador__barra" id="navegador-form">
+        <div class="navegador__campo">
+          <span class="navegador__campo-icone" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="8.4" />
+              <path d="M3.6 12h16.8" />
+              <path d="M12 3.6c2.2 2.3 3.3 5.1 3.3 8.4s-1.1 6.1-3.3 8.4c-2.2-2.3-3.3-5.1-3.3-8.4S9.8 5.9 12 3.6Z" />
+            </svg>
+          </span>
+          <input
+            id="navegador-url"
+            type="text"
+            inputmode="url"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="Site, localhost:3000 ou arquivo"
+            aria-label="Endereço do navegador"
+          />
+        </div>
+        <button type="submit" class="navegador__ir" aria-label="Abrir endereço">Ir</button>
+      </form>
+
+      <div class="navegador__modos" role="group" aria-label="Tamanho da tela">
+        <button type="button" class="navegador__modo" data-modo="pe">Em pé</button>
+        <button type="button" class="navegador__modo" data-modo="deitado">Deitado</button>
+        <button type="button" class="navegador__modo" data-modo="pc">PC</button>
+        <span class="navegador__escala-texto" id="navegador-escala-texto"></span>
+      </div>
+
+      <div class="navegador__palco" id="navegador-palco">
+        <div class="navegador__escala" id="navegador-escala">
+          <div class="navegador__quadro" id="navegador-quadro">
+            <div class="navegador__tela" id="navegador-tela"></div>
+          </div>
+        </div>
+        <div class="navegador__cortina" id="navegador-cortina" hidden>
+          <span class="navegador__giro" aria-hidden="true"></span>
+          <p class="navegador__cortina-texto" id="navegador-cortina-texto">Abrindo…</p>
+          <button type="button" class="navegador__cortina-acao" id="navegador-cortina-acao" hidden>
+            Tentar de novo
+          </button>
+        </div>
+      </div>
+
+      <div class="navegador__inicio" id="navegador-inicio">
+        <div class="navegador__secao">
+          <div class="navegador__secao-topo">
+            <h2 class="navegador__secao-titulo">Hosts no seu PC</h2>
+            <button type="button" class="navegador__atualizar" id="navegador-atualizar">Atualizar</button>
+          </div>
+          <div class="navegador__hosts" id="navegador-hosts">
+            <p class="navegador__vazio">Procurando…</p>
+          </div>
+        </div>
+
+        <div class="navegador__secao">
+          <div class="navegador__secao-topo">
+            <h2 class="navegador__secao-titulo">Arquivos do projeto</h2>
+            <button type="button" class="navegador__atualizar" id="navegador-subir" hidden>Subir</button>
+          </div>
+          <p class="navegador__caminho" id="navegador-caminho"></p>
+          <div class="navegador__arquivos" id="navegador-arquivos"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Histórico: as conversas ficam no PC; o celular guarda uma cópia para abrir offline. -->
+    <section class="tela" id="tela-historico" hidden aria-label="Histórico de conversas">
+      <header class="tela__topo">
+        <button type="button" class="tela__voltar" data-fechar-tela="historico" aria-label="Voltar">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+        </button>
+        <div class="tela__cabecalho">
+          <h2 class="tela__titulo">Histórico</h2>
+          <p class="tela__sub" id="historico-estado">Conversas salvas no seu PC</p>
+        </div>
+        <button type="button" class="tela__acao" id="historico-novo" aria-label="Nova conversa" title="Nova conversa">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </header>
+      <div class="tela__corpo">
+        <label class="busca">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m16.5 16.5 4 4" />
+          </svg>
+          <input id="historico-busca" type="search" placeholder="Buscar conversa" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="aviso-cache" id="historico-aviso" hidden></p>
+        <div class="historico" id="historico-lista"></div>
+      </div>
+    </section>
+
+    <!-- Configuração: modelo, projeto, permissão, uso e conexão, num lugar só. -->
+    <section class="tela" id="tela-config" hidden aria-label="Configuração">
+      <header class="tela__topo">
+        <button type="button" class="tela__voltar" data-fechar-tela="config" aria-label="Voltar">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+        </button>
+        <div class="tela__cabecalho">
+          <h2 class="tela__titulo">Configuração</h2>
+          <p class="tela__sub">Preferências do Koda neste celular</p>
+        </div>
+        <span class="tela__acao tela__acao--vazia" aria-hidden="true"></span>
+      </header>
+      <div class="tela__corpo" id="config-corpo"></div>
+    </section>
+
+    <!-- Navegador de pastas: escolhe no PC a pasta que o agente usa. -->
+    <section class="tela" id="tela-pastas" hidden aria-label="Escolher pasta">
+      <header class="tela__topo">
+        <button type="button" class="tela__voltar" data-fechar-tela="pastas" aria-label="Voltar">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+        </button>
+        <div class="tela__cabecalho">
+          <h2 class="tela__titulo">Escolher pasta</h2>
+          <p class="tela__sub" id="pastas-caminho">…</p>
+        </div>
+        <span class="tela__acao tela__acao--vazia" aria-hidden="true"></span>
+      </header>
+      <div class="tela__corpo tela__corpo--pastas">
+        <div class="pastas__atalhos" id="pastas-atalhos"></div>
+        <div class="pastas__lista" id="pastas-lista"></div>
+      </div>
+      <footer class="pastas__rodape">
+        <button type="button" class="botao botao--primario pastas__usar" id="pastas-usar">Usar esta pasta</button>
+      </footer>
+    </section>
+
+    <!-- Folha inferior: seletores de modelo, projeto, permissão e detalhe do provedor. -->
+    <div class="folha" id="folha" hidden>
+      <div class="folha__veu" data-fechar-folha></div>
+      <div class="folha__painel" role="dialog" aria-modal="true" aria-labelledby="folha-titulo">
+        <header class="folha__topo">
+          <button type="button" class="folha__voltar" id="folha-voltar" hidden aria-label="Voltar">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+          </button>
+          <span class="folha__titulo" id="folha-titulo"></span>
+          <button type="button" class="folha__fechar" data-fechar-folha aria-label="Fechar">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </header>
+        <div class="folha__corpo" id="folha-corpo"></div>
+      </div>
+    </div>
+
+    <!-- Enquanto o koda-link negocia a sala, esta camada cobre a tela. -->
+    <div class="link-estado" id="link-estado" hidden>
+      <span class="link-estado__texto" id="link-estado-texto"></span>
+    </div>
+
+    <!--
+      Porta de entrada. Sem sala no `#` e sem API configurada, o celular não
+      tem como achar o PC sozinho: aqui ele lê o QR ou recebe os dados à mão.
+    -->
+    <section class="entrada" id="entrada" hidden aria-label="Conectar ao Koda">
+      <div class="entrada__marca">KODA</div>
+      <h1 class="entrada__titulo">Entrar no seu Koda</h1>
+      <p class="entrada__texto">
+        Leia o QR do computador ou informe o endereço e o código que aparecem nele.
+      </p>
+
+      <div class="entrada__abas" role="tablist" aria-label="Forma de conexão">
+        <button
+          type="button"
+          class="entrada__aba entrada__aba--ativa"
+          data-entrada-aba="link"
+          role="tab"
+          aria-selected="true"
+        >
+          QR / Link
+        </button>
+        <button
+          type="button"
+          class="entrada__aba"
+          data-entrada-aba="api"
+          role="tab"
+          aria-selected="false"
+        >
+          API direta
+        </button>
+      </div>
+
+      <div class="entrada__painel" data-entrada-painel="link">
+        <!--
+          Sem QR, URL ou chave: procura o Koda na mesma Wi-Fi e entra. Só funciona
+          com o modo rede local ligado no PC — e é o APK (ou a página servida pelo
+          PC) que consegue falar HTTP na rede.
+        -->
+        <button type="button" class="entrada__rede" id="entrada-rede">
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 20h.01" />
+            <path d="M2 8.82a15 15 0 0 1 20 0" />
+            <path d="M5 12.859a10 10 0 0 1 14 0" />
+            <path d="M8.5 16.429a5 5 0 0 1 7 0" />
+          </svg>
+          <span>Entrar pela rede local</span>
+        </button>
+        <p class="entrada__rede-dica" id="entrada-rede-dica">
+          Acha o PC sozinho na mesma Wi-Fi, sem QR nem chave.
+        </p>
+
+        <div class="entrada__ou"><span>ou</span></div>
+
+        <button type="button" class="entrada__qr" id="entrada-ler-qr">
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z" />
+            <circle cx="12" cy="13" r="3" />
+          </svg>
+          Ler QR
+        </button>
+
+        <form class="entrada__form" id="entrada-link">
+          <label class="entrada__campo">
+            Endereço do Koda
+            <input
+              id="entrada-url"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://….trycloudflare.com"
+            />
+          </label>
+          <label class="entrada__campo">
+            Código do QR
+            <input
+              id="entrada-codigo"
+              name="codigo"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              placeholder="sala-código"
+            />
+          </label>
+          <button type="submit" class="entrada__entrar">Entrar</button>
+        </form>
+      </div>
+
+      <div class="entrada__painel" data-entrada-painel="api" hidden>
+        <form class="entrada__form" id="entrada-api">
+          <label class="entrada__campo">
+            Endereço da API
+            <input
+              id="entrada-api-url"
+              name="api"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="http://192.168.1.4:8787"
+            />
+          </label>
+          <label class="entrada__campo">
+            Token da API
+            <input
+              id="entrada-api-token"
+              name="token"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="o token deste PC"
+            />
+          </label>
+          <button type="submit" class="entrada__entrar">Entrar</button>
+        </form>
+      </div>
+
+      <p class="entrada__erro" id="entrada-erro" hidden></p>
+      <p class="entrada__dica">
+        No computador: abra o Koda e toque no ícone de celular no topo.
+      </p>
+
+      <div class="entrada__camera" id="entrada-camera" hidden>
+        <video id="entrada-video" playsinline muted></video>
+        <button type="button" class="entrada__cancelar" id="entrada-cancelar">
+          Cancelar
+        </button>
+      </div>
+    </section>
+
+    <!-- A conversa só aparece depois da primeira mensagem; antes, o KODA ocupa o meio. -->
+    <section class="conversa" id="conversa" aria-label="Conversa">
+      <div class="conversa__lista" id="mensagens" aria-live="polite"></div>
+    </section>
+
+    <!--
+      O compositor do celular.
+      Modelo, esforço e permissão ficam **fora** da caixa, nas pastilhas acima
+      dela; dentro ficam o campo, os anexos e as ferramentas do dia a dia.
+    -->
+    <div class="compositor">
+      <div class="menu" id="menu" role="menu" hidden></div>
+
+      <!-- O cartão de permissão entra aqui, acima das pastilhas e da caixa. -->
+      <div class="pedido" id="pedido" hidden></div>
+
+      <div class="acima">
+        <button
+          type="button"
+          class="chip chip--modelo"
+          data-menu="modelo"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-label="Escolher modelo"
+          title="Escolher modelo"
+        >
+          <svg
+            class="chip__coroa"
+            viewBox="0 0 810 580"
+            width="15"
+            height="11"
+            aria-hidden="true"
+          >
+            <polygon
+              points="0,520 160,520 60,140 270,310 400,80 530,310 740,140 640,520 800,520"
+              fill="currentColor"
+            />
+          </svg>
+          <span class="chip__texto" id="rotulo-modelo">GPT 6.0 Luna</span>
+          <span class="chip__provedor" id="rotulo-provedor" hidden></span>
+          <svg
+            class="chevron"
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="chip chip--esforco"
+          data-menu="esforco"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-label="Esforço de raciocínio (automático)"
+          title="Esforço de raciocínio (automático)"
+        >
+          <svg
+            class="icone"
+            viewBox="0 0 24 24"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m12 14 4-4" />
+            <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+          </svg>
+          <span class="chip__texto" id="rotulo-esforco" hidden>Automático</span>
+          <svg
+            class="chevron"
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="chip chip--permissao"
+          data-menu="permissao"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-label="Permissão: Padrão"
+          title="Permissão: Padrão"
+        >
+          <span class="icone cor-amber" id="icone-permissao" aria-hidden="true"></span>
+          <span class="chip__texto" id="rotulo-permissao">Padrão</span>
+          <svg
+            class="chevron"
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+
+      <form class="caixa" id="caixa" autocomplete="off">
+        <div class="caixa__entrada">
+          <label class="caixa__rotulo" for="mensagem">Mensagem para o Koda</label>
+          <textarea
+            id="mensagem"
+            class="caixa__campo"
+            rows="1"
+            placeholder="Escreva sua mensagem para o Koda"
+            spellcheck="false"
+            autocapitalize="sentences"
+          ></textarea>
+          <button class="caixa__enviar" type="submit" aria-label="Enviar mensagem" disabled>
+            <svg
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 19V5" />
+              <path d="m5 12 7-7 7 7" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="caixa__anexos" id="anexos" hidden></div>
+
+        <div class="caixa__ferramentas">
+          <button
+            type="button"
+            class="ferramenta"
+            data-menu="mais"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-label="Adicionar"
+            title="Adicionar"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M5 12h14" />
+              <path d="M12 5v14" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="ferramenta"
+            data-toggle="reasoning"
+            aria-pressed="true"
+            aria-label="Reasoning"
+            title="Reasoning"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"
+              />
+              <path
+                d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"
+              />
+              <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
+              <path d="M17.599 6.5a3 3 0 0 0 .399-1.375" />
+              <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5" />
+              <path d="M3.477 10.896a4 4 0 0 1 .585-.396" />
+              <path d="M19.938 10.5a4 4 0 0 1 .585.396" />
+              <path d="M6 18a4 4 0 0 1-1.967-.516" />
+              <path d="M19.967 17.484A4 4 0 0 1 18 18" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="ferramenta"
+            data-toggle="web"
+            aria-pressed="false"
+            aria-label="Web"
+            title="Web"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+              <path d="M2 12h20" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="ferramenta"
+            data-toggle="mic"
+            aria-pressed="false"
+            aria-label="Falar em vez de digitar"
+            title="Falar em vez de digitar"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 19v3" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <rect x="9" y="2" width="6" height="13" rx="3" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="chip chip--projeto"
+            data-menu="projeto"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-label="Selecionar projeto"
+            title="Selecionar projeto"
+          >
+            <svg
+              class="icone"
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"
+              />
+              <path d="M8 10v4" />
+              <path d="M12 10v2" />
+              <path d="M16 10v6" />
+            </svg>
+            <span class="chip__texto" id="rotulo-projeto">Sem projeto</span>
+            <svg
+              class="chevron"
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+        </div>
+      </form>
+
+      <input type="file" id="arquivo-imagem" accept="image/*" multiple hidden />
+      <input type="file" id="arquivo" multiple hidden />
+    </div>
+  </body>
+</html>

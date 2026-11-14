@@ -11,6 +11,7 @@ import {
   Search,
   Settings,
   ShoppingBag,
+  Smartphone,
   User,
   X,
 } from 'lucide-react'
@@ -182,6 +183,7 @@ export function Header({
   onOpenFolders,
   onOpenConversation,
   onOpenSettings,
+  onOpenCelular,
   onOpenPresente,
   onOpenStore,
   onAbrirBarraCamera,
@@ -208,6 +210,8 @@ export function Header({
   onOpenFolders: () => void
   onOpenConversation: (id: string) => void
   onOpenSettings: (section?: SettingsSection) => void
+  /** Abre o QR do celular e sobe o túnel público sem passar pelo menu de ajustes. */
+  onOpenCelular: () => void
   /** Abre a página do presente (o ícone solto, ao lado da cápsula). */
   onOpenPresente: () => void
   /** Abre a Store — a área nova, ainda em esqueleto (ver `components/Store.tsx`). */
@@ -494,6 +498,11 @@ export function Header({
         </IconButton>
         <IconButton label="Novo chat" onClick={onNewChat}>
           <Plus className="h-[19px] w-[19px]" strokeWidth={1.8} />
+        </IconButton>
+        {/* A porta do celular fica na cápsula, junto dos atalhos do dia a dia:
+            um clique e o QR público aparece, sem passar pelos ajustes. */}
+        <IconButton label="Conectar celular" onClick={onOpenCelular}>
+          <Smartphone className="h-[18px] w-[18px]" strokeWidth={1.8} />
         </IconButton>
       </div>
 

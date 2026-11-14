@@ -215,3 +215,161 @@ def _expandir(texto: str, n: int, inicio: int, periodo: int, casado: int) -> tup
     while direita + periodo < n and texto[direita] == texto[direita + periodo]:
         direita += 1
     return esquerda, direita + periodo
+
+
+# ------------------------------------------------------------------ eco de resposta
+
+#: Linhas idênticas, em sequência, que já caracterizam o eco de uma resposta inteira.
+#:
+#: O detector de corrida periódica acima exige repetição **contígua**. O laço visto em
+#: 05/11/2026 (GPT-4.1 no GitHub Copilot) repetia a mesma lista de 17 arquivos três vezes,
+#: mas com uma frase diferente entre as cópias — a corrida periódica nunca se formava.
+#: A unidade aqui é a linha: quando a mesma sequência de oito linhas não vazias reaparece,
+#: o modelo está repetindo o bloco, mesmo com texto novo entre as cópias.
+LINHAS_DO_ECO = 8
+
+#: O bloco repetido precisa somar ao menos isto — oito linhas curtas de uma lista legítima
+#: não disparam. O caso do Copilot (17 nomes de arquivo) tem 140 caracteres nas oito
+#: primeiras linhas; por isso o piso é 120, e não 160.
+CARACTERES_MINIMOS_DO_ECO = 120
+
+#: Uma única linha longa repetida também é eco.
+CARACTERES_DE_LINHA_LONGA = 200
+
+#: O eco curto: três linhas idênticas em sequência já bastam quando somam conteúdo.
+#: É o que pega a segunda cópia **cedo** — com o bloco de oito linhas, a tela ainda
+#: mostrava oito linhas repetidas antes de o vigia perceber.
+LINHAS_CURTAS_DO_ECO = 3
+CARACTERES_MINIMOS_DO_ECO_CURTO = 50
+
+
+def _sem_marcador(linha: str) -> str:
+    """Tira `-`, `*`, `+`, `•` ou `1.`/`1)` do começo da linha.
+
+    A mesma lista pode voltar com outra marca — o GPT-4.1 repetiu os 17 arquivos como
+    `- arquivo.py`, depois `1. arquivo.py`, depois sem marca nenhuma. O conteúdo é o
+    mesmo; só o marcador muda, e ele não pode esconder o eco.
+    """
+    partes = linha.split(maxsplit=1)
+    if len(partes) == 2:
+        marca = partes[0]
+        if marca in {"-", "*", "+", "•"} or marca.rstrip(".)").isdigit():
+            return partes[1]
+    return linha
+
+
+class VigiaDeEco:
+    """Encontra o começo da segunda cópia de um bloco de linhas repetido.
+
+    Devolve o **offset absoluto** onde a segunda cópia começa. Quem chama corta o texto
+    ali: a primeira cópia fica, o eco não. A checagem é incremental — cada linha completa
+    entra numa janela deslizante de ``LINHAS_DO_ECO`` linhas, e as janelas já vistas ficam
+    num dicionário. Custo linear no número de linhas.
+    """
+
+    __slots__ = (
+        "_total", "_linhas", "_inicios", "_vistas", "_curtas", "_longas", "_parcial",
+        "_cauda",
+    )
+
+    def __init__(self) -> None:
+        self._total = 0
+        self._linhas: list[str] = []
+        self._inicios: list[int] = []
+        self._vistas: dict[tuple[str, ...], int] = {}
+        self._curtas: dict[tuple[str, ...], int] = {}
+        self._longas: dict[str, int] = {}
+        self._parcial = ""
+        self._cauda = ""
+
+    def alimentar(self, texto: str) -> int | None:
+        """Soma um pedaço; devolve o início da segunda cópia, se ela apareceu."""
+        if not texto:
+            return None
+        self._total += len(texto)
+        self._parcial += texto
+        self._cauda = (self._cauda + texto)[-768:]
+        corte_sem_linha = self._repeticao_curta_sem_linha()
+        if corte_sem_linha is not None:
+            return self._total - len(self._cauda) + corte_sem_linha
+        while "\n" in self._parcial:
+            linha, self._parcial = self._parcial.split("\n", 1)
+            inicio = self._total - len(self._parcial) - len(linha) - 1
+            corte = self._linha(linha, inicio)
+            if corte is not None:
+                return corte
+        return None
+
+    def _repeticao_curta_sem_linha(self) -> int | None:
+        """Pega uma resposta curta colada três vezes, mesmo sem quebra de linha.
+
+        Um passo pode devolver a mesma frase inteira em chamadas seguidas. Quando o texto
+        não tem linhas, o detector por bloco não tem onde ancorar. Exigir três cópias
+        exatas de pelo menos 24 caracteres evita confundir pontuação normal com eco.
+        """
+        texto = self._cauda
+        tamanho = len(texto)
+        maximo = min(192, tamanho // 3)
+        for periodo in range(24, maximo + 1):
+            inicio = tamanho - 3 * periodo
+            unidade = texto[inicio:inicio + periodo]
+            if (
+                unidade.strip()
+                and texto[inicio + periodo:inicio + 2 * periodo] == unidade
+                and texto[inicio + 2 * periodo:] == unidade
+            ):
+                return len(texto) - 2 * periodo
+        return None
+
+    def finalizar(self) -> int | None:
+        """Julga a última linha, quando o texto não termina em quebra de linha."""
+        if not self._parcial:
+            return None
+        linha, self._parcial = self._parcial, ""
+        return self._linha(linha, self._total - len(linha))
+
+    def _linha(self, linha: str, inicio: int) -> int | None:
+        limpa = _sem_marcador(" ".join(linha.split()))
+        if not limpa:
+            return None
+        if len(limpa) >= CARACTERES_DE_LINHA_LONGA:
+            if limpa in self._longas:
+                return inicio
+            self._longas[limpa] = inicio
+        self._linhas.append(limpa)
+        self._inicios.append(inicio)
+        if len(self._linhas) > LINHAS_DO_ECO:
+            self._linhas.pop(0)
+            self._inicios.pop(0)
+        # Eco curto: três linhas já bastam para a segunda cópia parar cedo. Roda antes do
+        # bloco de oito para o corte acontecer na terceira linha, e não na oitava.
+        if len(self._linhas) >= LINHAS_CURTAS_DO_ECO:
+            curto = tuple(self._linhas[-LINHAS_CURTAS_DO_ECO:])
+            if sum(len(item) for item in curto) >= CARACTERES_MINIMOS_DO_ECO_CURTO:
+                if curto in self._curtas:
+                    return self._inicios[-LINHAS_CURTAS_DO_ECO]
+                self._curtas[curto] = self._inicios[-LINHAS_CURTAS_DO_ECO]
+        if len(self._linhas) < LINHAS_DO_ECO:
+            return None
+        bloco = tuple(self._linhas)
+        if sum(len(item) for item in bloco) < CARACTERES_MINIMOS_DO_ECO:
+            return None
+        if bloco in self._vistas:
+            return self._inicios[0]
+        self._vistas[bloco] = self._inicios[0]
+        return None
+
+
+def eco_de_resposta(texto: str) -> int | None:
+    """Offset onde começa a segunda cópia de um bloco de linhas repetido, ou ``None``.
+
+    É a barreira final para provedores que não streamam: o texto inteiro passa pelo mesmo
+    vigia que acompanha o stream.
+    """
+    if not isinstance(texto, str):
+        return None
+    vigia = VigiaDeEco()
+    corte = vigia.alimentar(texto)
+    if corte is not None:
+        return corte
+    return vigia.finalizar()

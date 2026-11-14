@@ -17,10 +17,11 @@ Effort = Literal["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
 `reasoning_effort` para o provedor. Sem `none` de propósito: o host recusa esse valor em
 parte do catálogo (ver `providers/openai_compat.py`).
 
-`xhigh` e `max` entraram em 10/10/2026. O host publica os **sete** níveis para 6 dos 8
-modelos e o `NIVEIS_ESFORCO` daqui já os conhecia — só a API e o menu paravam em `high`,
-e o topo do catálogo ficava inalcançável pela interface. Modelo que não aceita o nível
-(o `layze-2` recusa `max`) é **arredondado** por `esforco_valido`, não recusado.
+`xhigh` e `max` entraram em 10/10/2026. O gateway publica os níveis **por modelo** e o
+`NIVEIS_ESFORCO` daqui já os conhece — só a API e o menu paravam em `high`, e o topo do
+catálogo ficava inalcançável pela interface. Modelo que não aceita o nível é
+**arredondado** por `esforco_valido`, não recusado. No catálogo atual nenhum modelo
+declara raciocínio; os níveis continuam porque o gateway os publica por modelo.
 """
 
 MAX_TEXTO = 100_000
@@ -52,7 +53,7 @@ class ChatRequest(BaseModel):
     """O que o prompt box envia ao apertar Enter."""
 
     text: str = Field(default="", max_length=MAX_TEXTO)
-    model: str = "liz-4"
+    model: str = "layze-2.1-flash"
     reasoning: bool = True
     effort: Effort = "auto"
     web: bool = False
@@ -75,6 +76,10 @@ class ChatRequest(BaseModel):
     """0/None usam o orçamento do servidor; um valor positivo pode reduzir esse orçamento."""
     """Fuso do cliente em minutos (como `Date.getTimezoneOffset()`), para o uso contar no dia local."""
     tz_offset_minutes: int = 0
+
+    origem: Literal["pc", "celular", "api"] = "pc"
+    """De qual tela veio o pedido. O modo ao vivo usa isto para dizer no PC que
+    quem está trabalhando é o celular (e vice-versa), sem adivinhar pelo token."""
 
     resume: bool = False
     """Retomar a tarefa da conversa, sem mensagem nova.
@@ -344,8 +349,8 @@ class ModelInfo(BaseModel):
     nem status nem mentira nenhuma ao lado do nome.
 
     É o número cru, e não um booleano, porque o seletor mostra o código ao lado do modelo
-    («Liz 4 - 400»): quem olha a lista vê a prova do que aconteceu, e não um ícone genérico
-    que não diz se o problema foi o modelo, a chave ou o host.
+    («GLM 5.3 Flash - 400»): quem olha a lista vê a prova do que aconteceu, e não um ícone
+    genérico que não diz se o problema foi o modelo, a chave ou o host.
     """
 
 
@@ -506,6 +511,8 @@ class Health(BaseModel):
     workspace: str = ""
     """O provedor atual sabe chamar ferramentas?"""
     tools_ready: bool = False
+    """O processo atual já recebeu a sessão da conta desta janela."""
+    account_session: bool = False
     """Nomes das ferramentas disponíveis nesta configuração."""
     tools: list[str] = Field(default_factory=list)
     """Teto de contexto em tokens; 0 desliga a compactação."""
@@ -594,7 +601,7 @@ class MelhorarPromptRequest(BaseModel):
     """O que a folha do composer manda: o rascunho, o modo e o que existe na máquina."""
 
     text: str = Field(default="", max_length=MAX_TEXTO)
-    model: str = "liz-4"
+    model: str = "glm-5.3-flash"
     #: Como melhorar: `criar` (do zero), `base` (mantendo), `fala` (só a escrita),
     #: `estrutura` (separar em tarefas) ou `grafia` (acentos e pontuação).
     modo: Literal["criar", "base", "fala", "estrutura", "grafia"] = "base"

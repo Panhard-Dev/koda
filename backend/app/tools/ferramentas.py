@@ -34,8 +34,10 @@ from typing import Any
 
 import httpx
 
-from .. import mcp
+from .. import economia, mcp, transferencias, ui_documento
+from ..config import get_settings
 from ..contracts import mudancas
+from . import patch_marcado
 from ..limits import LIMITES, cortar_cabeca_e_cauda
 from .registry import (
     CAMINHOS_EXTRA,
@@ -232,6 +234,18 @@ PASTAS_IGNORADAS = {
     ".pytest_cache",
     ".ruff_cache",
     ".tox",
+    # Saídas de build: no Koda, `src-tauri/target` sozinho tem ~40 mil arquivos e
+    # consumia os 5 s de varredura antes de a busca chegar ao código.
+    "target",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".gradle",
+    "Pods",
 }
 
 
@@ -575,6 +589,12 @@ def _ler_anexo(anexo: Any, inicio: int, limite: int) -> str:
         return _limitar(texto)
 
     if not anexo.texto:
+        if anexo.mime == "application/zip":
+            return (
+                f"[anexo zip] {anexo.nome} · {anexo.tamanho} bytes · id {anexo.id}\n"
+                "É um arquivo compactado: não há texto para ler aqui. Para levá-lo ao PC, "
+                "use `save_attachment` com este id."
+            )
         return f"[anexo {anexo.mime}] {anexo.nome} · {anexo.tamanho} bytes · id {anexo.id}"
 
     pediu_recorte = inicio > 1 or limite > 0
@@ -1311,6 +1331,7 @@ def classificar(
         titulo = ""
         explicacao = ""
         risco = "baixo"
+        resumo = f"{rota} → {destino}" if destino is not None else str(rota)
 
         if nome == "delete_file":
             kinds.append("exclusao")
@@ -1368,6 +1389,28 @@ def classificar(
                 f"Baixar {str(argumentos.get('url', ''))[:120]} e gravar em {rota}."
             )
             risco = "medio"
+        elif nome == "save_attachment":
+            # O destino real pode ser uma pasta (o nome do anexo entra no fim); o cartão
+            # tem de mostrar onde o arquivo vai ficar, não só a pasta que a pessoa pediu.
+            kinds.append("escrita")
+            titulo = "Salvar anexo no PC"
+            em_pasta = (
+                not alvo
+                or alvo.endswith(("/", "\\"))
+                or rota.is_dir()
+                or (not rota.exists() and not Path(alvo).suffix)
+            )
+            if em_pasta:
+                explicacao = (
+                    f"Copiar o arquivo que a pessoa anexou no celular para a pasta {rota}, "
+                    "com o nome original."
+                )
+                resumo = f"{rota} (com o nome do anexo)"
+                pasta_do_arquivo = str(rota)
+            else:
+                explicacao = f"Copiar o arquivo que a pessoa anexou no celular para {rota}."
+                if rota.exists():
+                    risco = "medio"
 
         if fora:
             kinds.append("fora_da_pasta")
@@ -1387,7 +1430,7 @@ def classificar(
             "kinds": kinds,
             "escopos": escopos,
             "titulo": titulo,
-            "resumo": f"{rota} → {destino}" if destino is not None else str(rota),
+            "resumo": resumo,
             "explicacao": explicacao,
             "lembrar": f"mexer em {pasta_do_arquivo}",
             "risco": risco if not fora else ("alto" if risco == "alto" else "medio"),
@@ -1551,6 +1594,8 @@ def _caminho_do_diff(linha: str) -> str:
 
 def _arquivos_do_diff(diff: str) -> list[str]:
     """Arquivos que o diff toca, na ordem em que aparecem."""
+    if patch_marcado.e_marcado(diff):
+        return patch_marcado.caminhos(diff)
     achados: list[str] = []
     for linha in (diff or "").splitlines():
         if not linha.startswith("+++ "):
@@ -1688,6 +1733,8 @@ def _aplicar_patch(
     """
     if not diff.strip():
         return "ERRO: diff vazio"
+    if patch_marcado.e_marcado(diff):
+        return patch_marcado.aplicar(diff, workspace, acesso_livre, chamada, _verificar_cancelamento)
     arquivos, erro = _ler_diff(diff)
     if erro:
         return f"ERRO: {erro}"
@@ -1803,11 +1850,11 @@ def executar(
         with safe_paths.PathGuard() as guard:
             for index, target in enumerate(targets):
                 path = _resolver(workspace, target)
-                create_parent = canonical in {'write_file','create_directory','download_file','apply_patch'} or (
+                create_parent = canonical in {'write_file','create_directory','download_file','apply_patch','save_attachment'} or (
                     canonical in {'move_file','copy_file'} and index == 1)
                 guard.parents(path, create=create_parent)
                 if path.exists() and canonical not in {'delete_file','delete_directory','move_file','rename_file','copy_file',
-                                                      'write_file','edit_file','str_replace_editor','apply_patch','download_file'}:
+                                                      'write_file','edit_file','str_replace_editor','apply_patch','download_file','save_attachment'}:
                     guard.entry(path)
             result = _executar_impl(
                 nome, argumentos, workspace, negadas, acesso_livre=acesso_livre,
@@ -2002,6 +2049,55 @@ def _tool_read_attachment(nome, argumentos, workspace, negadas=None, *, acesso_l
     return _ler_anexo(anexo, inicio, limite)
 
 
+def _destino_do_anexo(workspace: Path, pedido: str, nome_do_anexo: str) -> Path:
+    """Onde o anexo vai parar.
+
+    Pasta é: caminho vazio (a pasta de trabalho), com barra no fim, que já existe como
+    pasta, ou que não existe e **não tem extensão** — "leva para `do-celular`" é pasta,
+    não um arquivo chamado `do-celular`.
+    """
+    if not pedido:
+        return Path(workspace) / nome_do_anexo
+    rota = _resolver(workspace, pedido)
+    if pedido.endswith(("/", "\\")) or rota.is_dir():
+        return rota / nome_do_anexo
+    if not rota.exists() and not Path(pedido).suffix:
+        return rota / nome_do_anexo
+    return rota
+
+
+def _tool_save_attachment(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    """Copia um anexo do store para a pasta de trabalho — o caminho celular → PC.
+
+    O store continua sendo a única origem: o modelo manda o `id`, nunca um caminho de
+    leitura. O destino passa pelo mesmo guarda das ferramentas de arquivo.
+    """
+    if anexos is None:
+        return (
+            "ERRO: o store de anexos não está disponível nesta execução — "
+            "não dá para salvar o anexo agora."
+        )
+    anexo_id = str(argumentos.get("id", "") or "").strip()
+    if not anexo_id:
+        return (
+            "ERRO: informe o `id` do anexo (o que aparece no bloco «[anexos desta "
+            "mensagem]»). O nome do arquivo não serve: ele não é caminho nem id."
+        )
+    anexo = anexos.buscar(anexo_id)
+    if anexo is None:
+        return f"ERRO: anexo não encontrado: {anexo_id}"
+    pedido = str(argumentos.get("caminho", "") or "").strip()
+    rota = _destino_do_anexo(workspace, pedido, anexo.nome)
+    try:
+        rota.parent.mkdir(parents=True, exist_ok=True)
+        temporario = rota.with_name(f".{rota.name}.koda-tmp")
+        shutil.copyfile(anexo.caminho, temporario)
+        os.replace(temporario, rota)
+    except OSError as exc:
+        return f"ERRO ao salvar o anexo em {rota}: {exc}"
+    return f"ok: anexo '{anexo.nome}' salvo em {rota} ({anexo.tamanho} bytes)"
+
+
 def _tool_use_skill(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
     # Uma skill é **instruções**, não execução: esta ferramenta devolve o texto dela
     # para o modelo seguir. É o que separa skill de MCP — e é o único caminho para as
@@ -2031,6 +2127,22 @@ def _tool_use_skill(nome, argumentos, workspace, negadas=None, *, acesso_livre=F
         f"[skill '{pedido}' · origem: {escopo}]\n"
         "Siga estas instruções no que fizer a seguir:\n\n"
         f"{instrucoes}"
+    )
+
+
+def _tool_consultar_saida(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    """Lê uma saída que o Koda guardou para economizar contexto.
+
+    Não passa pelo `PathGuard` nem pelo workspace de propósito: o arquivo mora na pasta de
+    dados do app, não no projeto. O caminho não vem do modelo — só um id de 12 hexadecimais,
+    validado em `economia._arquivo` —, então não há como esta ferramenta virar leitura de
+    arquivo arbitrário.
+    """
+    return economia.consultar(
+        identificador=str(argumentos.get("id") or "").strip(),
+        busca=str(argumentos.get("busca") or ""),
+        inicio=_inteiro(argumentos.get("inicio"), 1),
+        limite=_inteiro(argumentos.get("limite"), 200),
     )
 
 
@@ -2242,6 +2354,112 @@ def _tool_plan(nome, argumentos, workspace, negadas=None, *, acesso_livre=False,
             "`texto` (e opcionalmente `feito` e `atual`)."
         )
     return lista_em_texto(itens)
+
+
+#: A ferramenta que abre o cartão de plano. O loop a trata à parte: o conteúdo vira
+#: evento `plano` (a interface desenha) e o resultado volta curto para o modelo.
+FERRAMENTA_DO_CARTAO = "mostrar_plano"
+
+
+def _texto_curto(valor: Any) -> str:
+    return " ".join(str(valor or "").split())
+
+
+def dados_do_cartao(argumentos: dict[str, Any]) -> dict[str, Any] | None:
+    """Normaliza os argumentos da ferramenta para o formato do cartão `koda-plano`.
+
+    Aceita o que os modelos costumam mandar: `como` com strings ou objetos, `mudancas`
+    com `arquivo`/`texto` ou só texto. Devolve `None` quando não há título nem passos —
+    um cartão vazio não ajuda ninguém.
+    """
+    if not isinstance(argumentos, dict):
+        return None
+    titulo = _texto_curto(argumentos.get("titulo") or argumentos.get("title"))
+    dados: dict[str, Any] = {"tipo": "plano"}
+    if titulo:
+        dados["titulo"] = titulo
+    for chave, apelidos in (
+        ("o_que_e", ("o_que_e", "o_que", "definicao")),
+        ("pra_que", ("pra_que", "para_que", "objetivo")),
+        ("por_que", ("por_que", "porque", "motivo")),
+        ("resultado", ("resultado", "resultado_esperado", "entrega")),
+    ):
+        for apelido in apelidos:
+            valor = _texto_curto(argumentos.get(apelido))
+            if valor:
+                dados[chave] = valor
+                break
+    passos: list[dict[str, str]] = []
+    for passo in argumentos.get("como") or argumentos.get("passos") or argumentos.get("etapas") or []:
+        if isinstance(passo, str):
+            texto = _texto_curto(passo)
+            if texto:
+                passos.append({"titulo": texto})
+        elif isinstance(passo, dict):
+            titulo_passo = _texto_curto(passo.get("titulo") or passo.get("texto"))
+            detalhe = _texto_curto(passo.get("texto") or passo.get("detalhe"))
+            if titulo_passo:
+                item = {"titulo": titulo_passo}
+                if detalhe and detalhe != titulo_passo:
+                    item["texto"] = detalhe
+                passos.append(item)
+    if passos:
+        dados["como"] = passos[:50]
+    mudancas: list[dict[str, str]] = []
+    for mudanca in argumentos.get("mudancas") or argumentos.get("alteracoes") or []:
+        if isinstance(mudanca, str):
+            texto = _texto_curto(mudanca)
+            if texto:
+                mudancas.append({"texto": texto})
+        elif isinstance(mudanca, dict):
+            texto = _texto_curto(mudanca.get("texto") or mudanca.get("descricao"))
+            arquivo = _texto_curto(mudanca.get("arquivo") or mudanca.get("caminho"))
+            if texto or arquivo:
+                item = {"texto": texto or arquivo}
+                if arquivo:
+                    item["arquivo"] = arquivo
+                mudancas.append(item)
+    if mudancas:
+        dados["mudancas"] = mudancas[:50]
+    if not dados.get("titulo") and not dados.get("como"):
+        return None
+    return dados
+
+
+def _tool_mostrar_plano(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    dados = dados_do_cartao(argumentos)
+    if dados is None:
+        return (
+            "ERRO: o cartão precisa de `titulo` e de `como` (a lista de passos). "
+            "Chame de novo com esses campos."
+        )
+    return (
+        "Cartão de plano aberto na tela. Pare aqui e aguarde a decisão da pessoa — "
+        "não execute nada antes do aceite."
+    )
+
+
+#: A ferramenta da interface inteligente. Como o cartão de plano, o conteúdo vira
+#: evento próprio (`ui`) e a mensagem gravada guarda o documento para reabrir igual.
+FERRAMENTA_DA_INTERFACE = "mostrar_interface"
+
+
+def _tool_mostrar_interface(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    try:
+        documento, avisos = ui_documento.validar(argumentos, run_id=dono)
+    except ui_documento.DocumentoInvalido as erro:
+        return (
+            f"ERRO: interface recusada — {erro} "
+            "Corrija o documento e chame `mostrar_interface` de novo."
+        )
+    resposta = (
+        f"Interface `{documento['documentId']}` desenhada na conversa. "
+        "Não repita o documento em texto nem em bloco de código: a tela já mostra. "
+        "Continue a explicação em uma ou duas frases, se precisar."
+    )
+    if avisos:
+        resposta += " Avisos: " + "; ".join(avisos[:6]) + "."
+    return resposta
 
 
 def _tool_search_files(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
@@ -2465,6 +2683,57 @@ def _tool_upload_file(nome, argumentos, workspace, negadas=None, *, acesso_livre
     return f"ok: {rota} enviado para {url} — resposta {resposta.status_code}"
 
 
+#: Marca que `send_to_phone` deixa no resultado. O laço a transforma no evento `transfer`
+#: que o celular recebe e a tira do texto que a tela e o modelo veem.
+MARCA_TRANSFERENCIA = "\n[koda-transfer]"
+
+
+def separar_transferencia(saida: str) -> tuple[str, dict[str, Any] | None]:
+    """Separa o JSON da transferência do texto legível da ferramenta."""
+    if MARCA_TRANSFERENCIA not in saida:
+        return saida, None
+    antes, _, resto = saida.partition(MARCA_TRANSFERENCIA)
+    linha = resto.splitlines()[0] if resto else ""
+    try:
+        dados = json.loads(linha)
+    except ValueError:
+        return saida, None
+    if not isinstance(dados, dict) or not dados.get("id"):
+        return saida, None
+    return antes.rstrip(), dados
+
+
+def _tamanho_legivel(tamanho: int) -> str:
+    if tamanho >= 1024 * 1024:
+        return f"{tamanho / (1024 * 1024):.1f} MB".replace(".", ",")
+    if tamanho >= 1024:
+        return f"{tamanho / 1024:.0f} KB"
+    return f"{tamanho} bytes"
+
+
+def _tool_send_to_phone(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    origem = _resolver(workspace, str(argumentos.get("caminho", "")))
+    nome_no_celular = str(argumentos.get("nome") or "").strip() or None
+    try:
+        item = transferencias.guardar(origem, nome_no_celular)
+    except transferencias.TransferenciaError as erro:
+        return f"ERRO: {erro}"
+    return (
+        f'ok: "{item.nome}" ({_tamanho_legivel(item.tamanho)}) pronto para o celular. '
+        "O cartão «Salvar no celular» aparece na conversa do celular."
+        f"{MARCA_TRANSFERENCIA}"
+        + json.dumps(
+            {
+                "id": item.id,
+                "nome": item.nome,
+                "tamanho": item.tamanho,
+                "mime": item.mime,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def _tool_get_environment(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
     return _ambiente(workspace)
 
@@ -2514,13 +2783,31 @@ def _tool_search_codebase(nome, argumentos, workspace, negadas=None, *, acesso_l
             return False
         return False
 
-    visitados, parada = _percorrer_pasta(workspace, visitar)
+    # Subpasta opcional: sem ela, um repositório grande estoura o orçamento de varredura
+    # antes de chegar ao código. `_resolver` impede sair da pasta de trabalho.
+    base = workspace
+    pedida = str(argumentos.get("caminho") or "").strip()
+    if pedida:
+        base = _resolver(workspace, pedida)
+        if not base.is_dir():
+            return f"ERRO: pasta não encontrada: {base}"
+    visitados, parada = _percorrer_pasta(base, visitar)
     if parada in ("itens", "tempo") and not estado["motivo"]:
         estado["motivo"] = (
             f"{visitados} itens examinados" if parada == "itens" else "tempo de busca"
         )
-    corpo = "\n".join(achados) or "(nenhuma ocorrência)"
-    if estado["motivo"]:
+    if achados:
+        corpo = "\n".join(achados)
+    elif estado["motivo"]:
+        # "nenhuma ocorrência" numa busca interrompida é mentira: a varredura parou antes
+        # de olhar tudo. Dizer isso evita concluir que o termo não existe no projeto.
+        corpo = (
+            f"(a busca parou em {estado['motivo']} antes de terminar — nada encontrado "
+            "até ali; indique uma subpasta ou um termo mais específico)"
+        )
+    else:
+        corpo = "(nenhuma ocorrência)"
+    if achados and estado["motivo"]:
         corpo += (
             f"\n...(busca limitada por {estado['motivo']}; refine o termo "
             "ou indique uma subpasta)"
@@ -2605,11 +2892,333 @@ def _tool_git_commit(nome, argumentos, workspace, negadas=None, *, acesso_livre=
     return resultado
 
 
+# ------------------------------------------------------------------ dados reais
+
+_TEMPO = {
+    0: "Céu limpo", 1: "Predominantemente limpo", 2: "Parcialmente nublado",
+    3: "Nublado", 45: "Neblina", 48: "Neblina com geada", 51: "Garoa leve",
+    53: "Garoa", 55: "Garoa forte", 56: "Garoa congelante",
+    57: "Garoa congelante forte", 61: "Chuva leve", 63: "Chuva", 65: "Chuva forte",
+    66: "Chuva congelante", 67: "Chuva congelante forte", 71: "Neve leve",
+    73: "Neve", 75: "Neve forte", 77: "Grãos de neve", 80: "Pancadas leves",
+    81: "Pancadas", 82: "Pancadas fortes", 85: "Pancadas de neve",
+    86: "Pancadas de neve fortes", 95: "Trovoada", 96: "Trovoada com granizo",
+    99: "Trovoada com granizo forte",
+}
+
+
+def _tool_clima(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    cidade = str(argumentos.get("cidade") or argumentos.get("local") or "").strip()
+    dias = min(7, max(1, _inteiro(argumentos.get("dias"), 5)))
+    lat, lon = argumentos.get("lat"), argumentos.get("lon")
+    try:
+        with httpx.Client(headers=CABECALHOS_WEB, timeout=_timeout_httpx(15)) as cliente:
+            lugar = ""
+            if cidade:
+                geo = cliente.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": cidade, "count": 1, "language": "pt", "format": "json"},
+                )
+                geo.raise_for_status()
+                achados = (geo.json() or {}).get("results") or []
+                if not achados:
+                    return f"ERRO: não encontrei a cidade {cidade!r}. Tente o nome com o estado ou país."
+                local = achados[0]
+                lat, lon = local.get("latitude"), local.get("longitude")
+                lugar = ", ".join(
+                    parte for parte in (
+                        local.get("name"), local.get("admin1"), local.get("country")
+                    ) if parte
+                )
+            try:
+                lat, lon = float(lat), float(lon)
+            except (TypeError, ValueError):
+                return "ERRO: informe `cidade` ou `lat`/`lon` numéricos."
+            if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+                return "ERRO: coordenadas fora da faixa (lat -90..90, lon -180..180)."
+            previsao = cliente.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "current": (
+                        "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                        "precipitation,weather_code,wind_speed_10m"
+                    ),
+                    "daily": (
+                        "temperature_2m_max,temperature_2m_min,"
+                        "precipitation_probability_max,weather_code"
+                    ),
+                    "timezone": "auto",
+                    "forecast_days": dias,
+                },
+            )
+            previsao.raise_for_status()
+            dados = previsao.json() or {}
+    except (httpx.HTTPError, ValueError) as exc:
+        return f"ERRO: o serviço de clima não respondeu ({exc})."
+
+    atual = dados.get("current") or {}
+    diario = dados.get("daily") or {}
+    datas = diario.get("time") or []
+    maximas = diario.get("temperature_2m_max") or []
+    minimas = diario.get("temperature_2m_min") or []
+    chuvas = diario.get("precipitation_probability_max") or []
+    codigos = diario.get("weather_code") or []
+
+    def tempo(codigo: Any) -> str:
+        try:
+            return _TEMPO.get(int(codigo), "Condição não informada")
+        except (TypeError, ValueError):
+            return "Condição não informada"
+
+    linhas = [
+        f"Clima em {lugar or f'{lat:.2f}, {lon:.2f}'} (Open-Meteo)",
+        (
+            f"Agora: {atual.get('temperature_2m', '—')} °C "
+            f"(sensação {atual.get('apparent_temperature', '—')} °C), "
+            f"umidade {atual.get('relative_humidity_2m', '—')}%, "
+            f"vento {atual.get('wind_speed_10m', '—')} km/h, "
+            f"chuva {atual.get('precipitation', '—')} mm — "
+            f"{tempo(atual.get('weather_code'))}"
+        ),
+        "Previsão diária:",
+    ]
+    for i, data in enumerate(datas[:dias]):
+        linhas.append(
+            f"- {data}: {minimas[i] if i < len(minimas) else '—'} a "
+            f"{maximas[i] if i < len(maximas) else '—'} °C, "
+            f"chuva {chuvas[i] if i < len(chuvas) else '—'}%, "
+            f"{tempo(codigos[i] if i < len(codigos) else None)}"
+        )
+    linhas.append(
+        "Use estes números como fonte; diga a data e a fonte (Open-Meteo)."
+    )
+    return _cercar(_limitar("\n".join(linhas)))
+
+
+def _tool_cotacao(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    moeda = str(argumentos.get("moeda") or argumentos.get("from") or "USD").strip().upper()
+    alvo = str(argumentos.get("alvo") or argumentos.get("to") or "BRL").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", moeda) or not re.fullmatch(r"[A-Z]{3}", alvo):
+        return "ERRO: use códigos ISO de 3 letras (ex.: USD, BRL, EUR)."
+    try:
+        valor = float(argumentos.get("valor", 1) or 1)
+    except (TypeError, ValueError):
+        valor = 1.0
+    if not (valor == valor) or valor in (float("inf"), float("-inf")) or valor <= 0:
+        valor = 1.0
+    valor = min(valor, 1_000_000_000)
+    if moeda == alvo:
+        return _cercar(f"{valor:,.2f} {moeda} = {valor:,.2f} {alvo} (mesma moeda).")
+    try:
+        with httpx.Client(headers=CABECALHOS_WEB, timeout=_timeout_httpx(15)) as cliente:
+            resposta = cliente.get(
+                "https://api.frankfurter.dev/v1/latest",
+                params={"from": moeda, "to": alvo},
+            )
+            resposta.raise_for_status()
+            dados = resposta.json() or {}
+    except (httpx.HTTPError, ValueError) as exc:
+        return (
+            f"ERRO: o serviço de câmbio não respondeu ({exc}). "
+            "Confira se as duas moedas são suportadas pelo BCE."
+        )
+    taxa = (dados.get("rates") or {}).get(alvo)
+    if not isinstance(taxa, (int, float)):
+        return f"ERRO: não há taxa de {moeda} para {alvo} na data consultada."
+    convertido = valor * float(taxa)
+    data = dados.get("date") or "data não informada"
+    return _cercar(
+        f"Câmbio de referência do BCE ({data}):\n"
+        f"1 {moeda} = {float(taxa):.6g} {alvo}\n"
+        f"{valor:,.2f} {moeda} = {convertido:,.2f} {alvo}\n"
+        "Fonte: Frankfurter (taxa de referência diária; não é taxa comercial com spread)."
+    )
+
+
+def _tool_buscar_imagens(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    consulta = str(argumentos.get("consulta") or argumentos.get("query") or "").strip()
+    if not consulta:
+        return "ERRO: informe `consulta`."
+    quantidade = min(10, max(1, _inteiro(argumentos.get("quantidade"), 6)))
+    try:
+        with httpx.Client(headers=CABECALHOS_WEB, timeout=_timeout_httpx(20)) as cliente:
+            resposta = cliente.get(
+                "https://api.openverse.org/v1/images/",
+                params={
+                    "q": consulta,
+                    "page_size": quantidade,
+                    "license_type": "all-cc",
+                },
+            )
+            resposta.raise_for_status()
+            dados = resposta.json() or {}
+    except (httpx.HTTPError, ValueError) as exc:
+        return f"ERRO: a busca de imagens não respondeu ({exc})."
+    resultados = dados.get("results") or []
+    if not resultados:
+        return f"(sem imagens para {consulta!r})"
+
+    def http(valor: Any) -> str:
+        texto = str(valor or "")
+        return texto if texto.startswith(("http://", "https://")) else ""
+
+    linhas = [f"Imagens com licença aberta para {consulta!r} (Openverse):"]
+    for i, item in enumerate(resultados[:quantidade], start=1):
+        if not isinstance(item, dict):
+            continue
+        imagem = http(item.get("url")) or http(item.get("thumbnail"))
+        pagina = http(item.get("foreign_landing_url")) or http(item.get("detail_url"))
+        titulo = str(item.get("title") or "sem título")[:200]
+        autor = str(item.get("creator") or "autor não informado")[:120]
+        licenca = str(item.get("license") or "?")
+        versao = str(item.get("license_version") or "")
+        linhas.append(
+            f"{i}. {titulo} — {autor} ({licenca.upper()} {versao})".rstrip()
+        )
+        if imagem:
+            linhas.append(f"   imagem: {imagem}")
+        if pagina:
+            linhas.append(f"   página: {pagina}")
+    linhas.append(
+        "Use as URLs em KodaImage com `alt` descritivo e crédito ao autor; "
+        "confira a licença antes de uso comercial."
+    )
+    return _cercar(_limitar("\n".join(linhas)))
+
+
+_MEMORIA_TRAVA = threading.Lock()
+
+
+def _memoria_caminho() -> Path:
+    return get_settings().database_path.parent / "memoria.json"
+
+
+def _memoria_ler(caminho: Path) -> list[dict[str, Any]]:
+    try:
+        dados = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(dados, list):
+        return []
+    return [
+        item for item in dados
+        if isinstance(item, dict) and item.get("id") and item.get("chave")
+    ]
+
+
+def _memoria_gravar(caminho: Path, itens: list[dict[str, Any]]) -> None:
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    temporario = caminho.with_suffix(".tmp")
+    temporario.write_text(json.dumps(itens, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        temporario.chmod(0o600)
+    except OSError:
+        pass
+    temporario.replace(caminho)
+
+
+def _tool_memoria(nome, argumentos, workspace, negadas=None, *, acesso_livre=False, dono="", anexos=None, skills=None, chamada="") -> str:
+    acao = str(argumentos.get("acao") or argumentos.get("action") or "").strip().lower()
+    caminho = _memoria_caminho()
+    with _MEMORIA_TRAVA:
+        itens = _memoria_ler(caminho)
+        if acao in {"listar", "list", "ver"}:
+            if not itens:
+                return "A memória local está vazia."
+            linhas = [f"Memória local ({len(itens)} itens):"]
+            linhas.extend(
+                f"- {item['id']} · {item['chave']}: {str(item.get('valor', ''))[:400]}"
+                for item in itens
+            )
+            return _limitar("\n".join(linhas))
+        if acao in {"buscar", "search", "procurar"}:
+            termo = str(argumentos.get("termo") or argumentos.get("chave") or "").strip().lower()
+            if not termo:
+                return "ERRO: informe `termo` para buscar."
+            achados = [
+                item for item in itens
+                if termo in str(item.get("chave", "")).lower()
+                or termo in str(item.get("valor", "")).lower()
+            ]
+            if not achados:
+                return f"Nada na memória para {termo!r}."
+            return _limitar(
+                "\n".join(
+                    [f"Memória — {len(achados)} resultado(s) para {termo!r}:"]
+                    + [
+                        f"- {item['id']} · {item['chave']}: {str(item.get('valor', ''))[:400]}"
+                        for item in achados
+                    ]
+                )
+            )
+        if acao in {"salvar", "save", "lembrar", "memorizar"}:
+            chave = str(argumentos.get("chave") or "").strip()[:80]
+            valor = str(argumentos.get("valor") or "").strip()[:4000]
+            if not chave or not valor:
+                return "ERRO: `salvar` precisa de `chave` e `valor`."
+            segredo = re.search(
+                r"(?i)(senha|password|token|api[_ -]?key|secret|credencial)", chave
+            ) or re.search(
+                r"(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|"
+                r"-----BEGIN [A-Z ]*PRIVATE KEY-----)",
+                valor,
+            )
+            if segredo:
+                return (
+                    "ERRO: não guardo senha, token nem chave de API na memória. "
+                    "Use o cofre de credenciais do sistema."
+                )
+            agora = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            existente = next(
+                (item for item in itens if str(item.get("chave", "")).casefold() == chave.casefold()),
+                None,
+            )
+            if existente is not None:
+                existente["valor"] = valor
+                existente["atualizado"] = agora
+                resposta = f"Memória atualizada (id {existente['id']}): {chave}."
+            else:
+                if len(itens) >= 200:
+                    return "ERRO: a memória chegou a 200 itens; exclua algum antes de salvar."
+                item = {
+                    "id": uuid.uuid4().hex[:12],
+                    "chave": chave,
+                    "valor": valor,
+                    "criado": agora,
+                    "atualizado": agora,
+                }
+                itens.append(item)
+                resposta = f"Memória salva (id {item['id']}): {chave}."
+            _memoria_gravar(caminho, itens)
+            return resposta
+        if acao in {"excluir", "delete", "remover", "apagar"}:
+            alvo = str(argumentos.get("id") or "").strip()
+            chave = str(argumentos.get("chave") or "").strip()
+            if not alvo and not chave:
+                return "ERRO: `excluir` precisa de `id` ou `chave`."
+            restantes = [
+                item for item in itens
+                if not (
+                    (alvo and item.get("id") == alvo)
+                    or (chave and str(item.get("chave", "")).casefold() == chave.casefold())
+                )
+            ]
+            if len(restantes) == len(itens):
+                return "ERRO: não encontrei esse item na memória."
+            _memoria_gravar(caminho, restantes)
+            return f"Removido da memória: {alvo or chave}."
+    return "ERRO: `acao` precisa ser salvar, listar, buscar ou excluir."
+
+
 _TOOL_HANDLERS = {
     'shell': _tool_shell,
     'terminal': _tool_shell,
     'code_interpreter': _tool_code_interpreter,
     'read_attachment': _tool_read_attachment,
+    'save_attachment': _tool_save_attachment,
+    'consultar_saida': _tool_consultar_saida,
     'use_skill': _tool_use_skill,
     'read_file': _tool_read_file,
     'write_file': _tool_write_file,
@@ -2623,6 +3232,8 @@ _TOOL_HANDLERS = {
     'rename_file': _tool_rename_file,
     'delete_directory': _tool_delete_directory,
     FERRAMENTA_DO_PLANO: _tool_plan,
+    FERRAMENTA_DO_CARTAO: _tool_mostrar_plano,
+    FERRAMENTA_DA_INTERFACE: _tool_mostrar_interface,
     'search_files': _tool_search_files,
     'apply_patch': _tool_apply_patch,
     'git_push': _tool_git_push,
@@ -2631,6 +3242,7 @@ _TOOL_HANDLERS = {
     'uninstall_package': _tool_install_package,
     'download_file': _tool_download_file,
     'upload_file': _tool_upload_file,
+    'send_to_phone': _tool_send_to_phone,
     'get_environment': _tool_get_environment,
     'search_codebase': _tool_search_codebase,
     'vector_search': _tool_search_codebase,
@@ -2641,6 +3253,10 @@ _TOOL_HANDLERS = {
     'web_search': _tool_web_search,
     'url_reader': _tool_url_reader,
     'browser': _tool_url_reader,
+    'clima': _tool_clima,
+    'cotacao': _tool_cotacao,
+    'buscar_imagens': _tool_buscar_imagens,
+    'memoria': _tool_memoria,
     'git_status': _tool_git_status,
     'git_diff': _tool_git_diff,
     'git_log': _tool_git_log,

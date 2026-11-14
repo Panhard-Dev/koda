@@ -63,6 +63,12 @@ export default function TarefaIncompleta({
   /** Tem resposta rodando agora: dois turnos ao mesmo tempo não dá. */
   ocupado?: boolean
 }) {
+  // Só a perda total de conexão ainda merece o cartão: nos demais motivos a resposta do
+  // modelo já está na tela, e o cartão só repetia o que ele disse. O `tool_limit` era o
+  // pior caso — aparecia quando o modelo respondia sem chamar ferramenta, não quando o
+  // teto de chamadas estourava de verdade.
+  if (motivo !== 'provider_error') return null
+
   const itens = pendentes.filter(Boolean)
   const podeRetomar = retomavel && Boolean(onRetomar)
 

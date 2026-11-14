@@ -1,0 +1,18 @@
+✔ owner, product, method, amount and operation must match before any replay is returned (121.1261ms)
+✔ 100 payment deliveries preserve the first renewal and do not resurrect cancellation (99.2431ms)
+✔ a failing subscription write rolls back the application ledger and can retry (28.3881ms)
+✔ out-of-order pending/approved deliveries do not undo refunds (52.3968ms)
+✔ migration with paid legacy data preserves existing subscription and does not apply it again (54.7336ms)
+✔ distinct simultaneous same-plan purchases each add one month; their replays add none (77.2505ms)
+✔ a credit purchase is never selected as the subscription refund (24.2807ms)
+✔ refunded credit is excluded from balance while manual credit and the ledger remain (22.259ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3675.4289
+
+exit_code=0

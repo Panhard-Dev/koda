@@ -27,17 +27,56 @@
  *
  * Rode com `node scripts/gerar-runtime-node.mjs` (o `npm run app:build` faz isso).
  */
-import { closeSync, copyFileSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+} from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..')
-const DESTINO = join(RAIZ, 'src-tauri', 'runtime', 'node')
 
 /** Os servidores usam `fetch` e `WebSocket` globais: abaixo disto eles nem sobem. */
 const MINIMO = 22
+
+/**
+ * No Linux o Tauri usa `runtime-linux/node/node`; `runtime/node/node.exe` é o recurso do
+ * instalador Windows. O script antigo tentava validar o Node do próprio Linux como PE/Windows
+ * e derrubava qualquer build Linux. Cada plataforma agora confere o runtime que realmente
+ * será empacotado.
+ */
+if (process.platform !== 'win32') {
+  const destinoLinux = join(RAIZ, 'src-tauri', 'runtime-linux', 'node', 'node')
+  if (!existsSync(destinoLinux)) {
+    mkdirSync(dirname(destinoLinux), { recursive: true })
+    copyFileSync(process.execPath, destinoLinux)
+    chmodSync(destinoLinux, 0o755)
+  }
+  const versaoLinux = execFileSync(destinoLinux, ['-v'], { encoding: 'utf8' }).trim()
+  const principalLinux = Number.parseInt(versaoLinux.replace(/^v/, '').split('.')[0], 10)
+  if (!Number.isFinite(principalLinux) || principalLinux < MINIMO) {
+    throw new Error(
+      `o Node Linux em ${destinoLinux} é ${versaoLinux}, e os servidores MCP do Koda ` +
+        `precisam de ${MINIMO}+. Aponte um Node mais novo em src-tauri/runtime-linux/node/node.`,
+    )
+  }
+  if (process.arch !== 'x64') {
+    throw new Error(`o build Linux deste instalador precisa de Node x64, mas o host é ${process.arch}.`)
+  }
+  const mb = (statSync(destinoLinux).size / 1048576).toFixed(1)
+  console.log(`[koda] node ${versaoLinux} (Linux x64) confirmado em runtime-linux/node/node (${mb} MB)`)
+  process.exit(0)
+}
+
+const DESTINO = join(RAIZ, 'src-tauri', 'runtime', 'node')
 
 /** O app é empacotado para x64. Um binário de outra arquitetura só falha na máquina do dono. */
 const ARQUITETURA = 'x64'

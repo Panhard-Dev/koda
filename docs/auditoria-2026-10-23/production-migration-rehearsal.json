@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "existing_tables_unchanged": true,
+  "restore_verified": true,
+  "integrity": "ok",
+  "tables": {
+    "d1_migrations": 4,
+    "admins": 1,
+    "users": 20,
+    "refresh_tokens": 6674,
+    "rate_limits": 35,
+    "login_attempts": 48,
+    "catalog_models": 7,
+    "user_models": 0,
+    "assets": 0,
+    "releases": 1,
+    "notifications": 1,
+    "audit_log": 6892,
+    "plans": 5,
+    "subscriptions": 12,
+    "payments": 11,
+    "credit_grants": 8,
+    "usage_events": 1049,
+    "catalog_mcps": 0,
+    "subscription_payment_applications": 5
+  },
+  "database_copy": "C:\\Users\\panhard\\Downloads\\Koda-TUDO-2026-10-17\\koda\\backups\\production-rollout-1792773167999\\verified-1792773518411446900.sqlite",
+  "production_modified": false
+}

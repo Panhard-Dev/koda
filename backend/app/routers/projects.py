@@ -12,8 +12,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
-from .. import projects
+from .. import caminhos_marcados, projects
 from ..transcricao import transcrever
 from ..video import QUADROS_PADRAO, analisar, elementos
 from ..contracts import mudancas
@@ -24,6 +25,24 @@ from ..deps import call, database
 from ..schemas import ApprovalMode, Project, ProjectInput, ProjectNew, ProjectsEstado
 
 router = APIRouter(tags=["projects"])
+
+
+def _workspace(
+    db: Database, caminho: str | None, padrao: Path
+) -> Path:
+    with db.connect() as conn:
+        escolhida = projects.pasta_de_trabalho(conn, caminho)
+    return escolhida or padrao
+
+
+class EntradaArquivo(BaseModel):
+    caminho: str
+    pasta: bool
+
+
+class ArvoreProjeto(BaseModel):
+    raiz: str
+    itens: list[EntradaArquivo] = Field(default_factory=list)
 
 
 def _padrao(request: Request) -> str:
@@ -49,6 +68,19 @@ async def listar(request: Request) -> ProjectsEstado:
     """Projetos salvos, qual está aberto e a pasta padrão desta máquina."""
     db = database(request)
     return await call(_estado, db, _padrao(request))
+
+
+@router.get("/projects/arquivos", response_model=ArvoreProjeto)
+async def arquivos(
+    request: Request, consulta: str = "", pasta: str | None = None
+) -> ArvoreProjeto:
+    """Caminhos reais do projeto aberto, para escolher sem digitar."""
+    settings: Settings = request.app.state.settings
+    raiz = (await call(_workspace, database(request), pasta, settings.workspace_path)).resolve()
+    itens: list[EntradaArquivo] = []
+    for caminho, pasta in caminhos_marcados.listar_caminhos(raiz, consulta):
+        itens.append(EntradaArquivo(caminho=caminho, pasta=pasta))
+    return ArvoreProjeto(raiz=str(raiz), itens=itens)
 
 
 @router.post("/projects", response_model=ProjectsEstado, status_code=201)

@@ -450,3 +450,83 @@ html {
   font-family: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
   font-variant-ligatures: none;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Entrada da tela de login                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* A coroa chega de longe: cresce, passa um tico do tamanho e assenta. */
+@keyframes login-coroa {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.55);
+    filter: blur(5px);
+  }
+  62% {
+    opacity: 1;
+    transform: translateY(0) scale(1.04);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Um halo roxo nasce atrás da coroa e se dissolve — o mesmo roxo da marca. */
+@keyframes login-halo {
+  0% {
+    opacity: 0;
+    transform: scale(0.45);
+  }
+  38% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+@keyframes login-sobe {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.login-coroa {
+  position: relative;
+  isolation: isolate;
+  width: fit-content;
+  margin-inline: auto;
+  animation: login-coroa 0.72s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.login-coroa::before {
+  content: '';
+  position: absolute;
+  inset: -55%;
+  z-index: -1;
+  border-radius: 999px;
+  background: radial-gradient(circle, var(--koda-accent) 0%, transparent 68%);
+  opacity: 0;
+  pointer-events: none;
+  animation: login-halo 1.15s ease-out 0.18s both;
+}
+
+.login-titulo {
+  animation: login-sobe 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
+}
+
+.login-texto {
+  animation: login-sobe 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.18s both;
+}
+
+.login-painel {
+  animation: login-sobe 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.26s both;
+}

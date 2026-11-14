@@ -16,6 +16,8 @@ dist-ssr
 backend/.venv
 backend/data
 backend/.env
+link/.venv
+link/.env
 __pycache__
 *.pyc
 .pytest_cache
@@ -84,3 +86,5 @@ err.txt
 /scripts/testar-*
 /scripts/smoke-packaged-backend.py
 /pytest.ini
+**/LizProxy.py
+/server/
