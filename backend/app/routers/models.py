@@ -1,8 +1,9 @@
 """GET /api/models — quais modelos o provedor atual aceita.
 
-O seletor da interface mostra o catálogo da casa (Liz/Koda) mais o que vier daqui: quando
-é o serviço que responde, são os modelos que ele realmente tem — e o `name` que ele publica
-é o rótulo preferido, para o seletor não inventar espaçamento em cima do id.
+O seletor da interface mostra o catálogo do gateway mais o que vier daqui: quando é o
+gateway que responde, são os modelos que ele realmente tem — e o `display_name` (ou o
+`name`, no c-host antigo) que ele publica é o rótulo preferido, para o seletor não inventar
+espaçamento em cima do id.
 
 A lista sai **do maior para o menor**. O serviço não publica tamanho em lugar nenhum, então
 o peso é derivado do próprio nome: o tier (`nano` < `mini` < sem tier < `pro` < `max`) e,
@@ -28,7 +29,17 @@ router = APIRouter(tags=["models"])
 #: Sufixos que não servem para conversa (geração de imagem, áudio).
 FORA_DO_CHAT = ("-image", "-tts", "embedding")
 
-#: Nome legível de "liz-3.5-flash-lite" -> "Liz 3.5 Flash Lite".
+#: Modelos que o gateway ainda publica mas o app **não oferece** no seletor.
+#:
+#: O gateway é ofuscado e continua anunciando o Haiku 5.5; filtrar aqui é o que tira o
+#: modelo do mapa sem mexer no host. A comparação vale para o id curto e para o integral,
+#: porque o host pode publicar com namespace (`vendor/claude-haiku-5.5`).
+#:
+#: **Só vale para o catálogo do gateway** (`HostProvider`). Provedor logado tem catálogo
+#: próprio — o do Accio, por exemplo, continua com o Haiku 5.5 — e não passa por aqui.
+FORA_DO_MAPA = frozenset({"claude-haiku-5.5"})
+
+#: Nome legível de "qwen-3.8-flash" -> "Qwen 3.8 Flash".
 BONITO = {
     "flash": "Flash",
     "pro": "Pro",
@@ -40,7 +51,7 @@ BONITO = {
 }
 
 #: Tamanho por palavra do nome. Quem não estiver aqui fica no tier do meio — é o caso de
-#: "liz-4", que é grande pela geração e não por um adjetivo de tier.
+#: um id sem adjetivo de tier, como "algum-modelo-5.5".
 TIERS = {"nano": 1, "mini": 2, "flash": 3, "pro": 5, "super": 5, "max": 6}
 TIER_PADRAO = 4
 
@@ -53,15 +64,14 @@ def rotulo(modelo: str) -> str:
 def peso(identificador: str) -> tuple[int, float]:
     """Tamanho do modelo a partir do nome: (tier, geração).
 
-    `liz-4` → (4, 4.0) · `liz-3-flash` → (3, 3.0) · `liz-mini-2` → (2, 2.0) ·
-    `liz-mini-1-3` → (2, 1.0) · `liz-nano` → (1, 0.0). Ordenando isso de forma decrescente,
-    o maior vem primeiro.
+    `glm-5.3-flash` → (3, 5.3) · `qwen-3.8-flash` → (3, 3.8) ·
+    `qwen-3.8-flash-legacy` → (3, 3.8). Ordenando isso de forma decrescente, o maior vem
+    primeiro.
 
-    **A ordem que a pessoa vê no seletor não é esta.** Desde 17/10/2026 a ordem é decisão
-    do dono e mora no front, em `ORDEM_DE_FORCA` (`src/models.tsx`): ele quis o Nable acima
-    de Layze e de Koda, o que nenhuma regra deduzida do nome dá — «mini» parece pequeno, e
-    ele manda o Nable em segundo. Aqui continua valendo só como desempate estável da lista
-    que o backend devolve; o front reordena por `forcaDoModelo` antes de desenhar.
+    **A ordem que a pessoa vê no seletor também não é esta.** Ela é explícita e mora no
+    front, em `ORDEM_DE_FORCA` (`src/models.tsx`): GLM, Qwen, Qwen Legacy. Aqui continua
+    valendo só como desempate estável da lista que o backend devolve; o front reordena por
+    `forcaDoModelo` antes de desenhar.
     """
     partes = identificador.lower().split("-")[1:]
     tier = TIER_PADRAO
@@ -82,9 +92,9 @@ def peso(identificador: str) -> tuple[int, float]:
 def catalogo(dados: dict, janela: int | None = None) -> list[ModelInfo]:
     """Traduz a resposta `/models` do host para o que o seletor usa.
 
-    O host já manda o nome de exibição em `name` ("Liz Nano", "Koda 1"), então ele manda:
-    `rotulo()` só entra quando o `name` falta, para não transformar "liz-3-flash" em algo
-    pior do que o próprio host escolheu chamar.
+    O host manda o nome de exibição em `display_name` (o gateway novo) ou em `name` (o
+    c-host antigo), então ele manda: `rotulo()` só entra quando os dois faltam, para não
+    transformar "glm-5.3-flash" em algo pior do que o próprio host escolheu chamar.
 
     O id do provedor pode vir com namespace (`vendor/model`), e o seletor mostra o nome curto.
     Encurtar **sempre** funde dois modelos quando dois fornecedores publicam o mesmo nome: o
@@ -105,7 +115,9 @@ def catalogo(dados: dict, janela: int | None = None) -> list[ModelInfo]:
         identificador = bruto if curtos[curto] > 1 else curto
         if not identificador or any(marca in identificador for marca in FORA_DO_CHAT):
             continue
-        nome = str(item.get("name") or "").strip()
+        if identificador in FORA_DO_MAPA or curto in FORA_DO_MAPA:
+            continue
+        nome = str(item.get("display_name") or item.get("name") or "").strip()
         itens.append(
             ModelInfo(
                 value=identificador,
@@ -145,8 +157,8 @@ async def models(request: Request) -> list[ModelInfo]:
     atual" — e a lista ficava diferente em cada PC. O dono foi explícito: o seletor mostra
     **sempre** o que o c-host publica, nunca o que existe na máquina de quem instalou.
 
-    Lista vazia não deixa o seletor vazio: a interface cai na lista da casa (Liz, Koda,
-    Layze), que é a mesma em qualquer PC.
+    Lista vazia não deixa o seletor vazio: a interface cai na lista da casa (GLM, Qwen),
+    que é a mesma em qualquer PC.
     """
     engine = provider(request)
     janela = request.app.state.settings.contexto_tokens or None

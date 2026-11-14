@@ -7,8 +7,11 @@ já foi instanciado direto, com chave de outro serviço, e esse caminho saiu do 
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections import Counter
@@ -46,6 +49,15 @@ TRANSITORIOS = {408, 409, 425, 429, 500, 502, 503, 504}
 TRANSITORIOS_PROXY = TRANSITORIOS
 
 
+class GatewaySemConta(ProviderError):
+    """O gateway local está no ar, mas a loja de contas dele está vazia.
+
+    As contas do gateway são separadas do login Accio do Koda. Não há fallback entre as
+    duas: usar a conta Accio aqui misturaria depósitos e credenciais que o dono mantém
+    separados.
+    """
+
+
 def _retry_after_segundos(valor: str | None) -> float | None:
     """Interpreta Retry-After sem aceitar esperas negativas ou ilimitadas."""
     if not valor:
@@ -75,6 +87,39 @@ CATALOGO_TTL_S = 300.0
 #: silêncio total do host é host morto. O prazo de conexão continua curto.
 TEMPO_DE_LEITURA: float = 90.0
 TIME_STREAM = httpx.Timeout(TEMPO_DE_LEITURA, connect=10.0)
+
+#: O upstream às vezes entrega uma resposta inteira em poucos blocos grandes. O backend
+#: mantém o SSE, mas fatia o conteúdo para a interface desenhar aos poucos.
+TAMANHO_DO_PEDACO_VISIVEL = 32
+
+
+def fatiar_para_exibicao(texto: str, limite: int = TAMANHO_DO_PEDACO_VISIVEL) -> list[str]:
+    """Divide texto sem perder um caractere, preferindo espaços como fronteira."""
+    if not texto:
+        return []
+    if limite < 1:
+        raise ValueError("limite precisa ser positivo")
+    pedacos: list[str] = []
+    inicio = 0
+    while len(texto) - inicio > limite:
+        alvo = inicio + limite
+        corte = texto.rfind(" ", inicio + max(1, limite // 2), alvo + 1)
+        if corte < 0:
+            corte = alvo
+        pedacos.append(texto[inicio:corte])
+        inicio = corte
+        if texto[inicio:inicio + 1] == " ":
+            pedacos[-1] += " "
+            inicio += 1
+    pedacos.append(texto[inicio:])
+    return [pedaco for pedaco in pedacos if pedaco]
+
+
+async def _emitir_fala(texto: str) -> AsyncIterator[Piece]:
+    """Repassa o texto recebido sem atrasos artificiais, em blocos limitados."""
+    for pedaco in fatiar_para_exibicao(texto, 512):
+        yield Piece(pedaco)
+
 
 #: Teto de tokens **de saída** em cada passo, mandado explícito no pedido.
 #:
@@ -341,11 +386,7 @@ class OpenAICompatibleProvider:
         return model or self.model
 
     def _messages(self, turns: list[ChatTurn], options: ChatOptions) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt(options)}
-        ]
-        messages += [conteudo_do_turno(turn) for turn in turns]
-        return messages
+        return [conteudo_do_turno(turn) for turn in turns if turn.role not in ("system", "developer")]
 
     def _historico_para_pedido(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -369,7 +410,6 @@ class OpenAICompatibleProvider:
     # ------------------------------------------------------------ streaming
 
     async def stream(self, turns: list[ChatTurn], options: ChatOptions) -> AsyncIterator[Piece]:
-        _recusar_modelo_de_conta(options.model)
         modelo = self.resolve_model(options.model)
         payload: dict[str, Any] = {
             "model": modelo,
@@ -472,7 +512,8 @@ class OpenAICompatibleProvider:
                         if piece:
                             limpo = raciocinio.alimentar(filtro.push(str(piece)))
                             if limpo:
-                                yield Piece(limpo)
+                                async for visivel in _emitir_fala(limpo):
+                                    yield visivel
                 break
         except httpx.HTTPError as error:  # rede, DNS, timeout
             raise TransientProviderError(_descrever_erro_de_rede(error)) from error
@@ -481,7 +522,8 @@ class OpenAICompatibleProvider:
         # padrão — nunca uma resposta vazia.
         resto = raciocinio.alimentar(filtro.fechar()) + raciocinio.despejar()
         if resto:
-            yield Piece(resto)
+            async for visivel in _emitir_fala(resto):
+                yield visivel
         # O rodapé com os tokens. Quem consome este `stream()` (o caminho de texto, sem
         # ferramentas) não recebe `StepResult` nenhum: sem este pedaço o `usage` era
         # descartado e a ficha ficava sem contador.
@@ -710,7 +752,8 @@ class OpenAICompatibleProvider:
                             limpo = raciocinio.alimentar(filtro.push(str(pedaco)))
                             if limpo:
                                 texto.append(limpo)
-                                yield Piece(limpo)
+                                async for visivel in _emitir_fala(limpo):
+                                    yield visivel
 
                         for bruto in delta.get("tool_calls") or []:
                             indice_bruto = bruto.get("index")
@@ -746,7 +789,8 @@ class OpenAICompatibleProvider:
         resto = raciocinio.alimentar(filtro.fechar()) + raciocinio.despejar()
         if resto:
             texto.append(resto)
-            yield Piece(resto)
+            async for visivel in _emitir_fala(resto):
+                yield visivel
 
         yield StepResult(
             text="".join(texto),
@@ -800,12 +844,12 @@ def _conta_para(settings: Settings, modelo: str | None):
 
 
 class HostProvider(OpenAICompatibleProvider):
-    """O provider do serviço de modelos oficial (Liz): a mesma API da OpenAI, do outro lado.
+    """O provider do host oficial: a mesma API da OpenAI, do outro lado.
 
-    O host é o `host/c-host.exe`, que publica o catálogo em `/v1/models` e recebe a
-    conversa em `/v1/chat/completions`. Sem painel de contas — quem valida o
-    id do modelo é o próprio host, que responde com uma mensagem clara quando não o
-    reconhece.
+    O host é o `host/gateway-local`, que publica o catálogo em `/v1/models` e recebe a
+    conversa em `/v1/chat/completions`. Sem painel de contas do lado do Koda — quem valida
+    o id do modelo é o próprio gateway, que responde com uma mensagem clara quando não o
+    reconhece. O `c-host.exe` antigo ainda pode ocupar este papel como último recurso.
 
     A chave de cliente é opcional e vem do ambiente (`KODA_HOST_KEY`): o host aberto ignora
     o cabeçalho, e o build com autorização remota recusa com 401 quem não manda. Sem chave
@@ -815,8 +859,29 @@ class HostProvider(OpenAICompatibleProvider):
     name = "host"
     manda_esforco = True
 
+    @property
+    def base_url(self) -> str:
+        arquivo = getattr(self, "_arquivo_da_porta_gateway", None)
+        if arquivo is not None:
+            from .host_boot import _porta_do_arquivo
+
+            porta = _porta_do_arquivo(arquivo)
+            if porta is not None:
+                return f"http://127.0.0.1:{porta}/v1"
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, valor: str) -> None:
+        self._base_url = valor
+
     def __init__(self, settings: Settings, *, _reserva: bool = False) -> None:
         super().__init__(settings, base_url=settings.host_url, model=settings.host_model)
+        caminho = os.environ.get("KODA_GATEWAY_PORT_FILE")
+        self._arquivo_da_porta_gateway = (
+            Path(caminho)
+            if not _reserva and os.environ.get("KODA_GATEWAY_GERENCIADO") == "1" and caminho
+            else None
+        )
         # A credencial **não** fica guardada aqui: ela é lida a cada pedido (ver `headers`),
         # porque a sessão da conta chega depois da subida do processo.
         self.ready = True
@@ -841,6 +906,10 @@ class HostProvider(OpenAICompatibleProvider):
             self._fallback._esforcos_em = 0.0
             self._fallback._fallback = None
             self._fallback._fallback_until = 0.0
+
+    def _gateway_gerenciado(self) -> bool:
+        """O host é o gateway local que o shell sobe e vigia?"""
+        return getattr(self, "_arquivo_da_porta_gateway", None) is not None
 
     def _usar_reserva(self) -> bool:
         return self._fallback is not None and time.monotonic() < self._fallback_until
@@ -905,7 +974,10 @@ class HostProvider(OpenAICompatibleProvider):
         # respondido pelo provedor dela; o resto segue para o host.
         da_conta = _conta_para(self.settings, model)
         if da_conta is not None:
-            yield await da_conta.step(messages, tools, model)
+            # Aqui era `yield await da_conta.step(...)`: o provedor de conta tem stream de
+            # ferramentas próprio, e chamar o `step` engolia todos os pedaços de uma vez.
+            async for pedaco in da_conta.step_streaming(messages, tools, model, reasoning, effort):
+                yield pedaco
             return
         if self._usar_reserva():
             async for pedaco in self._fallback.step_streaming(messages, tools, model, reasoning, effort):
@@ -990,9 +1062,9 @@ class HostProvider(OpenAICompatibleProvider):
             piso = item.get("reasoningFloor")
             if isinstance(piso, str) and piso.lower() in NIVEIS_ESFORCO:
                 pisos[identificador] = piso.lower()
-            publicados = item.get("efforts")
+            publicados = item.get("efforts", item.get("reasoning_efforts"))
             niveis = {
-                str(nivel).lower()
+                ("none" if str(nivel).lower() == "off" else str(nivel).lower())
                 for nivel in (publicados if isinstance(publicados, list) else ())
                 if isinstance(nivel, str)
             }
@@ -1003,7 +1075,8 @@ class HostProvider(OpenAICompatibleProvider):
             # no corpo (medido no serve-liz, out/2026). O host já não anuncia `none` nos
             # modelos que o recusam; tirar aqui também é o que faz o arredondamento subir
             # para `minimal` — o nível que de fato responde.
-            niveis.discard(ESFORCO_DESLIGADO)
+            if "reasoning_efforts" not in item:
+                niveis.discard(ESFORCO_DESLIGADO)
             suportados[identificador] = frozenset(niveis)
         self._esforcos = suportados
         self._pisos = pisos
@@ -1017,7 +1090,7 @@ class HostProvider(OpenAICompatibleProvider):
         caminho do botão, subido até o piso do modelo (`sobe_ate_o_piso`): sem isso o
         "Reasoning ligado" não produzia raciocínio nenhum no `liz-4` e no `layze-2`.
         """
-        escolhido = escolha or (ESFORCO_LIGADO if reasoning else ESFORCO_DESLIGADO)
+        escolhido = escolha or ("high" if reasoning else ESFORCO_DESLIGADO)
         catalogo = await self._catalogo_de_esforcos()
         ajustado = esforco_valido(escolhido, catalogo.get(modelo))
         if reasoning and not escolha:
@@ -1040,8 +1113,10 @@ class HostProvider(OpenAICompatibleProvider):
         acima = [nivel for nivel in NIVEIS_ESFORCO[indice + 1 :] if nivel in suportados]
         return acima[0] if acima else None
 
-    #: Nomes decorativos do seletor antigo. Conversa gravada antes do serviço atual ainda
-    #: manda um desses; melhor cair no padrão do que virar um 400 lá.
+    #: Ids da casa antiga. Conversa gravada antes do gateway novo ainda manda um desses;
+    #: melhor cair no padrão do que virar um 400 lá. Inclui os nomes decorativos do seletor
+    #: antigo e os ids reais (`liz-*`, `layze-*`, `nable-*`, `koda-1`), que o gateway não
+    #: serve mais.
     LEGADOS = frozenset(
         {
             "koda-flash",
@@ -1050,6 +1125,14 @@ class HostProvider(OpenAICompatibleProvider):
             "liz-flash",
             "liz-pro",
             "liz-vision",
+            "liz-nano",
+            "liz-4",
+            "liz-4-5-super",
+            "liz-3-flash",
+            "liz-mini-1-3",
+            "liz-mini-2",
+            "layze-2",
+            "nable-4-mini-preview",
         }
     )
 
@@ -1061,18 +1144,15 @@ class HostProvider(OpenAICompatibleProvider):
         todo mundo para o mesmo modelo. Quem valida o id agora é o host, que responde com uma
         mensagem clara quando não reconhece.
 
-        Os `LEGADOS` são os nomes decorativos das versões antigas — esses caem no
-        `host_model`, porque não existem mais no catálogo.
+        Os `LEGADOS` são os ids e nomes decorativos das versões antigas — esses caem no
+        `host_model`, porque não existem mais no catálogo do gateway.
         """
         if not model or model in self.LEGADOS:
             return self.settings.host_model
         return model
 
     def _messages(self, turns: list[ChatTurn], options: ChatOptions) -> list[dict[str, Any]]:
-        return [
-            {"role": "system", "content": system_prompt(options)},
-            *(conteudo_do_turno(turn) for turn in turns),
-        ]
+        return [conteudo_do_turno(turn) for turn in turns if turn.role not in ("system", "developer")]
 
     def _historico_para_pedido(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -1097,6 +1177,17 @@ class HostProvider(OpenAICompatibleProvider):
 
     def _erro(self, status: int, detalhe: str, payload: dict[str, Any] | None = None, retry_after: str | None = None) -> ProviderError:
         motivo = _motivo_do_host(detalhe)
+        erro = _json_ou_vazio(detalhe).get("error")
+        if (
+            status == 503
+            and isinstance(erro, dict)
+            and erro.get("code") == "no_accounts"
+            and self._gateway_gerenciado()
+        ):
+            return GatewaySemConta(
+                "o gateway local está sem contas conectadas; "
+                "as contas do gateway são separadas do login Accio do Koda"
+            )
         if status in TRANSITORIOS_PROXY:
             return TransientProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}", _retry_after_segundos(retry_after))
         return ProviderError(f"o host respondeu {status}{_medidas_do_pedido(payload)}: {motivo}")

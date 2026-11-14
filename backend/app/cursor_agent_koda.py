@@ -15,7 +15,8 @@ from typing import Any, AsyncIterator
 from .cursor_koda import _descomprimir, _headers, _inteiro, _texto
 from .koda_tool_protocol import _sse
 from .providers.base import ProviderError, TransientProviderError
-from .windsurf_koda import LeitorGrpcWeb, _campo, _campos
+from .transport_grpc import LeitorGrpcWeb
+from .windsurf_koda import _campo, _campos
 
 
 def _fields(dados: bytes) -> dict[int, list[Any]]:

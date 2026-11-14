@@ -15,6 +15,56 @@ import { MODELO_PADRAO } from './models'
 const CHAVE = 'koda.modelo'
 
 /**
+ * Ids da casa antiga que o gateway novo não serve mais.
+ *
+ * Sem a migração, quem já usava o app abriria com um id que o host recusa (400) e só
+ * descobriria isso ao mandar a primeira mensagem. A escolha guardada é da pessoa, mas um id
+ * que não existe não é escolha: cai no padrão novo, e o seletor mostra o que está valendo.
+ *
+ * Só os ids **da casa** entram aqui. Modelo de conta (`provedor:<id>:<modelo>`) é outro
+ * caminho e continua valendo — migrar tudo o que não está no catálogo da casa apagaria a
+ * escolha de quem usa um provedor logado.
+ */
+const MODELOS_APOSENTADOS = new Set([
+  // Saiu do seletor a pedido do dono (02/11/2026): quem tinha este id salvo cai no padrão
+  // novo em vez de abrir com um modelo que o mapa não oferece mais.
+  'claude-haiku-5.5',
+  'liz-nano',
+  'liz-mini-1-3',
+  'liz-mini-2',
+  'liz-3-flash',
+  'liz-4',
+  'liz-4-5-super',
+  'glm-5.3-flash',
+  'qwen-3.8-flash',
+  'qwen-3.8-flash-legacy',
+  'layze-2',
+  'nable-4-mini-preview',
+  // Nomes decorativos que o host antigo aceitava e o gateway não conhece.
+  'koda-flash',
+  'koda-pro',
+  'koda-vision',
+  'liz-flash',
+  'liz-pro',
+  'liz-vision',
+])
+
+/**
+ * O Haiku 5.5 também pode estar salvo como modelo de provedor
+ * (`provedor:<id>:claude-haiku-5.5`). Ele saiu do catálogo **da casa**, mas o Accio continua
+ * servindo — são catálogos separados. Por isso a migração vale para os outros provedores e
+ * **não** para o Accio: lá a escolha antiga continua sendo uma escolha.
+ */
+const HAIKU_EM_PROVEDOR = /^provedor:(?!accio:)[^:]+:claude-haiku-5\.5$/i
+
+/** O id salvo, já trocado pelo padrão se ele for de um modelo aposentado. */
+function migrar(valor: string): string {
+  return MODELOS_APOSENTADOS.has(valor) || HAIKU_EM_PROVEDOR.test(valor)
+    ? MODELO_PADRAO
+    : valor
+}
+
+/**
  * O modelo guardado, ou o padrão da casa quando não há nada.
  *
  * Nada aqui pode lançar: sem `localStorage` (janela privada, armazenamento bloqueado) o app
@@ -24,7 +74,7 @@ const CHAVE = 'koda.modelo'
 export function lerModeloSalvo(): string {
   try {
     const salvo = window.localStorage.getItem(CHAVE)
-    return salvo && salvo.trim() ? salvo.trim() : MODELO_PADRAO
+    return salvo && salvo.trim() ? migrar(salvo.trim()) : MODELO_PADRAO
   } catch {
     return MODELO_PADRAO
   }

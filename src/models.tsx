@@ -38,7 +38,7 @@ const model = (value: string, label: string): MenuOption => ({
 })
 
 /**
- * A etiqueta de aviso de um item do seletor — hoje só «Tempo limitado».
+ * A etiqueta de aviso de um item do seletor — o «Tempo limitado» que o Nable tinha.
  *
  * O âmbar é a cor de aviso que o app já usa (cartão de permissão, recados de sessão); um
  * aviso com a cor do accent pareceria destaque, não aviso.
@@ -60,64 +60,45 @@ function Aviso({ texto }: { texto: string }) {
  * Catálogo da casa, o espelho de emergência do seletor.
  *
  * Esta lista é só o que o seletor mostra enquanto o backend não respondeu: quando ele
- * responde, é o `/api/models` dele — que vem do serviço — que manda. Os ids daqui são os
- * mesmos que o serviço aceita; qualquer nome fora do catálogo dele é recusado.
+ * responde, é o `/api/models` dele — que vem do gateway novo — que manda. Os ids daqui são
+ * os mesmos que o gateway aceita; qualquer nome fora do catálogo dele é recusado.
  *
- * Ordem das **famílias** (Liz, Layze, Koda, Nable) e, dentro de cada uma, do maior para o
- * menor. A ordem entre famílias não sai do backend: `routers/models.py` só ordena por peso
- * dentro do que ele devolve, e o front é que agrupa (ver `FAMILIAS`).
+ * Ordem das **famílias** (GLM, Qwen) e, dentro de cada uma, do maior para o menor.
+ * A ordem entre famílias não sai do backend: `routers/models.py` só ordena por peso dentro
+ * do que ele devolve, e o front é que agrupa (ver `FAMILIAS`).
  *
- * Atualizada em 17/10/2026 contra o catálogo ao vivo do host: o host trocou `liz-4` por
- * `liz-4-5-super` (o `liz-4` responde 400 desde então, e deixá-lo aqui faz o seletor de
- * emergência oferecer um modelo que não existe).
+ * Atualizada em 02/11/2026 com o catálogo do `host/gateway-local`: os modelos antigos
+ * (Liz, Layze, Koda, Nable) saíram e os modelos que o gateway publica entraram no lugar.
+ * O Claude Haiku 5.5 saiu do mapa a pedido do dono; se o gateway publicar outro Claude,
+ * ele ainda aparece agrupado pela família (ver `FAMILIAS`).
  */
 export const MODEL_MENU: MenuOption[] = [
   {
     value: 'categoria-liz',
-    label: 'Liz',
+    label: 'Liz AI Studio',
     icon: MODEL_ICON,
     options: [
-      model('liz-4-5-super', 'Liz 4.5 Super'),
-      model('liz-3-flash', 'Liz 3 Flash'),
-      model('liz-mini-2', 'Liz Mini 2'),
-      model('liz-mini-1-3', 'Liz Mini 1.3'),
-      model('liz-nano', 'Liz Nano'),
+      model('layze-2.1-flash', 'Layze 2.1 flash'),
+      model('liz-4.5-super', 'Liz 4.5 super'),
+      model('koda-1', 'Koda 1'),
+      model('koda-2-pro', 'Koda 2 pro'),
+      model('mx-lz1-teste', 'MX LZ1 teste'),
     ],
-  },
-  {
-    value: 'categoria-layze',
-    label: 'Layze',
-    icon: MODEL_ICON,
-    options: [model('layze-2', 'Layze 2')],
-  },
-  {
-    value: 'categoria-koda',
-    label: 'Koda',
-    icon: MODEL_ICON,
-    options: [model('koda-1', 'Koda 1')],
-  },
-  {
-    value: 'categoria-nable',
-    label: 'Nable',
-    icon: MODEL_ICON,
-    // O aviso de tempo limitado mora no **grupo**, colado no nome da família — é dela que
-    // ele fala, e não de um item que muda de posição quando a ordem muda.
-    trailing: <Aviso texto="Tempo limitado" />,
-    options: [model('nable-4-mini-preview', 'Nable 4 Mini Preview')],
   },
 ]
 
 /**
  * Modelo usado quando não há escolha guardada nesta máquina.
  *
- * `koda-1` é ordem do dono (17/10/2026): «deixa o Koda 1, é melhor». A Liz Nano **não** é
- * padrão e nunca foi pedida como padrão — o que ele pediu foi o contrário, e o registro
- * anterior neste arquivo estava errado.
+ * O GLM 5.3 Flash é o primeiro do catálogo novo depois da saída do Claude Haiku 5.5, e é
+ * o padrão do gateway. Quem já tinha um modelo antigo salvo é migrado para cá por
+ * `lerModeloSalvo` (`src/modelo-salvo.ts`), porque os ids da casa antiga não existem mais
+ * no gateway e responderiam 400.
  *
  * O padrão vale só para a **primeira** abertura: a partir daí manda o que a pessoa escolheu
- * no seletor, guardado por `lerModeloSalvo` (`src/modelo-salvo.ts`) e mantido até ela trocar.
+ * no seletor, guardado por `lerModeloSalvo` e mantido até ela trocar.
  */
-export const MODELO_PADRAO = 'koda-1'
+export const MODELO_PADRAO = 'layze-2.1-flash'
 
 export const ALL_MODELS = MODEL_MENU.flatMap((category) => category.options ?? [])
 
@@ -129,36 +110,24 @@ export const MODEL_LABELS: Record<string, string> = Object.fromEntries(
 /**
  * Ordem de força do seletor: do mais forte para o mais fraco.
  *
- * É decisão do dono (17/10/2026), e é **explícita** em vez de deduzida do nome. A regra
- * antiga tirava o "tamanho" do id (`peso()` no backend media geração e adjetivo), e o
- * resultado não era a força que ele queria: o `nable-4-mini-preview` caía no meio porque
- * "mini" parece pequeno, quando ele manda ele em **segundo**. Número de geração não é força,
- * e adivinhar pelo nome deu essa.
- *
- * A ordem que ele deu: Liz 4.5, Nable 4 mini, Layze 2, Koda 1, Liz 3 Flash — e "aí vai".
- * Os dois mini fecham antes da nano.
+ * É **explícita** em vez de deduzida do nome. Número de geração não é força, e adivinhar
+ * pelo nome já colocou um modelo "mini" no meio da fila quando ele devia estar em segundo.
+ * A ordem do catálogo novo é a do gateway: o GLM 5.3 Flash abre a fila e o Qwen Legacy a
+ * fecha por ser o mais antigo.
  *
  * Com o seletor agrupado por família, esta lista vale **dentro** de cada grupo: a família
  * manda na ordem dos cabeçalhos (`FAMILIAS`), a força manda na ordem dos itens.
  *
- * **A nano é sempre a última**, e isso é regra, não consequência: ela é a mais barata e a
- * mais rápida, e por isso a última da fila — um modelo desconhecido que o host publique
- * amanhã entra **antes** dela (ganha `DESCONHECIDO`, que é menor que o índice da nano), e
- * quem quiser a nano escolhe no fim.
+ * **O Legacy é sempre o último**, e isso é regra, não consequência: um modelo desconhecido
+ * que o gateway publique amanhã entra **antes** dele (ganha `DESCONHECIDO`, que é menor que
+ * o índice do Legacy), e quem quiser o Legacy escolhe no fim.
  */
 export const ORDEM_DE_FORCA: readonly string[] = [
-  'liz-4-5-super',
-  'nable-4-mini-preview',
-  'layze-2',
-  'koda-1',
-  'liz-3-flash',
-  'liz-mini-2',
-  'liz-mini-1-3',
-  'liz-nano',
+  'layze-2.1-flash', 'liz-4.5-super', 'koda-1', 'koda-2-pro', 'mx-lz1-teste',
 ]
 
-/** Posição de um modelo na fila. Quem não está na lista entra antes da nano. */
-const DESCONHECIDO = ORDEM_DE_FORCA.indexOf('liz-nano') - 0.5
+/** Posição de um modelo na fila. Quem não está na lista entra antes do Legacy. */
+const DESCONHECIDO = -0.5
 
 export function forcaDoModelo(value: string): number {
   const indice = ORDEM_DE_FORCA.indexOf(value)
@@ -166,32 +135,35 @@ export function forcaDoModelo(value: string): number {
 }
 
 /**
- * As famílias do seletor, **na ordem que o dono pediu** (17/10/2026): Liz, Layze, Koda,
- * Nable. A ordem é da família, não do modelo — dentro de cada uma vale a `ORDEM_DE_FORCA`.
+ * As famílias do seletor, na ordem do catálogo novo: GLM, Qwen. Claude fica na lista para
+ * o caso de o gateway publicar outro modelo da família — o Haiku 5.5 saiu do mapa, mas a
+ * família continua reconhecida. A ordem é da família, não do modelo — dentro de cada uma
+ * vale a `ORDEM_DE_FORCA`.
  *
- * Em 17/10/2026 a lista chegou a ser **plana**, para a força cruzar as famílias (Nable acima
- * de Layze). O dono não quis: sem cabeçalho, «Liz» e «Nable» viram uma pilha de nomes sem
- * dono, e achar o modelo da família certa passou a ser leitura de id. Voltou o agrupamento, e
- * a ordem das famílias é esta aqui — explícita, porque nenhuma regra tira «Layze antes de
- * Koda» do nome dos modelos.
+ * O agrupamento é explícito porque nenhuma regra tira «GLM antes de Qwen» do nome dos
+ * modelos, e sem cabeçalho uma família vira uma pilha de ids sem dono.
  *
- * `aviso` é o recado que fica colado no cabeçalho da família (o Nable é oferta por tempo
- * limitado). Ele mora **no grupo** e não no item: é da família que ele fala, e assim não
- * muda de lugar quando a ordem interna muda.
+ * `aviso` é o recado que fica colado no cabeçalho da família (era o «Tempo limitado» do
+ * Nable). Ele mora **no grupo** e não no item: é da família que ele fala, e assim não muda
+ * de lugar quando a ordem interna muda. Nenhuma família do catálogo novo tem aviso hoje; o
+ * campo fica porque o mecanismo continua valendo.
  */
 const FAMILIAS: { chave: string; label: string; aviso?: string }[] = [
-  { chave: 'liz', label: 'Liz' },
   { chave: 'layze', label: 'Layze' },
+  { chave: 'liz', label: 'Liz' },
   { chave: 'koda', label: 'Koda' },
-  { chave: 'nable', label: 'Nable', aviso: 'Tempo limitado' },
+  { chave: 'mx', label: 'MX' },
+  { chave: 'claude', label: 'Claude' },
+  { chave: 'glm', label: 'GLM' },
+  { chave: 'qwen', label: 'Qwen' },
 ]
 
 /**
- * A família de um id — `liz-nano` → `liz`.
+ * A família de um id — `glm-5.3-flash` → `glm`.
  *
  * Olha o **último** pedaço do id porque o host pode publicar com namespace
- * (`vendor/liz-nano`); comparar o id inteiro jogaria esses modelos para «Outros» e eles
- * apareceriam num grupo à parte, longe dos irmãos.
+ * (`vendor/glm-5.3-flash`); comparar o id inteiro jogaria esses modelos para «Outros» e
+ * eles apareceriam num grupo à parte, longe dos irmãos.
  */
 function familiaDe(value: string): string | null {
   const curto = value.split('/').pop() ?? value
@@ -213,9 +185,9 @@ function grupoDaFamilia(chave: string, label: string, opcoes: MenuOption[], avis
 /**
  * Seletor de modelo: as famílias do host, montadas a partir do que o backend devolveu.
  *
- * **Agrupado por família** — Liz, Layze, Koda, Nable —, e dentro de cada uma na ordem de
- * força (`ORDEM_DE_FORCA`). Modelo que o host publique sem família conhecida não some: cai
- * em «Outros», no fim, para um catálogo novo aparecer sozinho em vez de ficar invisível até
+ * **Agrupado por família** — Claude, GLM, Qwen —, e dentro de cada uma na ordem de força
+ * (`ORDEM_DE_FORCA`). Modelo que o host publique sem família conhecida não some: cai em
+ * «Outros», no fim, para um catálogo novo aparecer sozinho em vez de ficar invisível até
  * alguém mexer no frontend.
  *
  * O ícone é o mesmo da lista de emergência, para o menu não mudar de aparência conforme o
@@ -228,10 +200,10 @@ function grupoDaFamilia(chave: string, label: string, opcoes: MenuOption[], avis
  *
  * O `status` de cada modelo é o código que o backend **testou**, e ele **não aparece na
  * tela**: é só o que decide quem fica na lista. Um modelo com **400** não entra — é o host
- * dizendo que não tem mais aquele (`liz-4` saiu do catálogo), e é isso que tira o modelo do
- * seletor sem a pessoa precisar recarregar o app. Os outros códigos (429, 401, 500, 502)
- * mantêm o modelo na lista, em silêncio: ele existe, e o número é da sonda, não da pessoa.
- * `status` ausente não exclui ninguém: host calado não prova que o modelo sumiu.
+ * dizendo que não tem mais aquele (um id antigo saiu do catálogo), e é isso que tira o
+ * modelo do seletor sem a pessoa precisar recarregar o app. Os outros códigos (429, 401,
+ * 500, 502) mantêm o modelo na lista, em silêncio: ele existe, e o número é da sonda, não
+ * da pessoa. `status` ausente não exclui ninguém: host calado não prova que o modelo sumiu.
  */
 export function modelMenu(items: RemoteModel[] | null = null, bloqueados: readonly string[] = []): MenuOption[] {
   const liberado = (value: string) => !bloqueados.includes(value)
@@ -240,14 +212,20 @@ export function modelMenu(items: RemoteModel[] | null = null, bloqueados: readon
   // [] é resposta vazia do host e deixa o menu vazio até a próxima consulta.
   // Grupo que ficasse vazio pelos bloqueios sai da lista: cabeçalho sem item é um beco.
   if (items === null) {
-    return MODEL_MENU.map((categoria) =>
-      grupoDaFamilia(
-        categoria.value.replace('categoria-', ''),
-        categoria.label as string,
-        (categoria.options ?? []).filter((opcao) => liberado(opcao.value)),
-        FAMILIAS.find((familia) => `categoria-${familia.chave}` === categoria.value)?.aviso,
-      ),
-    ).filter((categoria) => (categoria.options ?? []).length > 0)
+    const visiveis = ALL_MODELS
+      .filter((item) => liberado(item.value))
+      .sort((a, b) => forcaDoModelo(a.value) - forcaDoModelo(b.value))
+    const grupos: MenuOption[] = []
+    const usados = new Set<string>()
+    for (const familia of FAMILIAS) {
+      const meus = visiveis.filter((item) => familiaDe(item.value) === familia.chave)
+      if (meus.length === 0) continue
+      meus.forEach((item) => usados.add(item.value))
+      grupos.push(grupoDaFamilia(familia.chave, familia.label, meus, familia.aviso))
+    }
+    const outros = visiveis.filter((item) => !usados.has(item.value))
+    if (outros.length > 0) grupos.push(grupoDaFamilia('outros', 'Outros', outros))
+    return grupos
   }
 
   const opcao = (item: RemoteModel): MenuOption => ({

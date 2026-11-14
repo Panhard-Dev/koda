@@ -18,6 +18,7 @@ from .providers.base import ProviderError, TransientProviderError
 
 MAX_EVENTO = 8 * 1024 * 1024
 MAX_FERRAMENTAS = 2 * 1024 * 1024
+MAX_MODELOS = 200
 
 
 def _cabecalhos_binarios(bruto: bytes) -> dict[str, Any]:
@@ -181,6 +182,120 @@ def _modelo(modelo: str) -> str:
     nome = re.sub(r"-(thinking|agentic)$", "", modelo, flags=re.IGNORECASE)
     nome = re.sub(r"-(thinking|agentic)$", "", nome, flags=re.IGNORECASE)
     return nome
+
+
+def _urls_dos_modelos(conta: dict[str, Any]) -> list[str]:
+    especificos = conta.get("specific") or {}
+    regiao = str(especificos.get("region") or "us-east-1").lower()
+    if not re.fullmatch(r"[a-z0-9-]+", regiao):
+        raise ProviderError("região da conta Kiro inválida")
+    regioes = [regiao]
+    if regiao != "us-east-1":
+        regioes.append("us-east-1")
+    return [
+        f"https://q.{item}.amazonaws.com/ListAvailableModels"
+        for item in regioes
+    ]
+
+
+def _cabecalhos_modelos(conta: dict[str, Any]) -> dict[str, str]:
+    especificos = conta.get("specific") or {}
+    token = str(especificos.get("apiKey") or conta.get("access") or "")
+    cabecalhos = {
+        "authorization": f"Bearer {token}",
+        "x-amz-sso-bearer": token,
+        "accept": "application/json",
+        "user-agent": (
+            "aws-sdk-js/1.0.0 ua/2.1 os/windows lang/js "
+            "api/codewhispererruntime#1.0.0"
+        ),
+        "x-amz-user-agent": "aws-sdk-js/1.0.0",
+        "amz-sdk-invocation-id": str(uuid.uuid4()),
+        "amz-sdk-request": "attempt=1; max=1",
+    }
+    if especificos.get("authMethod") == "api_key":
+        cabecalhos["TokenType"] = "API_KEY"
+    elif especificos.get("authMethod") == "external_idp":
+        cabecalhos["TokenType"] = "EXTERNAL_IDP"
+    return cabecalhos
+
+
+def _itens_dos_modelos(dados: Any) -> list[dict[str, Any]]:
+    if not isinstance(dados, dict):
+        return []
+    valores = dados.get("models") or dados.get("availableModels") or []
+    if not isinstance(valores, list):
+        return []
+    itens: list[dict[str, Any]] = []
+    vistos: set[str] = set()
+    for valor in valores:
+        if isinstance(valor, str):
+            identificador, nome = valor, valor
+            item: dict[str, Any] = {}
+        elif isinstance(valor, dict):
+            identificador = str(valor.get("modelId") or valor.get("id") or "").strip()
+            nome = str(valor.get("modelName") or valor.get("name") or identificador).strip()
+            item = valor
+        else:
+            continue
+        if not identificador or identificador in vistos:
+            continue
+        vistos.add(identificador)
+        itens.append({"id": identificador, "name": nome or identificador, **item})
+        if len(itens) >= MAX_MODELOS:
+            break
+    return itens
+
+
+async def modelos(conta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Lista os modelos que esta conta realmente pode usar.
+
+    O catálogo é específico por conta e plano. O manifesto local serve apenas como
+    fallback quando a descoberta está offline; enviar um ID que o gateway não reconhece
+    faz o Kiro recusar toda a conversa com ``INVALID_MODEL_ID``.
+    """
+    especificos = conta.get("specific") or {}
+    perfil = str(especificos.get("profileArn") or "").strip()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as cliente:
+        for url in _urls_dos_modelos(conta):
+            tentativas = [{"origin": "AI_EDITOR"}]
+            if perfil.startswith("arn:"):
+                tentativas.append({"origin": "AI_EDITOR", "profileArn": perfil})
+            for parametros in tentativas:
+                encontrados: list[dict[str, Any]] = []
+                proximo = ""
+                for _ in range(10):
+                    consulta = {**parametros, "maxResults": 50}
+                    if proximo:
+                        consulta["nextToken"] = proximo
+                    try:
+                        resposta = await cliente.get(
+                            url,
+                            params=consulta,
+                            headers=_cabecalhos_modelos(conta),
+                        )
+                    except httpx.RequestError:
+                        break
+                    if resposta.status_code in {401, 403, 404}:
+                        break
+                    if resposta.status_code >= 400:
+                        encontrados = []
+                        break
+                    try:
+                        dados = resposta.json()
+                    except ValueError:
+                        encontrados = []
+                        break
+                    encontrados.extend(_itens_dos_modelos(dados))
+                    proximo = str(dados.get("nextToken") or "") if isinstance(dados, dict) else ""
+                    if not proximo:
+                        break
+                if encontrados:
+                    unicos: dict[str, dict[str, Any]] = {}
+                    for item in encontrados:
+                        unicos.setdefault(str(item["id"]), item)
+                    return list(unicos.values())[:MAX_MODELOS]
+    raise ProviderError("o Kiro não publicou um catálogo de modelos para esta conta")
 
 
 def _corpo(modelo: str, mensagens: list[dict[str, Any]], ferramentas: list[dict[str, Any]],
@@ -391,8 +506,13 @@ async def linhas(conta: dict[str, Any], modelo: str, mensagens: list[dict[str, A
                     if motivo_normal in {"tool_use", "tool_calls"} and not chamadas:
                         raise ProviderError("Kiro pediu uma ferramenta sem enviar a chamada")
                     for posicao, (identificador, parcial) in enumerate(chamadas.items()):
+                        # Ferramenta sem argumentos vem com `input` vazio — que é `{}`, não
+                        # JSON inválido. Antes o `json.loads("")` derrubava o passo inteiro.
+                        bruto = parcial["input"]
+                        if isinstance(bruto, str):
+                            bruto = bruto.strip() or "{}"
                         try:
-                            entrada = json.loads(parcial["input"]) if isinstance(parcial["input"], str) else parcial["input"]
+                            entrada = json.loads(bruto) if isinstance(bruto, str) else bruto
                         except ValueError as erro:
                             raise ProviderError("Kiro devolveu argumentos de ferramenta incompletos") from erro
                         if not isinstance(entrada, dict):

@@ -198,9 +198,16 @@ for _id in ("codebuddy-intl", "codebuddy-cn"):
 
 FLUXOS["windsurf"] = {
     "tipo": "windsurf", "authorize": "https://www.windsurf.com/windsurf/signin",
-    "client_id": "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u", "caminho": "/windsurf-auth-callback",
+    "client_id": "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u", "caminho": "/auth",
     "register": "https://register.windsurf.com/exa.seat_management_pb.SeatManagementService/RegisterUser",
     "api": "https://server.codeium.com",
+}
+
+#: O Accio usa PKCE, mas o endereço de autorização não segue o padrão OAuth: o retorno vai em
+#: `return_url` (com o `login_trace_id` que o gateway espera) e o token é trocado em JSON.
+FLUXOS["accio"] = {
+    "tipo": "accio", "authorize": "https://www.accio.com/login",
+    "client_id": "accio-work", "caminho": "/auth/callback", "verificar_state": True,
 }
 
 
@@ -310,6 +317,94 @@ def _linha(linha: sqlite3.Row | None) -> dict[str, Any] | None:
     }
 
 
+def _primeiro_texto(*valores: Any) -> str | None:
+    for valor in valores:
+        if isinstance(valor, str) and valor.strip():
+            return valor.strip()
+    return None
+
+
+def _identidade_da_conta(
+    identificador: str,
+    dado: dict[str, Any],
+    conta_id: str | None = None,
+) -> str | None:
+    """Nome legível e estável para a conta que o Koda guardou.
+
+    Nem todo provedor devolve e-mail no token. Nesses casos, usamos primeiro a
+    identidade que o fornecedor expõe e, como último recurso, um rótulo específico
+    com o ID local da conta. Isso evita a linha anônima na tela sem inventar um
+    e-mail ou misturar contas.
+    """
+    especificos = dado.get("specific") or {}
+    claims = _claims(dado.get("id_token")) or _claims(dado.get("access"))
+    nome = _primeiro_texto(
+        dado.get("conta"),
+        dado.get("email"),
+        especificos.get("email"),
+        claims.get("email"),
+        claims.get("preferred_username"),
+        claims.get("login"),
+        claims.get("username"),
+        especificos.get("username"),
+        especificos.get("login"),
+        especificos.get("name"),
+    )
+    if nome:
+        return nome
+
+    token = str(especificos.get("apiKey") or dado.get("access") or "")
+    if identificador == "zed" and token:
+        try:
+            with httpx.Client(timeout=10, follow_redirects=False) as cliente:
+                resposta = cliente.get(
+                    "https://cloud.zed.dev/client/users/me",
+                    headers={
+                        "authorization": f"{str(especificos.get('userId') or '')} {token}",
+                        "accept": "application/json",
+                    },
+                )
+                if resposta.status_code < 400:
+                    usuario = resposta.json().get("user") or {}
+                    if isinstance(usuario, dict):
+                        nome = _primeiro_texto(
+                            usuario.get("username"),
+                            usuario.get("github_login"),
+                            usuario.get("name"),
+                        )
+                        if nome:
+                            return nome
+        except (httpx.HTTPError, ValueError, AttributeError):
+            pass
+
+    rotulo = conta_id or ""
+    if identificador == "kiro":
+        metodo = str(especificos.get("authMethod") or "").strip()
+        prefixo = {
+            "builder-id": "AWS Builder ID",
+            "idc": "AWS IAM Identity Center",
+            "api_key": "Kiro API Key",
+        }.get(metodo, "Kiro")
+        return f"{prefixo} · {rotulo[:8]}" if rotulo else None
+
+    if rotulo:
+        return f"{identificador} · {rotulo[:8]}"
+    return None
+
+
+def _atualizar_nome_da_conta(
+    settings: Settings,
+    conta_id: str,
+    nome: str,
+) -> None:
+    with _conexao(settings) as banco:
+        banco.execute(
+            "UPDATE provedor_contas SET conta = ?, atualizado = ? WHERE id = ?",
+            (nome, datetime.now(tz=timezone.utc).isoformat(), conta_id),
+        )
+        banco.commit()
+
+
 def caminho(settings: Settings, identificador: str) -> str:
     """Onde as contas moram — a tela mostra isso como origem."""
     return f"{settings.database_path} · provedor_contas/{identificador}"
@@ -323,6 +418,16 @@ def contas(settings: Settings, identificador: str) -> list[dict[str, Any]]:
             (identificador,),
         ).fetchall()
     return [item for item in (_linha(linha) for linha in linhas) if item]
+
+
+def provedores_salvos(settings: Settings, prefixo: str = "custom-") -> list[str]:
+    """Identificadores guardados com este prefixo — os `custom-*` da aba API."""
+    with _conexao(settings) as banco:
+        linhas = banco.execute(
+            "SELECT DISTINCT provedor FROM provedor_contas WHERE provedor LIKE ? ORDER BY provedor",
+            (f"{prefixo}%",),
+        ).fetchall()
+    return [str(linha["provedor"]) for linha in linhas]
 
 
 def guardado(settings: Settings, identificador: str) -> dict[str, Any] | None:
@@ -366,6 +471,19 @@ def _migrar_do_json(settings: Settings, identificador: str) -> dict[str, Any] | 
     return guardado(settings, identificador)
 
 
+def gravar_chave(settings: Settings, identificador: str, chave: str, specific: dict[str, Any]) -> str:
+    """Acrescenta uma chave sem substituir outras; repetir a mesma atualiza seus dados."""
+    existentes = contas(settings, identificador)
+    mesma = next((c for c in existentes if c.get("access") == chave), None)
+    if mesma:
+        return _gravar(settings, identificador, {"id": mesma["id"], "conta": mesma.get("conta"), "access": chave, "specific": specific})
+    nomes = {c.get("conta") for c in existentes}
+    numero = 1
+    while f"Chave {numero}" in nomes:
+        numero += 1
+    return _gravar(settings, identificador, {"conta": f"Chave {numero}", "access": chave, "specific": specific})
+
+
 def _gravar(settings: Settings, identificador: str, dado: dict[str, Any]) -> str:
     """Grava (ou atualiza) a conta e devolve o id dela.
 
@@ -388,10 +506,12 @@ def _gravar(settings: Settings, identificador: str, dado: dict[str, Any]) -> str
         if existente is not None:
             banco.execute(
                 """UPDATE provedor_contas
-                      SET acesso = ?, refresh = ?, expira_em = ?, id_token = ?, escopo = ?, specific = ?,
+                      SET conta = COALESCE(?, conta), acesso = ?, refresh = ?, expira_em = ?,
+                          id_token = ?, escopo = ?, specific = ?,
                           esgotada_ate = NULL, motivo = NULL, atualizado = ?
                     WHERE id = ?""",
                 (
+                    dado.get("conta"),
                     dado.get("access") or "",
                     dado.get("refresh"),
                     dado.get("expiraEm"),
@@ -448,7 +568,7 @@ def esquecer(settings: Settings, identificador: str, conta_id: str | None = None
     """Sai da conta: uma conta específica, ou todas as do provedor."""
     with _conexao(settings) as banco:
         if conta_id:
-            banco.execute("DELETE FROM provedor_contas WHERE id = ?", (conta_id,))
+            banco.execute("DELETE FROM provedor_contas WHERE provedor = ? AND id = ?", (identificador, conta_id))
         else:
             banco.execute("DELETE FROM provedor_contas WHERE provedor = ?", (identificador,))
         banco.commit()
@@ -602,6 +722,8 @@ def iniciar(settings: Settings, identificador: str) -> dict[str, Any]:
         return _iniciar_zed(fluxo)
     if config.get("tipo") == "trae":
         return _iniciar_trae(fluxo)
+    if config.get("tipo") == "accio":
+        return _iniciar_accio(fluxo)
     return _iniciar_pkce(fluxo)
 
 
@@ -668,6 +790,39 @@ def _iniciar_pkce(fluxo: _Fluxo) -> dict[str, Any]:
 
     threading.Thread(target=servidor.serve_forever, daemon=True).start()
     return {"tipo": "pkce", "url": fluxo.url, "estado": "aguardando"}
+
+
+def _iniciar_accio(fluxo: _Fluxo) -> dict[str, Any]:
+    """Abre o login do Accio com o retorno local e o `login_trace_id` que ele exige."""
+    from . import accio_koda
+
+    try:
+        servidor = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as erro:
+        fluxo.estado = "erro"
+        fluxo.detalhe = f"não consegui abrir o retorno local do Accio: {erro}"
+        return {"tipo": "pkce", "estado": "erro", "mensagem": fluxo.detalhe}
+    servidor.daemon_threads = True
+    servidor.koda_fluxo = fluxo  # type: ignore[attr-defined]
+    fluxo.servidor = servidor
+    trace = f"ttid_{secrets.token_hex(16)}"
+    fluxo.redirect = (
+        f"http://127.0.0.1:{servidor.server_address[1]}{accio_koda.CAMINHO_DO_RETORNO}"
+        f"?login_trace_id={trace}"
+    )
+    # O `utdid` é o id de aparelho que o gateway do Accio usa para créditos e refresh. Nasce
+    # no login e fica junto da conta; assim o rodízio inteiro fala o mesmo idioma.
+    fluxo.extra["specific"] = {"utdid": secrets.token_hex(16), "authMethod": "oauth"}
+    parametros = {
+        "return_url": fluxo.redirect,
+        "state": fluxo.state,
+        "code_challenge": _challenge(fluxo.verifier),
+        "code_challenge_method": "S256",
+        "client_id": fluxo.config["client_id"],
+    }
+    fluxo.url = f"{fluxo.config['authorize']}?{urlencode(parametros)}"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return {"tipo": "pkce", "estado": "aguardando", "url": fluxo.url}
 
 
 def _iniciar_trae(fluxo: _Fluxo) -> dict[str, Any]:
@@ -1421,6 +1576,8 @@ def _trocar_codigo(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
         return _trocar_codigo_zed(fluxo, codigo)
     if config.get("tipo") == "trae":
         return _trocar_codigo_trae(fluxo, codigo)
+    if config.get("tipo") == "accio":
+        return _trocar_codigo_accio(fluxo, codigo)
     corpo: dict[str, Any] = {
         "grant_type": "authorization_code",
         "code": codigo,
@@ -1478,6 +1635,38 @@ def _trocar_codigo_trae(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
             except (httpx.HTTPError, ValueError, AttributeError):
                 continue
     raise RuntimeError("Trae recusou a troca do login; confira a configuração do endpoint")
+
+
+def _trocar_codigo_accio(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
+    """Troca o código do Accio pelo par de tokens — o endpoint é JSON, não form."""
+    from . import accio_koda
+
+    with httpx.Client(timeout=30) as cliente:
+        resposta = cliente.post(
+            f"{accio_koda.BASE}/oauth/token",
+            json={
+                "code": codigo,
+                "codeVerifier": fluxo.verifier,
+                "clientId": accio_koda.CLIENT_ID,
+                "redirectUri": fluxo.redirect,
+            },
+        )
+    if resposta.status_code >= 400:
+        raise RuntimeError(f"o Accio recusou a troca: {resposta.text[:300]}")
+    try:
+        bruto = resposta.json()
+    except ValueError as erro:
+        raise RuntimeError(f"o Accio devolveu uma resposta inválida: {erro}") from erro
+    dados = bruto.get("data") if isinstance(bruto, dict) and isinstance(bruto.get("data"), dict) else bruto
+    if not isinstance(dados, dict) or not dados.get("accessToken") or not dados.get("refreshToken"):
+        raise RuntimeError("o Accio não devolveu o par de tokens do login")
+    return {
+        "access_token": dados["accessToken"],
+        "refresh_token": dados["refreshToken"],
+        "expires_at": _expiracao_absoluta(dados.get("expiresAt")),
+        "email": accio_koda.identidade(bruto, str(dados["accessToken"])),
+        "specific": fluxo.extra.get("specific") or {},
+    }
 
 
 def _trocar_codigo_zed(fluxo: _Fluxo, codigo: str) -> dict[str, Any]:
@@ -1628,7 +1817,7 @@ def _concluir(fluxo: _Fluxo, dado: dict[str, Any]) -> None:
         return
     fluxo.estado = "concluido"
     fluxo.conta = dado.get("email") or _conta_do_token(fluxo, dado)
-    _gravar(fluxo.settings, fluxo.id, {
+    conta_id = _gravar(fluxo.settings, fluxo.id, {
         "id": fluxo.id,
         "conta": fluxo.conta,
         "access": dado.get("access_token"),
@@ -1638,6 +1827,21 @@ def _concluir(fluxo: _Fluxo, dado: dict[str, Any]) -> None:
         "escopo": dado.get("scope"),
         "specific": dado.get("specific") or {},
     })
+    if not fluxo.conta:
+        conta_guardada = {
+            "conta": None,
+            "access": dado.get("access_token"),
+            "specific": dado.get("specific") or {},
+        }
+        nome = _identidade_da_conta(
+            fluxo.id,
+            conta_guardada,
+            conta_id if isinstance(conta_id, str) else None,
+        )
+        if nome:
+            fluxo.conta = nome
+            if isinstance(conta_id, str):
+                _atualizar_nome_da_conta(fluxo.settings, conta_id, nome)
     if fluxo.servidor is not None:
         threading.Thread(target=fluxo.servidor.shutdown, daemon=True).start()
 
@@ -1667,7 +1871,9 @@ def _conta_do_token(fluxo: _Fluxo, dado: dict[str, Any]) -> str | None:
                 return resposta.json().get("email")
         except (httpx.HTTPError, ValueError):
             return None
-    return claims.get("preferred_username") or claims.get("sub")
+    return (_identidade_da_conta(fluxo.id, dado)
+            or claims.get("preferred_username")
+            or claims.get("sub"))
 
 
 def _extrair_codigo(texto: str) -> tuple[str, str]:
@@ -1763,6 +1969,11 @@ def garantir(settings: Settings, identificador: str, conta_id: str | None = None
                 if conta_id else guardado(settings, identificador))
         if dado is None:
             return None
+        if not dado.get("conta"):
+            nome = _identidade_da_conta(identificador, dado, str(dado.get("id") or ""))
+            if nome:
+                dado["conta"] = nome
+                _atualizar_nome_da_conta(settings, str(dado["id"]), nome)
         expira = dado.get("expiraEm")
         if expira:
             try:
@@ -1781,6 +1992,26 @@ def garantir(settings: Settings, identificador: str, conta_id: str | None = None
             dado.update(novo)
             _gravar(settings, identificador, dado)
         return dado
+
+
+def renovar_agora(
+    settings: Settings, identificador: str, conta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Força a renovação de **uma** conta e grava o resultado.
+
+    O `garantir` só renova quando o `expiraEm` já venceu. O Accio às vezes recusa um token
+    que ainda não venceu (sessão derrubada do lado dele), e aí o adaptador chama isto para
+    tentar uma vez antes de desistir da conta.
+    """
+    try:
+        novo = _renovar(identificador, conta)
+    except Exception:  # noqa: BLE001 — renovar é otimização, não pode derrubar a conversa
+        novo = None
+    if not novo:
+        return None
+    conta.update(novo)
+    _gravar(settings, identificador, conta)
+    return conta
 
 
 def _renovar(identificador: str, dado: dict[str, Any]) -> dict[str, Any] | None:
@@ -1831,6 +2062,10 @@ def _renovar(identificador: str, dado: dict[str, Any]) -> dict[str, Any] | None:
         if novo.get("profileArn"):
             resultado["specific"] = {**credenciais, "profileArn": novo["profileArn"]}
         return resultado
+    if config.get("tipo") == "accio":
+        from . import accio_koda
+
+        return accio_koda.renovar(dado)
     if config.get("tipo") == "cline" and config.get("refresh_url"):
         try:
             with httpx.Client(timeout=30) as cliente:

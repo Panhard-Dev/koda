@@ -48,12 +48,72 @@ DEFINICOES = [
         ["id"],
     ),
     _def(
+        "save_attachment",
+        "Salva no PC um arquivo que a pessoa **anexou nesta conversa** — o caminho do "
+        "celular para o computador. Use quando ela pedir para salvar, guardar ou levar ao "
+        "PC o arquivo que mandou pelo celular. O anexo não está na pasta de trabalho: "
+        "passe o `id` do bloco «[anexos desta mensagem]». Sem `caminho`, o arquivo vai para "
+        "a pasta de trabalho com o nome original; com `caminho`, vai para onde a pessoa "
+        "pediu (pasta ou arquivo). Devolve o caminho onde ficou.",
+        {
+            "id": {
+                "type": "string",
+                "description": "o id do anexo, exatamente como veio no bloco de anexos da mensagem",
+            },
+            "caminho": {
+                "type": "string",
+                "description": (
+                    "destino na pasta de trabalho (padrão: o nome do anexo). Caminho sem "
+                    "extensão é tratado como pasta; com extensão, é o nome do arquivo"
+                ),
+            },
+        },
+        ["id"],
+    ),
+    _def(
+        "consultar_saida",
+        "Consulta uma saída grande que o Koda guardou para economizar contexto (RTK, "
+        "Headroom ou Context Mode). Passe `id` para ler um trecho, ou `busca` para "
+        "procurar uma palavra em todas as saídas guardadas. Use isto em vez de rodar o "
+        "comando de novo ou reler o arquivo inteiro — o original está aqui, completo.",
+        {
+            "id": {
+                "type": "string",
+                "description": "o id que veio no aviso de saída resumida",
+            },
+            "busca": {
+                "type": "string",
+                "description": "texto a procurar nas saídas guardadas (sem id)",
+            },
+            "inicio": {"type": "integer", "description": "linha inicial, 1 = primeira"},
+            "limite": {"type": "integer", "description": "quantas linhas ler (padrão 200)"},
+        },
+        [],
+    ),
+    _def(
         "write_file",
         "Cria ou sobrescreve um arquivo de texto INTEIRO (cria subpastas). Use isto em vez "
         "de `echo`/heredoc no shell. Substitui o conteúdo todo — para alterar um trecho use "
         "`edit_file`.",
         {"caminho": {"type": "string"}, "conteudo": {"type": "string"}},
         ["caminho", "conteudo"],
+    ),
+    _def(
+        "send_to_phone",
+        "Copia um arquivo da pasta de trabalho para o celular da pessoa. Use quando ela "
+        "pedir para mandar, levar ou baixar um arquivo no celular. O arquivo aparece na "
+        "conversa do celular como um cartão «Salvar no celular» (vai para Downloads/Koda). "
+        "Para o caminho contrário — trazer um arquivo do celular — a pessoa usa o botão de "
+        "anexo da conversa; o arquivo chega como anexo, você o lê com `read_attachment` e "
+        "o guarda no PC com `save_attachment`.",
+        {
+            "caminho": {"type": "string", "description": "arquivo na pasta de trabalho"},
+            "nome": {
+                "type": "string",
+                "description": "nome no celular (padrão: o mesmo do arquivo)",
+            },
+        },
+        ["caminho"],
     ),
     _def(
         "edit_file",
@@ -124,21 +184,35 @@ DEFINICOES = [
         "search_codebase",
         "Busca um termo (texto ou regex) em todos os arquivos do projeto e devolve "
         "arquivo:linha com a linha. Use isto em vez de `findstr`/`grep` no shell.",
-        {"termo": {"type": "string"}, "regex": {"type": "boolean", "description": "tratar termo como regex (padrão false)"}},
+        {
+            "termo": {"type": "string"},
+            "regex": {"type": "boolean", "description": "tratar termo como regex (padrão false)"},
+            "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"},
+        },
         ["termo"],
     ),
     _def(
         "vector_search",
         "Alias de search_codebase: busca textual nos arquivos do projeto (ranking simples por ocorrências).",
-        {"termo": {"type": "string"}},
+        {
+            "termo": {"type": "string"},
+            "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"},
+        },
         ["termo"],
     ),
-    _def("grep", "Alias de regex_search: busca com expressão regular nos arquivos.", {"padrao": {"type": "string"}}, ["padrao"]),
+    _def(
+        "grep",
+        "Alias de regex_search: busca com expressão regular nos arquivos.",
+        {"padrao": {"type": "string"},
+         "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"}},
+        ["padrao"],
+    ),
     _def(
         "regex_search",
         "Busca com expressão regular nos arquivos do projeto (arquivo:linha:trecho). Use "
         "isto em vez de `findstr`/`grep` no shell; para buscar um texto use `search_codebase`.",
-        {"padrao": {"type": "string"}},
+        {"padrao": {"type": "string"},
+         "caminho": {"type": "string", "description": "pasta onde procurar (padrão: a pasta de trabalho)"}},
         ["padrao"],
     ),
     _def(
@@ -161,11 +235,11 @@ DEFINICOES = [
     ),
     _def(
         "apply_patch",
-        "Aplica um diff unificado (formato git diff) nos arquivos do projeto, de uma vez.",
+        "Aplica um diff unificado ou patch com marcadores *** Begin Patch nos arquivos do projeto, de uma vez.",
         {
             "diff": {
                 "type": "string",
-                "description": "diff unificado completo, com cabeçalhos ---/+++ e hunks @@",
+                "description": "diff unificado completo ou patch com *** Begin Patch, arquivos e hunks @@",
             }
         },
         ["diff"],

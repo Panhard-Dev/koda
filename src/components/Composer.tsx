@@ -75,9 +75,10 @@ const COR_DO_MODO: Record<ModoPermissao, string> = {
   auto: 'text-red-400',
   livre: 'text-red-500',
 }
-import { fraseDeFalha, melhorarPrompt, removerAnexo, subirAnexo } from '../api/client'
+import { fraseDeFalha, listarArquivosProjeto, melhorarPrompt, removerAnexo, subirAnexo } from '../api/client'
+import type { EntradaProjeto } from '../api/client'
 import type { ModoDoPrompt } from '../api/client'
-import { filtrarComandos, textoDoComando, tokenDigitado } from '../comandos'
+import { ACOES_DE_COMANDO, caminhoDigitado, filtrarComandos, pedidoDoComando, textoDoComando, tokenDigitado } from '../comandos'
 import {
   COR_DO_TIPO,
   ROTULO_DO_TIPO,
@@ -452,6 +453,7 @@ export function Composer({
   /** O mesmo par do menu do "/", para o menu do "@". */
   const [mencaoAtiva, setMencaoAtiva] = useState(0)
   const [menuDeMencoesFechado, setMenuDeMencoesFechado] = useState(false)
+  const [entradasProjeto, setEntradasProjeto] = useState<EntradaProjeto[]>([])
   const itensDeMencaoRef = useRef<(HTMLButtonElement | null)[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   /** A camada que desenha o texto pintado, atrás do textarea. */
@@ -488,7 +490,30 @@ export function Composer({
    */
   const mencao = mencaoDigitada(message)
   const mostrarMencoes = mencao !== null && !menuDeMencoesFechado && !mostrarComandos
-  const mencoesFiltradas = mostrarMencoes
+  const marcaArquivo = /(?<!\S)[#@](?=[^\s@#])/.exec(message)
+  const depoisDaMarca = marcaArquivo ? message.slice(marcaArquivo.index + 1) : ''
+  const marcaEhCaminho = Boolean(
+    marcaArquivo
+    && !/^(sub|agente|mcp|skill)\./i.test(depoisDaMarca)
+    && /[\\/]|\.[A-Za-z0-9]+$/.test(depoisDaMarca),
+  )
+  const mostrandoArquivos = Boolean(
+    message.startsWith('/arquivos')
+    || caminhoDigitado(message) !== null
+    || (mencao !== null && mencao.tipo === null)
+    || marcaEhCaminho,
+  )
+  const consultaArquivos = marcaArquivo && !message.startsWith('/arquivos') && caminhoDigitado(message) === null
+    ? message.slice(marcaArquivo.index + 1).trim()
+    : message.startsWith('/arquivos')
+    ? message.slice('/arquivos'.length).trim()
+    : caminhoDigitado(message) ?? mencao?.consulta ?? ''
+  const entradasFiltradas = entradasProjeto.filter((item) =>
+    !consultaArquivos || item.caminho.toLowerCase().includes(consultaArquivos.toLowerCase()),
+  )
+  const listaVisivel = mostrandoArquivos ? entradasFiltradas : []
+  const itemAtivo = Math.min(mencaoAtiva, Math.max(listaVisivel.length - 1, 0))
+  const mencoesFiltradas = mostrarMencoes && !mostrandoArquivos
     ? filtrarMencoes(mencoesDe(agentes, skills, mcps), mencao.tipo, mencao.consulta)
     : []
   const indiceDaMencao = Math.min(mencaoAtiva, Math.max(mencoesFiltradas.length - 1, 0))
@@ -531,7 +556,7 @@ export function Composer({
    * vai para o modelo é exatamente o que estiver na caixa. Nada de texto pré-definido.
    */
   const completarComando = (comando: Comando) => {
-    setMessage(textoDoComando(comando))
+    setMessage(comando.nome === '/arquivos' ? '/arquivos' : textoDoComando(comando))
     setComandoAtivo(0)
     setMenuFechado(false)
     // Depois do render: o React ainda não escreveu o texto novo na caixa quando este
@@ -555,6 +580,26 @@ export function Composer({
   const completarMencao = (escolhida: Mencao) => {
     if (!mencao) return
     setMessage(`${message.slice(0, mencao.inicio)}${textoDaMencao(escolhida)}`)
+    setMencaoAtiva(0)
+    setMenuDeMencoesFechado(false)
+    requestAnimationFrame(() => {
+      const caixa = textareaRef.current
+      if (!caixa) return
+      caixa.focus()
+      caixa.setSelectionRange(caixa.value.length, caixa.value.length)
+    })
+  }
+
+  const completarCaminho = (entrada: EntradaProjeto) => {
+    const comando = message.startsWith('/arquivos')
+    const barra = caminhoDigitado(message) !== null
+    const prefixo = comando
+      ? '/arquivos '
+      : barra
+        ? '/'
+        : message.slice(0, marcaArquivo?.index ?? mencao?.inicio ?? 0)
+    const marca = comando || barra ? '' : marcaArquivo?.[0] ?? '@'
+    setMessage(`${prefixo}${marca}${entrada.caminho} `)
     setMencaoAtiva(0)
     setMenuDeMencoesFechado(false)
     requestAnimationFrame(() => {
@@ -589,11 +634,20 @@ export function Composer({
   const projetoLabel = ativo ? ativo.nome : 'Selecionar projeto'
   const modo = modoDe(permissionMode)
 
+  useEffect(() => {
+    if (!mostrandoArquivos) return
+    let vivo = true
+    void listarArquivosProjeto(consultaArquivos, ativo?.caminho ?? null)
+      .then((dados) => { if (vivo) setEntradasProjeto(dados.itens) })
+      .catch(() => { if (vivo) setEntradasProjeto([]) })
+    return () => { vivo = false }
+  }, [mostrandoArquivos, consultaArquivos, ativo?.caminho])
+
   /**
    * Cada modelo do seletor ganha o medidor de contexto à direita.
    *
    * O anel é montado aqui e não em `models.tsx` porque ícone/anel é JSX — lá o módulo é
-   * dado puro. A recursão cobre as categorias (Liz, Koda, Layze), que são submenus.
+   * dado puro. A recursão cobre as categorias (Claude, GLM, Qwen), que são submenus.
    */
   const comMedidor = (opcoes: MenuOption[]): MenuOption[] =>
     opcoes.map((opcao) =>
@@ -650,8 +704,31 @@ export function Composer({
 
   const send = () => {
     if (!canSend) return
+    const texto = message.trim()
+    const [nome] = texto.split(/\s+/)
+    const acao = ACOES_DE_COMANDO[nome?.toLowerCase() ?? '']
+    if (acao === 'model') {
+      document.querySelector<HTMLButtonElement>('[aria-label="Escolher modelo"]')?.click()
+      setMessage('')
+      return
+    }
+    if (acao === 'permissions') {
+      document.querySelector<HTMLButtonElement>('[aria-label^="Permissão:"]')?.click()
+      setMessage('')
+      return
+    }
+    if (acao === 'new' || acao === 'clear') {
+      document.querySelector<HTMLButtonElement>('[aria-label="Novo chat"]')?.click()
+      setMessage('')
+      return
+    }
+    if (acao === 'status') {
+      onSend?.({ text: '#backend/app/main.py #backend/app/routers/models.py #src/App.tsx\nMostre o estado do host, backend, front e modelos a partir destes arquivos.', attachments, model, reasoning, web, effort, project_path: ativo?.caminho ?? null })
+      setMessage('')
+      return
+    }
     onSend?.({
-      text: message.trim(),
+      text: pedidoDoComando(texto),
       attachments,
       model,
       reasoning,
@@ -934,9 +1011,17 @@ export function Composer({
           A caixa inteira é a área de soltar arquivo: o arraste entra por aqui e o anexo
           segue pelo mesmo `subirArquivos` do «+» e do Ctrl+V. O `onDragOver` é o que
           autoriza o navegador a entregar o `drop` — sem ele o arquivo abre numa aba nova. */}
+      {/*
+       * O `isolate` prende o fundo (`-z-10`) à caixa, mas também prende **os menus** que
+       * abrem para cima: o `z-50` do painel passa a valer só dentro daqui, e o cabeçalho
+       * (`z-20`) fica por cima da parte de cima da lista. Numa janela baixa o menu encosta
+       * nele, e o clique num item atravessa o cabeçalho transparente e fecha o menu em vez
+       * de abrir o submenu. O `z-30` põe a caixa acima do cabeçalho e mantém os menus
+       * abaixo das gavetas (`z-40`) e dos painéis laterais (`z-60`).
+       */}
       <div
         ref={formaRef}
-        className="group relative isolate w-full pt-[40px]"
+        className="group relative isolate z-30 w-full pt-[40px]"
         onDragEnter={entrouArraste}
         onDragOver={sobreArraste}
         onDragLeave={saiuArraste}
@@ -1135,7 +1220,7 @@ export function Composer({
           </ul>
         ) : null}
 
-        {mostrarComandos ? (
+        {mostrarComandos && !(mostrandoArquivos && listaVisivel.length > 0) ? (
           <div className="mb-1">
             <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
               Comandos
@@ -1192,7 +1277,35 @@ export function Composer({
           </div>
         ) : null}
 
-        {mostrarMencoes && mencao ? (
+        {mostrandoArquivos && listaVisivel.length > 0 ? (
+          <div className="mb-1">
+            <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
+              Pastas e arquivos do projeto
+            </p>
+            <div className="max-h-60 overflow-y-auto" role="listbox" aria-label="Pastas e arquivos do projeto">
+              {listaVisivel.map((item, index) => (
+                <button
+                  key={item.caminho}
+                  type="button"
+                  role="option"
+                  aria-selected={index === itemAtivo}
+                  onMouseDown={(evento) => { evento.preventDefault(); completarCaminho(item) }}
+                  onMouseEnter={() => setMencaoAtiva(index)}
+                  className={['flex w-full items-baseline gap-2 rounded-lg px-2 py-2 text-left text-[13.5px] transition-colors', index === itemAtivo ? 'bg-koda-fg/8' : 'hover:bg-koda-fg/5'].join(' ')}
+                >
+                  <span className="shrink-0 font-mono font-semibold text-koda-fg/70">{item.pasta ? '□' : '·'}</span>
+                  <span className="min-w-0 truncate text-koda-fg">{item.caminho}</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 border-t border-koda-fg/8 pt-2.5 pb-1 text-[12.5px] text-koda-fg/45">
+              <CircleDot className="h-3.5 w-3.5 shrink-0" strokeWidth={1.7} />
+              <span><span className="text-koda-fg/70">↑ ↓</span> escolhe · <span className="text-koda-fg/70">Enter</span> completa · <span className="text-koda-fg/70">Esc</span> fecha</span>
+            </div>
+          </div>
+        ) : null}
+
+        {mostrarMencoes && mencao && !mostrandoArquivos ? (
           <div className="mb-1">
             <p className="px-1 pb-1.5 text-[11px] font-semibold tracking-wider text-koda-fg/40 uppercase">
               {mencao.tipo ? ROTULO_DO_TIPO[mencao.tipo] : 'Sub-agentes, skills e MCPs'}
@@ -1310,7 +1423,7 @@ export function Composer({
           }}
           onPaste={colarArquivos}
           onKeyDown={(event) => {
-            if (mostrarComandos) {
+            if (mostrarComandos && !(mostrandoArquivos && listaVisivel.length > 0)) {
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                 event.preventDefault()
                 const total = comandosFiltrados.length
@@ -1337,7 +1450,29 @@ export function Composer({
                 }
               }
             }
-            if (mostrarMencoes) {
+            if (mostrandoArquivos && listaVisivel.length > 0) {
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                const total = listaVisivel.length
+                const passo = event.key === 'ArrowDown' ? 1 : -1
+                setMencaoAtiva((atual) => (atual + passo + total) % total)
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setMenuDeMencoesFechado(true)
+                return
+              }
+              if ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Tab' && !event.shiftKey)) {
+                const entrada = listaVisivel[itemAtivo]
+                if (entrada) {
+                  event.preventDefault()
+                  completarCaminho(entrada)
+                  return
+                }
+              }
+            }
+            if (mostrarMencoes && !mostrandoArquivos) {
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                 event.preventDefault()
                 const total = mencoesFiltradas.length

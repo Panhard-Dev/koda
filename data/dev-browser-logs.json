@@ -1,0 +1,239 @@
+{
+  "atualizado": 1794289184573,
+  "porta": 43611,
+  "url": "http://127.0.0.1:15174/",
+  "titulo": "Koda",
+  "erros": [
+    {
+      "chave": "navegador|erro|encountered two children with the same key, `%s`. keys should be unique so that components maintain their identity across updates. non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could ch|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Encountered two children with the same key, `%s`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version. provedor-gateway",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289167594,
+      "ultimo": 1794289167594,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|aviso|[koda:net] h get /api/live status=network-error nms|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "aviso",
+      "severidade": "leve",
+      "texto": "[koda:net] dbdb5bec GET /api/live status=network-error 669ms",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289158691,
+      "ultimo": 1794289158691,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|failed to load resource: net::err_failed|http://127.0.0.1:18788/api/live",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Failed to load resource: net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/live",
+      "primeiro": 1794289158690,
+      "ultimo": 1794289158690,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "rede|falha|get http://n.n.n.n:n/api/live — net::err_failed|http://127.0.0.1:18788/api/live",
+      "fonte": "rede",
+      "tipo": "falha",
+      "severidade": "grave",
+      "texto": "GET http://127.0.0.1:18788/api/live — net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/live",
+      "primeiro": 1794289158689,
+      "ultimo": 1794289158689,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|access to fetch at 'http://n.n.n.n:n/api/live' from origin 'http://n.n.n.n:n' has been blocked by cors policy: no 'access-control-allow-origin' header is present on the requested resource. if an opaque response serves your needs, set the re|http://127.0.0.1:15174/",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Access to fetch at 'http://127.0.0.1:18788/api/live' from origin 'http://127.0.0.1:15174' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. If an opaque response serves your needs, set the request's mode to 'no-cors' to fetch the resource with CORS disabled.",
+      "onde": "http://127.0.0.1:15174/",
+      "primeiro": 1794289158686,
+      "ultimo": 1794289158686,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "rede|falha|get http://n.n.n.n:n/api/provedores/api — net::err_failed|http://127.0.0.1:18788/api/provedores/api",
+      "fonte": "rede",
+      "tipo": "falha",
+      "severidade": "grave",
+      "texto": "GET http://127.0.0.1:18788/api/provedores/api — net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/provedores/api",
+      "primeiro": 1794289158685,
+      "ultimo": 1794289158685,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|failed to load resource: net::err_failed|http://127.0.0.1:18788/api/provedores/api",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Failed to load resource: net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/provedores/api",
+      "primeiro": 1794289158685,
+      "ultimo": 1794289158685,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|aviso|[koda:net] h get /api/provedores/api status=network-error nms|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "aviso",
+      "severidade": "leve",
+      "texto": "[koda:net] 2a9b9ade GET /api/provedores/api status=network-error 663ms",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289158685,
+      "ultimo": 1794289158685,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|access to fetch at 'http://n.n.n.n:n/api/provedores/api' from origin 'http://n.n.n.n:n' has been blocked by cors policy: no 'access-control-allow-origin' header is present on the requested resource. if an opaque response serves your needs, |http://127.0.0.1:15174/",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Access to fetch at 'http://127.0.0.1:18788/api/provedores/api' from origin 'http://127.0.0.1:15174' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. If an opaque response serves your needs, set the request's mode to 'no-cors' to fetch the resource with CORS disabled.",
+      "onde": "http://127.0.0.1:15174/",
+      "primeiro": 1794289158684,
+      "ultimo": 1794289158684,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|aviso|[koda:net] h get /api/provedores status=network-error nms|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "aviso",
+      "severidade": "leve",
+      "texto": "[koda:net] 7f51ee71 GET /api/provedores status=network-error 370ms",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289158393,
+      "ultimo": 1794289158393,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|failed to load resource: net::err_failed|http://127.0.0.1:18788/api/provedores",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Failed to load resource: net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/provedores",
+      "primeiro": 1794289158384,
+      "ultimo": 1794289158384,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|access to fetch at 'http://n.n.n.n:n/api/provedores' from origin 'http://n.n.n.n:n' has been blocked by cors policy: no 'access-control-allow-origin' header is present on the requested resource. if an opaque response serves your needs, set |http://127.0.0.1:15174/",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Access to fetch at 'http://127.0.0.1:18788/api/provedores' from origin 'http://127.0.0.1:15174' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. If an opaque response serves your needs, set the request's mode to 'no-cors' to fetch the resource with CORS disabled.",
+      "onde": "http://127.0.0.1:15174/",
+      "primeiro": 1794289158382,
+      "ultimo": 1794289158382,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "rede|falha|get http://n.n.n.n:n/api/provedores — net::err_failed|http://127.0.0.1:18788/api/provedores",
+      "fonte": "rede",
+      "tipo": "falha",
+      "severidade": "grave",
+      "texto": "GET http://127.0.0.1:18788/api/provedores — net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/provedores",
+      "primeiro": 1794289158382,
+      "ultimo": 1794289158382,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "rede|falha|get http://n.n.n.n:n/api/permissions — net::err_failed|http://127.0.0.1:18788/api/permissions",
+      "fonte": "rede",
+      "tipo": "falha",
+      "severidade": "grave",
+      "texto": "GET http://127.0.0.1:18788/api/permissions — net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/permissions",
+      "primeiro": 1794289157952,
+      "ultimo": 1794289157952,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|failed to load resource: net::err_failed|http://127.0.0.1:18788/api/permissions",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Failed to load resource: net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/permissions",
+      "primeiro": 1794289157952,
+      "ultimo": 1794289157952,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|aviso|[koda:net] h get /api/permissions status=network-error nms|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "aviso",
+      "severidade": "leve",
+      "texto": "[koda:net] 79c471da GET /api/permissions status=network-error 583ms",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289157952,
+      "ultimo": 1794289157952,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|aviso|[koda:net] h get /api/projects status=network-error nms|http://127.0.0.1:15174/@vite/client",
+      "fonte": "navegador",
+      "tipo": "aviso",
+      "severidade": "leve",
+      "texto": "[koda:net] 4a21b379 GET /api/projects status=network-error 581ms",
+      "onde": "http://127.0.0.1:15174/@vite/client:299",
+      "primeiro": 1794289157951,
+      "ultimo": 1794289157951,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|access to fetch at 'http://n.n.n.n:n/api/permissions' from origin 'http://n.n.n.n:n' has been blocked by cors policy: no 'access-control-allow-origin' header is present on the requested resource. if an opaque response serves your needs, set|http://127.0.0.1:15174/",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Access to fetch at 'http://127.0.0.1:18788/api/permissions' from origin 'http://127.0.0.1:15174' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. If an opaque response serves your needs, set the request's mode to 'no-cors' to fetch the resource with CORS disabled.",
+      "onde": "http://127.0.0.1:15174/",
+      "primeiro": 1794289157951,
+      "ultimo": 1794289157951,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|failed to load resource: net::err_failed|http://127.0.0.1:18788/api/projects",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Failed to load resource: net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/projects",
+      "primeiro": 1794289157905,
+      "ultimo": 1794289157905,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "rede|falha|get http://n.n.n.n:n/api/projects — net::err_failed|http://127.0.0.1:18788/api/projects",
+      "fonte": "rede",
+      "tipo": "falha",
+      "severidade": "grave",
+      "texto": "GET http://127.0.0.1:18788/api/projects — net::ERR_FAILED",
+      "onde": "http://127.0.0.1:18788/api/projects",
+      "primeiro": 1794289157904,
+      "ultimo": 1794289157904,
+      "ocorrencias": 1
+    },
+    {
+      "chave": "navegador|erro|access to fetch at 'http://n.n.n.n:n/api/projects' from origin 'http://n.n.n.n:n' has been blocked by cors policy: no 'access-control-allow-origin' header is present on the requested resource. if an opaque response serves your needs, set th|http://127.0.0.1:15174/",
+      "fonte": "navegador",
+      "tipo": "erro",
+      "severidade": "grave",
+      "texto": "Access to fetch at 'http://127.0.0.1:18788/api/projects' from origin 'http://127.0.0.1:15174' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource. If an opaque response serves your needs, set the request's mode to 'no-cors' to fetch the resource with CORS disabled.",
+      "onde": "http://127.0.0.1:15174/",
+      "primeiro": 1794289157890,
+      "ultimo": 1794289157890,
+      "ocorrencias": 1
+    }
+  ]
+}

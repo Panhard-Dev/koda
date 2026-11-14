@@ -2531,7 +2531,7 @@ export function desenhar(linguagem: string, bruto: string): ReactNode {
     return <NaoEntendi motivo="o conteúdo não é um JSON válido" bruto={bruto} />
   }
 
-  const daCerca = linguagem.replace(/^koda-/, '').toLowerCase()
+  const daCerca = linguagem.toLowerCase().replace(/^koda-/, '')
   const declarado = texto(dados.tipo ?? dados.type).toLowerCase()
 
   // **A cerca genérica não diz o desenho — os dados dizem.**
@@ -2921,7 +2921,20 @@ export const LINGUAGENS = [
 ] as const
 
 export function ehBlocoVisual(linguagem: string): boolean {
-  return (LINGUAGENS as readonly string[]).includes(linguagem)
+  // O modelo escreve `KODA-PLANO` em maiúsculas às vezes; a cerca não diferencia caixa
+  // para o cartão existir do mesmo jeito.
+  return (LINGUAGENS as readonly string[]).includes(linguagem.toLowerCase())
+}
+
+/**
+ * O cartão do plano vindo da ferramenta `mostrar_plano`.
+ *
+ * O modelo não escreve cerca nenhuma: ele manda os dados como argumentos, e o cartão
+ * nasce aqui — o mesmo desenho do bloco ```koda-plano```, com os botões já ligados ao
+ * `plan_id` que o backend injetou.
+ */
+export function CartaoDePlano({ dados }: { dados: Record<string, unknown> }) {
+  return <>{desenhar('koda-plano', JSON.stringify(dados))}</>
 }
 
 export default desenhar

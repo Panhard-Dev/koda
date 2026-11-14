@@ -130,18 +130,21 @@ export function LoginScreen({
       </div>
 
       <div className="flex min-h-0 flex-1 items-center justify-center px-6 pb-16">
-        <div className="w-full max-w-[380px] msg-in">
-          <KodaLogo className="mx-auto h-12 w-auto" />
+        <div className="w-full max-w-[380px]">
+          <div className="login-coroa">
+            <KodaLogo className="relative h-12 w-auto" />
+          </div>
 
-          <h1 className="mt-6 text-center text-[26px] leading-tight font-semibold tracking-tight text-koda-fg">
+          <h1 className="login-titulo mt-6 text-center text-[26px] leading-tight font-semibold tracking-tight text-koda-fg">
             {modo === 'entrar' ? 'Entre na sua conta' : 'Crie sua conta'}
           </h1>
-          <p className="mx-auto mt-2 max-w-[300px] text-center text-[13.5px] leading-5 text-koda-fg/50">
+          <p className="login-texto mx-auto mt-2 max-w-[300px] text-center text-[13.5px] leading-5 text-koda-fg/50">
             {modo === 'entrar'
               ? 'O que você conversou fica nesta máquina. A conta é o que identifica você no Koda.'
               : 'Uma conta só sua. As conversas continuam salvas aqui, no seu computador.'}
           </p>
 
+          <div className="login-painel">
           <div className="mt-7 flex rounded-xl bg-koda-fg/6 p-1">
             {(
               [
@@ -270,6 +273,7 @@ export function LoginScreen({
               )}
             </button>
           </form>
+          </div>
         </div>
       </div>
     </div>

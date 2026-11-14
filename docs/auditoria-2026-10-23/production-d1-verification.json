@@ -1,0 +1,11 @@
+├ Checking if file needs uploading
+│
+├ 🌀 Uploading 3bb62bc0-1242-4ea0-9d8f-1cc0205c5f41.8685c2d2d514e1c0.sql
+│ 🌀 Uploading complete.
+│
+
+{
+  "error": {
+    "text": "not authorized: SQLITE_AUTH"
+  }
+}

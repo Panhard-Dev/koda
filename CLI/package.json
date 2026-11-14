@@ -1,0 +1,20 @@
+{
+  "name": "koda-cli",
+  "version": "0.1.0",
+  "description": "CLI preta do Koda",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": {
+    "koda": "bin/koda.js",
+    "kd": "bin/koda.js"
+  },
+  "files": [
+    "bin",
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

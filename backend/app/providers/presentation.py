@@ -86,13 +86,16 @@ BLOCOS_VISUAIS = (
     '`mapa-radial` — a constelação, para mostrar um time ou sistema em volta de um centro: '
     '{"titulo":"...","centro":"...","centro_sub":"...","nos":[{"nome":"Liz",'
     '"sub":"o modelo principal"}]} — até 8 nós, nome curto; '
-    '`plano` — a apresentação de um plano para a pessoa aceitar: {"titulo":"...",'
-    '"o_que_e":"...","pra_que":"...","por_que":"...","como":[{"titulo":"...","texto":"..."}],'
-    '"mudancas":[{"arquivo":"src/App.tsx","texto":"..."}],"resultado":"..."}. '
-    "**Regra do plano: tarefa grande que monta um plano para a pessoa aceitar apresenta o plano "
-    "SEMPRE num bloco `plano`**, com as seis partes — `o_que_e`, `pra_que`, `por_que`, `como`, "
-    "`mudancas` e `resultado` — e pergunta se pode começar antes de executar. NADA a menos que "
-    "isso: plano contado de outro jeito, ou com parte faltando, é plano mal entregue. "
+    "**Plano — ferramenta `mostrar_plano`** (a interface inteligente do Koda): quando for "
+    "propor um plano, chame a ferramenta `mostrar_plano` com `titulo`, `o_que_e`, `pra_que`, "
+    "`por_que`, `como` (lista de `{titulo, texto}`), `mudancas` (lista de `{arquivo, texto}`) "
+    "e `resultado`. A ferramenta desenha o cartão bonito na conversa, com os botões Fazer e "
+    "Desistir — é o mesmo em qualquer provedor. "
+    "**Regra do plano: tarefa grande que monta um plano para a pessoa aceitar chama SEMPRE "
+    "`mostrar_plano`**, com as seis partes, e pergunta se pode começar antes de executar. "
+    "NADA a menos que isso: plano contado em prosa, ou com parte faltando, é plano mal "
+    "entregue. Se a ferramenta não estiver no catálogo desta rodada, o fallback é um bloco "
+    "```koda-plano``` com o mesmo JSON puro. "
     "**Regra do quiz: quiz, teste, perguntas de múltipla escolha ou perguntas com resposta "
     "certa vão SEMPRE no bloco `quiz`** (uma pergunta por bloco) — quiz escrito como lista de "
     "texto é quiz quebrado, a pessoa não consegue clicar. "
@@ -169,4 +172,44 @@ UI_GENERATIVA = (
     "strings curtas.\n"
     "Quando o pedido pedir algo fora disso (rodar código, mapa, vídeo), entregue em "
     "**texto e blocos de código normais** explicando, e monte a UI só com o que existe."
+)
+
+INTERFACE_DOCUMENTO = (
+    "**Interface interativa — ferramenta `mostrar_interface`** (o caminho principal, e o "
+    "mesmo em qualquer provedor): quando o pedido é uma **tela que a pessoa usa** — "
+    "contador, calculadora, formulário, painel de configuração, comparação com filtros, "
+    "passo a passo, tabela ou gráfico com dados, lista de tarefas — chame "
+    "`mostrar_interface` com um documento Koda UI. O servidor valida e a interface desenha; "
+    "você manda DADOS, nunca HTML, CSS, SVG ou JavaScript. "
+    "Forma do documento: "
+    '{"schemaVersion":"1.0","documentId":"...","revision":1,'
+    '"state":{"n":0},"actions":{"mais":{"kind":"state.increment","key":"n","amount":1}},'
+    '"root":{"id":"raiz","type":"KodaBox","children":[...]},"fallbackText":"..."}. '
+    "Cada nó é `{id, type, props, children}`. Tipos: KodaBox, KodaRow, KodaColumn, "
+    "KodaGrid, KodaCard, KodaTitle, KodaText, KodaParagraph, KodaCaption, KodaLabel, "
+    "KodaBadge, KodaAlert, KodaCallout, KodaDivider, KodaSpacer, KodaList, KodaLink, "
+    "KodaCodeBlock, KodaImage, KodaTable, KodaMetric, KodaProgress, KodaButton, KodaInput, "
+    "KodaTextarea, KodaCheckbox, KodaRadioGroup, KodaSelect, KodaSlider, "
+    "KodaSegmentedControl, KodaForm, KodaPressable, KodaChart, KodaTabs, KodaSteps, "
+    "KodaAccordion, KodaCarousel, KodaPopover, KodaDatePicker, KodaToggle, KodaSuggestion, "
+    "KodaQuote, KodaDiff, KodaSourceList, KodaVideo, KodaIcon, KodaSvg, KodaDiagram, "
+    "KodaMap, KodaWritingBlock, KodaSandbox, KodaAppBlock, KodaAlgorithm, KodaCitation, "
+    "KodaEntity, KodaCalculator. "
+    "Ações: `state.set` (key, value), `state.toggle` (key), `state.increment` (key, "
+    "amount), `state.calc` (key, expression), `ui.setTab` (key, value), `copy` (text ou "
+    "fromState), `openUrl` (url), `issueNewTurn` (text ou fromState) e `form.submit` "
+    "(mensagem). Todo campo de "
+    "formulário usa `valueBinding` com o nome de uma chave de `state`; todo botão usa "
+    "`actionId` com o nome de uma ação. Para mostrar o valor de uma chave dentro de um "
+    "texto, escreva `{{chave}}` no `texto` de KodaText, KodaTitle ou KodaParagraph — o "
+    "renderer substitui pelo valor vivo, sem chamar o modelo. "
+    "Para dados reais, chame `clima`, `cotacao` ou `buscar_imagens` antes de desenhar e "
+    "use os números/URLs retornados; KodaSvg aceita formas declarativas (linha, círculo, "
+    "retângulo, texto, caminho, polígono) e KodaSandbox/KodaAppBlock rodam HTML/CSS/JS "
+    "isolados num iframe de origem opaca — use só para protótipo, nunca para o app. "
+    "**Regras**: use a ferramenta quando a resposta ganha em ser usada, não só lida; um "
+    "documento por tela, com título curto; não repita em texto o que a tela já mostra; "
+    "não use para pouca coisa (uma lista de dois itens é lista); depois da chamada, no "
+    "máximo uma frase. Se a ferramenta não estiver no catálogo desta rodada, o fallback é "
+    "o bloco ```koda-ui``` descrito abaixo. "
 )

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, ChevronLeft, ChevronRight } from 'lucide-react'
 
 export type MenuOption = {
@@ -60,6 +61,9 @@ export function Menu({
   const [activeIndex, setActiveIndex] = useState(0)
   const [parentIndex, setParentIndex] = useState(0)
   const [level, setLevel] = useState<Level | null>(null)
+  // Posição fixa do painel, medida do gatilho no momento da abertura. Só é usada
+  // quando não há `panelStyle` (o painel ancorado no gatilho via portal).
+  const [posicao, setPosicao] = useState<CSSProperties | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -76,7 +80,8 @@ export function Menu({
     if (!open) return
 
     const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+      const alvo = event.target as Node
+      if (!rootRef.current?.contains(alvo) && !panelRef.current?.contains(alvo)) setOpen(false)
     }
 
     document.addEventListener('pointerdown', onPointerDown)
@@ -95,7 +100,25 @@ export function Menu({
   const openRoot = () => {
     setLevel(null)
     setActiveIndex(indexOfValue(options))
+    setPosicao(posicaoDoPainel())
     setOpen(true)
+  }
+
+  /**
+   * Mede o gatilho e devolve a posição fixa do painel — `direction: 'up'` abre para
+   * cima, `align: 'end'` encosta na borda direita do gatilho. Com `panelStyle`, o
+   * chamador já decide a posição e este cálculo não roda.
+   */
+  const posicaoDoPainel = (): CSSProperties | null => {
+    if (panelStyle) return null
+    const ret = triggerRef.current?.getBoundingClientRect()
+    if (!ret) return null
+    const base: CSSProperties = {
+      left: align === 'end' ? ret.right : ret.left,
+    }
+    return direction === 'up'
+      ? { ...base, bottom: Math.max(0, window.innerHeight - ret.top) + 8 }
+      : { ...base, top: ret.bottom + 8 }
   }
 
   const openSubmenu = (option: MenuOption, itemIndex: number) => {
@@ -168,6 +191,14 @@ export function Menu({
     }
   }
 
+  // O painel vai por portal no corpo do documento. Motivo: a caixa de mensagem é
+  // `z-30` num contexto próprio (`isolate`), e o cabeçalho é `z-20` — sem o portal,
+  // o menu fica preso na pilha do cabeçalho e as últimas conversas do histórico
+  // aparecem **por baixo** da caixa de mensagem. No corpo, o `z-50` vale de verdade.
+  // O `rootRef.current?.contains` do clique-fora continua funcionando: o portal
+  // mantém a árvore React (o `contains` do DOM é que não pegaria, por isso o painel
+  // checa o próprio `panelRef` no `onPointerDown` dele).
+
   return (
     <div ref={rootRef} className={['relative', className].join(' ')}>
       <button
@@ -188,28 +219,25 @@ export function Menu({
         {children}
       </button>
 
-      {open ? (
-        <div
-          ref={panelRef}
-          id={menuId}
-          role="menu"
-          tabIndex={-1}
-          onKeyDown={handleKeyDown}
-          style={panelStyle}
-          className={[
-            'z-50 max-h-[70vh] min-w-56 overflow-y-auto rounded-2xl bg-koda-surface p-1.5',
-            'ring-1 ring-koda-fg/10 shadow-[0_24px_48px_-20px_var(--koda-shadow)]',
-            'focus:outline-none menu-in',
-            panelStyle
-              ? 'fixed'
-              : [
-                  'absolute',
-                  direction === 'up' ? 'bottom-full mb-2' : 'top-full mt-2',
-                  align === 'end' ? 'right-0' : 'left-0',
-                ].join(' '),
-            panelClassName,
-          ].join(' ')}
-        >
+      {open
+        ? createPortal(
+            <div
+              ref={panelRef}
+              id={menuId}
+              role="menu"
+              tabIndex={-1}
+              onKeyDown={handleKeyDown}
+              style={panelStyle ?? posicao ?? undefined}
+              className={[
+                'z-50 max-h-[70vh] min-w-56 overflow-y-auto rounded-2xl bg-koda-surface p-1.5',
+                'ring-1 ring-koda-fg/10 shadow-[0_24px_48px_-20px_var(--koda-shadow)]',
+                'focus:outline-none menu-in',
+                // No portal, tudo é `fixed`: ou o chamador deu a posição (`panelStyle`),
+                // ou medimos o gatilho na abertura (`posicao`).
+                'fixed',
+                panelClassName,
+              ].join(' ')}
+            >
           {level ? (
             <button
               type="button"
@@ -279,8 +307,10 @@ export function Menu({
               </button>
             )
           })}
-        </div>
-      ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   )
 }

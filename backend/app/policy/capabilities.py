@@ -2,6 +2,7 @@
 READ_ONLY_TOOLS = frozenset({
     "read_file", "read_attachment", "list_dir", "search_files", "search_codebase",
     "grep", "regex_search", "web_search", "url_reader", "use_skill", "update_todos",
+    "mostrar_plano", "mostrar_interface", "clima", "cotacao", "buscar_imagens",
 })
 
 

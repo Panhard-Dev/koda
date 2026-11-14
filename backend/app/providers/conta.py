@@ -22,12 +22,14 @@ from __future__ import annotations
 import json
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 
-from .. import koda_headers, oauth_login
+from .. import accio_koda, koda_headers, oauth_login
 from ..config import Settings
 from ..contracts.turn import StepResult, ToolCall
 from .base import ChatOptions, ChatTurn, Piece, ProviderError, TransientProviderError
@@ -45,6 +47,8 @@ MINIMAX_URLS = {
     "minimax-code-global": "https://agent.minimax.io/mavis/api/v1/llm/v1/messages",
 }
 GROK_CLI_URL = "https://cli-chat-proxy.grok.com/v1/chat/completions"
+#: Versão que o proxy do Grok CLI exige no `x-grok-client-version` (mínimo 1.0.13).
+GROK_CLI_VERSAO = "1.0.13"
 NOUS_URL = "https://inference-api.nousresearch.com/v1/chat/completions"
 CLINE_URL = "https://api.cline.bot/api/v1/chat/completions"
 KILO_URL = "https://api.kilo.ai/api/gateway/chat/completions"
@@ -68,7 +72,7 @@ def _mimo_chave_direta(conta: dict[str, Any], modelo: str = "") -> bool:
     )
 
 
-CONTAS_COM_RENOVACAO = {"antigravity", "gemini-cli", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl", "grok-cli", "kimi", "kiro", "nous", "xai", *MINIMAX_URLS}
+CONTAS_COM_RENOVACAO = {"antigravity", "accio", "gemini-cli", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl", "grok-cli", "kimi", "kiro", "nous", "xai", *MINIMAX_URLS}
 
 
 def dono(modelo: str) -> tuple[str, str] | None:
@@ -130,6 +134,74 @@ def aceita_pensar(provedor: str, modelo: str) -> bool:
     return False
 
 
+#: Provedores OpenAI-compatíveis que entendem `reasoning_effort` no corpo. Fora daqui o
+#: campo não vai: um upstream que não conhece o parâmetro responde 400 e derruba a conversa
+#: inteira — o rascunho não vale perder a resposta. Quem entra é gateway que repassa o corpo
+#: ao modelo de origem (Cline, CodeBuddy, iFlow, Kilo, Kimchi, Nous, Kimi, GLM, Grok CLI e o
+#: MiMo direto) ou provedor que documenta o campo. O xAI fica de fora porque tem regra
+#: própria de níveis em `campo_de_pensamento`.
+COMPATIVEIS_COM_ESFORCO = frozenset({
+    "xai", "kimi", "glm", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl",
+    "iflow", "kilocode", "kimchi", "nous", "grok-cli", "xiaomi-mimo",
+    # O magpie é o gateway local que assina os protocolos fechados; ele já recebia
+    # `reasoning_effort` no caminho de texto, e o de agente ficava sem.
+    "magpie",
+})
+
+
+def _esforco_para_compativel(nivel: str) -> str:
+    """O nível da interface no vocabulário do `reasoning_effort` dos gateways.
+
+    `xhigh`/`max` não existem na API da OpenAI e `minimal` é raro fora dela; o gateway que
+    recusar mesmo assim é protegido pelo retry de `_linhas_com_pensamento`.
+    """
+    if nivel in {"xhigh", "max"}:
+        return "high"
+    if nivel == "minimal":
+        return "low"
+    if nivel == "auto":
+        return "medium"
+    return nivel
+
+
+def campo_de_pensamento(
+    provedor: str, modelo: str, reasoning: bool, effort: str | None
+) -> dict[str, Any]:
+    """O campo que **pede** raciocínio ao provedor; vazio quando não há como pedir.
+
+    O botão Reasoning desligado não manda nada. Ligado, o esforço do seletor vira o nível —
+    `auto` usa `medium`, como os caminhos nativos já faziam. Provedor fora da tabela fica
+    sem campo, pelo mesmo motivo de `aceita_pensar`: parâmetro desconhecido é 400.
+    """
+    if not reasoning:
+        return {}
+    nivel = str(effort or "medium")
+    if provedor in {"openai", "muse"}:
+        esforco = OPENAI_ESFORCO.get(nivel, "medium")
+        return {"reasoning": {"effort": esforco, "summary": "auto"}} if esforco else {}
+    if provedor == "xai":
+        # O xAI só conhece low/high, e só nos modelos que raciocinam por parâmetro.
+        if not modelo.lower().startswith(("grok-4", "grok-3-mini")):
+            return {}
+        return {"reasoning_effort": "low" if nivel in {"minimal", "low"} else "high"}
+    if provedor in COMPATIVEIS_COM_ESFORCO:
+        return {"reasoning_effort": _esforco_para_compativel(nivel)}
+    return {}
+
+
+def _recusou_pensamento(detalhe: str) -> bool:
+    """O provedor recusou o pedido por causa do campo de raciocínio?
+
+    O texto muda por gateway; o que aparece é o nome do campo ou «parâmetro inválido». Só
+    serve para o retry sem o campo — nunca para esconder um erro de verdade.
+    """
+    baixo = detalhe.lower()
+    return any(marca in baixo for marca in (
+        "reasoning_effort", "reasoning effort", "reasoning", "thinking",
+        "unsupported parameter", "unknown parameter", "invalid parameter",
+    ))
+
+
 class ContaProvider:
     """Um provedor que responde pela conta logada — OpenAI ou Anthropic."""
 
@@ -142,6 +214,27 @@ class ContaProvider:
         self.settings = settings
         self.provedor = provedor
         self._sessao_minimax = str(uuid.uuid4())
+
+    def _api_config(self, conta: dict[str, Any]) -> tuple[dict, dict[str, str]]:
+        from .. import provedores_api
+        item = provedores_api.POR_ID.get(self.provedor)
+        if not item or not item['disponivel']:
+            raise ProviderError('protocolo de API ainda não implementado')
+        if self.provedor == 'api-azure':
+            from urllib.parse import quote
+            specific = conta.get('specific') or {}
+            endpoint = str(specific.get('endpoint') or '').rstrip('/')
+            deployment = quote(str(specific.get('deployment') or ''), safe='')
+            versao = quote(str(specific.get('versao') or '2024-10-01-preview'), safe='')
+            if not endpoint or not deployment:
+                raise ProviderError('Configure o endpoint e o deployment do Azure')
+            item = {**item, 'url': f'{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={versao}'}
+        if self.provedor == 'api-vertex-partner':
+            project = str((conta.get('specific') or {}).get('project_id') or '')
+            if not project:
+                raise ProviderError('Configure o projeto Google Cloud')
+            item = {**item, 'url': f'https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/endpoints/openapi/chat/completions'}
+        return item, provedores_api.cabecalhos(item, str(conta['access']))
 
     # ---------------------------------------------------------------- contas
 
@@ -157,6 +250,18 @@ class ContaProvider:
                     "magpie-windows-amd64.exe na Área de Trabalho."
                 )
             return {"access": "", "conta": "gateway local"}
+        if self.provedor == "gateway":
+            from .. import provedores
+
+            if not provedores.garantir_gateway():
+                raise ProviderError("o gateway local (9router) não está no ar")
+            return {"access": "", "conta": "gateway local"}
+        if self.provedor.startswith("custom-"):
+            dado = oauth_login.guardado(self.settings, self.provedor)
+            if not dado or not dado.get("access"):
+                raise ProviderError(f"nenhuma conta conectada em {self.provedor}")
+            self._ultima_conta = dado
+            return dado
         dado = (oauth_login.garantir(self.settings, self.provedor) if self.provedor in CONTAS_COM_RENOVACAO
                 else oauth_login.guardado(self.settings, self.provedor))
         if not dado or not dado.get("access"):
@@ -164,7 +269,38 @@ class ContaProvider:
                 f"nenhuma conta conectada em {self.provedor} — entre em Ajustes › "
                 "Modelos e Provedores para usar este modelo."
             )
+        if self.provedor.startswith('api-'):
+            self._ultima_conta = dado
         return dado
+
+    def tentativas_contas(self) -> int:
+        if not self.provedor.startswith(('api-', 'custom-')):
+            return 1
+        return max(1, len(oauth_login.contas(self.settings, self.provedor)))
+
+    async def rotate(self) -> bool:
+        if not self.provedor.startswith(('api-', 'custom-')):
+            return False
+        ultima = getattr(self, '_ultima_conta', None)
+        contas = oauth_login.contas(self.settings, self.provedor)
+        if not ultima or len(contas) < 2:
+            return False
+        atual = next((c for c in contas if c['id'] == ultima['id']), None)
+        if atual and not atual.get('esgotadaAte'):
+            self._marcar_esgotada(atual, (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(), 'falha temporária')
+        agora = datetime.now(timezone.utc)
+        for conta in oauth_login.contas(self.settings, self.provedor):
+            if conta['id'] == ultima['id']:
+                continue
+            prazo = conta.get('esgotadaAte')
+            if not prazo:
+                return True
+            try:
+                if datetime.fromisoformat(prazo) <= agora:
+                    return True
+            except (ValueError, TypeError):
+                return True
+        return False
 
     def _marcar_esgotada(self, conta: dict[str, Any], quando: str, motivo: str) -> None:
         oauth_login._marcar(  # noqa: SLF001 — é o único que grava a marca
@@ -182,6 +318,29 @@ class ContaProvider:
         conta = (await asyncio.to_thread(self._conta) if self.provedor in CONTAS_COM_RENOVACAO
                  else self._conta())
 
+        if self.provedor in {"api-bedrock", "api-bedrock-xai"}:
+            from ..bedrock_api import executar
+            result = await executar(conta, modelo, [{'role': t.role, 'content': t.text} for t in turns], [], self.provedor.endswith('xai'))
+            if result.text: yield Piece(text=result.text)
+            return
+        if self.provedor == "api-commandcode":
+            from ..commandcode_api import fluxo
+            messages = [{'role': turno.role, 'content': turno.text} for turno in turns]
+            async for result in fluxo(conta['access'], modelo, messages, []):
+                if isinstance(result, Piece): yield result
+            return
+        if self.provedor.startswith("api-"):
+            item, headers = self._api_config(conta)
+            if item['formato'] in {'claude', 'openai-responses'}:
+                messages = [{'role': turno.role, 'content': turno.text} for turno in turns]
+                fluxo = (self._step_streaming_anthropic(conta, modelo, messages, [], item['url'], headers, item['nome'], reasoning=False) if item['formato'] == 'claude' else self._step_streaming_responses(conta, modelo, messages, [], item['url'], headers, item['nome'], reasoning=False))
+                async for result in fluxo:
+                    if isinstance(result, Piece):
+                        yield result
+            else:
+                async for result in self._compativel_stream(conta, modelo, turns, item['url'], headers, options=options):
+                    yield result
+            return
         if self.provedor == "anthropic":
             async for pedaco in self._anthropic_stream(conta, modelo, turns, options):
                 yield pedaco
@@ -194,6 +353,35 @@ class ContaProvider:
             async for pedaco in self._magpie_stream(modelo, turns, options):
                 yield pedaco
             return
+        if self.provedor == "gateway":
+            async for pedaco in self._magpie_stream(modelo, turns, options):
+                yield pedaco
+            return
+        if self.provedor.startswith("custom-"):
+            if ((conta.get("specific") or {}).get("formato")) == "responses":
+                messages = [{'role': turno.role, 'content': turno.text} for turno in turns]
+                base = str((conta.get('specific') or {}).get('base') or '').rstrip('/')
+                async for result in self._step_streaming_responses(conta, modelo, messages, [], f"{base}/responses", {"authorization": f"Bearer {conta['access']}"}, "API custom", reasoning=False):
+                    if isinstance(result, Piece):
+                        yield result
+                return
+            if ((conta.get("specific") or {}).get("formato")) == "anthropic":
+                async for pedaco in self._anthropic_stream(conta, modelo, turns, options):
+                    yield pedaco
+            else:
+                async for pedaco in self._compativel_stream(
+                    conta, modelo, turns,
+                    f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/chat/completions",
+                    {"authorization": f"Bearer {conta['access']}",
+                     "content-type": "application/json"},
+                    options=options,
+                ):
+                    yield pedaco
+            return
+        if self.provedor == "accio":
+            async for pedaco in self._accio_stream(conta, modelo, turns, options):
+                yield pedaco
+            return
         if self.provedor == "xai":
             async for pedaco in self._xai_stream(conta, modelo, turns, options):
                 yield pedaco
@@ -204,44 +392,57 @@ class ContaProvider:
             return
         if self.provedor == "kimi":
             async for pedaco in self._compativel_stream(
-                conta, modelo, turns, "https://api.kimi.com/coding/v1/chat/completions", self._kimi_cabecalhos(conta)
+                conta, modelo, turns, "https://api.kimi.com/coding/v1/chat/completions",
+                self._kimi_cabecalhos(conta), options=options,
             ):
                 yield pedaco
             return
         if self.provedor == "grok-cli":
             async for pedaco in self._compativel_stream(
-                conta, modelo, turns, GROK_CLI_URL, self._grok_cabecalhos(conta, modelo)
+                conta, modelo, turns, GROK_CLI_URL, grok_cabecalhos(conta, modelo),
+                options=options,
             ):
                 yield pedaco
             return
         if self.provedor == "nous":
             async for pedaco in self._compativel_stream(
-                conta, modelo, turns, NOUS_URL, self._nous_cabecalhos(conta)
+                conta, modelo, turns, NOUS_URL, self._nous_cabecalhos(conta),
+                options=options,
             ):
                 yield pedaco
             return
         if self.provedor in {"cline", "clinepass"}:
-            async for pedaco in self._compativel_stream(conta, modelo, turns, CLINE_URL, koda_headers.cline(conta)):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, CLINE_URL, koda_headers.cline(conta), options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "kilocode":
-            async for pedaco in self._compativel_stream(conta, modelo, turns, KILO_URL, koda_headers.kilo(conta)):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, KILO_URL, koda_headers.kilo(conta), options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "kimchi":
-            async for pedaco in self._compativel_stream(conta, modelo, turns, KIMCHI_URL, koda_headers.kimchi(conta)):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, KIMCHI_URL, koda_headers.kimchi(conta), options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "glm":
-            async for pedaco in self._compativel_stream(conta, modelo, turns, GLM_URL, koda_headers.glm(conta)):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, GLM_URL, koda_headers.glm(conta), options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "iflow":
-            async for pedaco in self._compativel_stream(conta, modelo, turns, IFLOW_URL, koda_headers.iflow(conta)):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, IFLOW_URL, koda_headers.iflow(conta), options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "muse":
-            async for pedaco in self._muse_stream(conta, modelo, turns):
+            async for pedaco in self._muse_stream(conta, modelo, turns, options=options):
                 yield pedaco
             return
         if self.provedor in CODEBUDDY_URLS:
@@ -251,6 +452,7 @@ class ContaProvider:
             async for pedaco in self._compativel_stream(
                 conta, modelo, turns, CODEBUDDY_URLS[self.provedor],
                 koda_headers.codebuddy(conta, self.provedor == "codebuddy-intl"), mensagens,
+                options=options,
             ):
                 yield pedaco
             return
@@ -259,7 +461,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = qoder_koda.linhas(self.provedor, conta, modelo, mensagens, [])
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "kiro":
@@ -267,7 +471,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = kiro_koda.linhas(conta, modelo, mensagens, [], self._marcar_esgotada)
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "windsurf":
@@ -275,7 +481,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = windsurf_koda.linhas(conta, modelo, mensagens)
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "zed":
@@ -283,7 +491,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = zed_koda.linhas(conta, modelo, mensagens, [])
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor in {"antigravity", "gemini-cli"}:
@@ -291,7 +501,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = google_conta_koda.linhas(self.provedor, conta, modelo, mensagens, [], self._marcar_esgotada)
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "trae":
@@ -299,7 +511,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = trae_koda.linhas(conta, modelo, mensagens)
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "gitlab":
@@ -307,7 +521,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = gitlab_koda.linhas(conta, mensagens, [])
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "cursor":
@@ -315,7 +531,9 @@ class ContaProvider:
 
             mensagens = _turnos_completos(turns)
             eventos = cursor_koda.linhas(conta, modelo, mensagens)
-            async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+            async for pedaco in self._compativel_stream(
+                conta, modelo, turns, "", {}, mensagens, eventos, options=options
+            ):
                 yield pedaco
             return
         if self.provedor == "xiaomi-mimo":
@@ -324,15 +542,20 @@ class ContaProvider:
             if mimo_conta_koda.usa_conta(conta, modelo):
                 mensagens = _turnos_completos(turns)
                 eventos = mimo_conta_koda.linhas(conta, modelo, mensagens, [])
-                async for pedaco in self._compativel_stream(conta, modelo, turns, "", {}, mensagens, eventos):
+                async for pedaco in self._compativel_stream(
+                    conta, modelo, turns, "", {}, mensagens, eventos, options=options
+                ):
                     yield pedaco
                 return
             if _mimo_chave_direta(conta, modelo):
-                async for pedaco in self._compativel_stream(conta, modelo, turns, MIMO_API_URL, koda_headers.mimo_api(conta)):
+                async for pedaco in self._compativel_stream(
+                    conta, modelo, turns, MIMO_API_URL, koda_headers.mimo_api(conta),
+                    options=options,
+                ):
                     yield pedaco
                 return
         if self.provedor in MINIMAX_URLS:
-            async for pedaco in self._minimax_stream(conta, modelo, turns):
+            async for pedaco in self._minimax_stream(conta, modelo, turns, options=options):
                 yield pedaco
             return
         raise ProviderError(f"o Koda não possui um adaptador de conversa para {self.provedor}")
@@ -362,12 +585,14 @@ class ContaProvider:
             corpo["system"] = sistema
         _talvez_pensar(corpo, modelo, options)
 
+        custom = self.provedor.startswith("custom-")
+        url = f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/messages" if custom else ANTHROPIC_URL
         async for pedaco in self._sse(
-            ANTHROPIC_URL,
+            url,
             {
                 "authorization": f"Bearer {conta['access']}",
                 "anthropic-version": "2023-06-01",
-                "anthropic-beta": "oauth-2025-04-20",
+                **({"x-api-key": conta['access']} if custom else {"anthropic-beta": "oauth-2025-04-20"}),
                 "content-type": "application/json",
                 "accept": "text/event-stream",
             },
@@ -428,6 +653,10 @@ class ContaProvider:
             tipo = evento.get("type")
             if tipo == "response.output_text.delta" and evento.get("delta"):
                 yield Piece(text=str(evento["delta"]))
+            elif tipo in (
+                "response.reasoning_summary_text.delta", "response.reasoning_text.delta"
+            ) and evento.get("delta"):
+                yield Piece(text=str(evento["delta"]), reasoning=True)
             elif tipo in ("response.completed", "response.failed"):
                 return
 
@@ -520,7 +749,7 @@ class ContaProvider:
                 **koda_headers.minimax(self._sessao_minimax)}
 
     async def _minimax_stream(
-        self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn]
+        self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn], options: ChatOptions
     ) -> AsyncIterator[Piece]:
         corpo: dict[str, Any] = {
             "model": modelo, "max_tokens": MAX_TOKENS,
@@ -529,7 +758,11 @@ class ContaProvider:
         sistema = self._sistema(turns)
         if sistema:
             corpo["system"] = sistema
-        async for linha in self._sse(MINIMAX_URLS[self.provedor], self._minimax_cabecalhos(conta), corpo, conta):
+        _talvez_pensar(corpo, modelo, options, provedor="minimax")
+        pedido = {"thinking": corpo["thinking"]} if "thinking" in corpo else {}
+        async for linha in self._linhas_com_pensamento(
+            MINIMAX_URLS[self.provedor], self._minimax_cabecalhos(conta), corpo, conta, pedido
+        ):
             if not linha.startswith("data:"):
                 continue
             try:
@@ -610,7 +843,7 @@ class ContaProvider:
     async def _compativel_stream(
         self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn],
         url: str, cabecalhos: dict[str, str], mensagens_preparadas: list[dict[str, Any]] | None = None,
-        eventos: AsyncIterator[str] | None = None,
+        eventos: AsyncIterator[str] | None = None, options: ChatOptions | None = None,
     ) -> AsyncIterator[Piece]:
         if mensagens_preparadas is not None:
             mensagens = mensagens_preparadas
@@ -619,8 +852,18 @@ class ContaProvider:
             sistema = self._sistema(turns)
             if sistema:
                 mensagens.insert(0, {"role": "system", "content": sistema})
-        corpo = {"model": modelo, "messages": mensagens, "stream": True}
-        async for linha in eventos if eventos is not None else self._sse(url, cabecalhos, corpo, conta):
+        corpo: dict[str, Any] = {"model": modelo, "messages": mensagens, "stream": True}
+        pedido = campo_de_pensamento(
+            self.provedor, modelo, bool(options is not None and options.reasoning),
+            options.effort if options is not None else None,
+        )
+        corpo.update(pedido)
+        fonte = (
+            eventos
+            if eventos is not None
+            else self._linhas_com_pensamento(url, cabecalhos, corpo, conta, pedido)
+        )
+        async for linha in fonte:
             if not linha.startswith("data:"):
                 continue
             carga = linha[5:].strip()
@@ -665,14 +908,20 @@ class ContaProvider:
     def _nous_cabecalhos(self, conta: dict[str, Any]) -> dict[str, str]:
         return {"authorization": f"Bearer {koda_headers.token_nous(conta)}", "content-type": "application/json"}
 
-    async def _muse_stream(self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn]) -> AsyncIterator[Piece]:
+    async def _muse_stream(
+        self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn], options: ChatOptions
+    ) -> AsyncIterator[Piece]:
         mensagens = [{"role": turno.role, "content": turno.text} for turno in turns]
         corpo: dict[str, Any] = {"model": modelo, "input": _entrada_muse(mensagens), "stream": True, "store": False}
         sistema = _sistema_de(mensagens)
         if sistema:
             corpo["instructions"] = sistema
+        pedido = campo_de_pensamento("muse", modelo, options.reasoning, options.effort)
+        corpo.update(pedido)
         terminou = False
-        async for linha in self._sse(MUSE_URL, koda_headers.muse(conta), corpo, conta):
+        async for linha in self._linhas_com_pensamento(
+            MUSE_URL, koda_headers.muse(conta), corpo, conta, pedido
+        ):
             if not linha.startswith("data:"):
                 continue
             carga = linha[5:].strip()
@@ -716,19 +965,13 @@ class ContaProvider:
             resposta = await cliente.post(MUSE_URL, headers=koda_headers.muse(conta), json=corpo)
         return _resultado_muse(resposta)
 
-    def _grok_cabecalhos(self, conta: dict[str, Any], modelo: str) -> dict[str, str]:
-        return {
-            "authorization": f"Bearer {conta['access']}", "content-type": "application/json",
-            "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": modelo,
-            "user-agent": "grok-cli/0.2.1",
-        }
 
     async def _grok_step(
         self, conta: dict[str, Any], modelo: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> StepResult:
         """Remonta texto e chamadas de ferramenta a partir do stream do Grok CLI."""
         return await self._streaming_openai_step(
-            conta, modelo, messages, tools, GROK_CLI_URL, self._grok_cabecalhos(conta, modelo), "Grok"
+            conta, modelo, messages, tools, GROK_CLI_URL, grok_cabecalhos(conta, modelo), "Grok"
         )
 
     async def _streaming_openai_step(
@@ -736,72 +979,18 @@ class ContaProvider:
         url: str, cabecalhos: dict[str, str], nome: str,
         eventos: AsyncIterator[str] | None = None,
     ) -> StepResult:
-        """Reconstrói as chamadas e o texto enviados em fragmentos SSE."""
-        corpo: dict[str, Any] = {"model": modelo, "messages": messages, "stream": True}
-        if tools:
-            corpo["tools"] = tools
-        texto: list[str] = []
-        raciocinio: list[str] = []
-        parciais: dict[int, dict[str, Any]] = {}
-        uso: dict[str, Any] = {}
-        motivo = ""
-        terminou = False
-        async for linha in eventos if eventos is not None else self._sse(url, cabecalhos, corpo, conta):
-            if not linha.startswith("data:"):
-                continue
-            carga = linha[5:].strip()
-            if carga == "[DONE]":
-                terminou = True
-                break
-            try:
-                evento = json.loads(carga)
-            except ValueError:
-                continue
-            if evento.get("error"):
-                raise ProviderError(f"{nome} interrompeu a resposta: {str(evento['error'])[:300]}")
-            if isinstance(evento.get("usage"), dict):
-                uso = evento["usage"]
-            for escolha in evento.get("choices") or []:
-                motivo = str(escolha.get("finish_reason") or motivo)
-                delta = escolha.get("delta") or {}
-                if delta.get("content"):
-                    texto.append(str(delta["content"]))
-                if isinstance(delta.get("reasoning_content"), str):
-                    raciocinio.append(delta["reasoning_content"])
-                for indice, chamada in enumerate(delta.get("tool_calls") or []):
-                    try:
-                        posicao = int(chamada.get("index", indice))
-                    except (ValueError, TypeError):
-                        continue
-                    parcial = parciais.setdefault(posicao, {"id": "", "name": "", "args": "", "extra": {}})
-                    if chamada.get("id"):
-                        parcial["id"] = str(chamada["id"])
-                    parcial["extra"].update({chave: valor for chave, valor in chamada.items()
-                                              if chave not in {"index", "id", "type", "function"}})
-                    funcao = chamada.get("function") or {}
-                    if funcao.get("name"):
-                        parcial["name"] += str(funcao["name"])
-                    if funcao.get("arguments"):
-                        parcial["args"] += str(funcao["arguments"])
-        chamadas: list[ToolCall] = []
-        for indice, parcial in sorted(parciais.items()):
-            bruto = parcial["args"] or "{}"
-            try:
-                argumentos = json.loads(bruto)
-            except (ValueError, TypeError):
-                argumentos = {}
-            chamadas.append(ToolCall(
-                id=parcial["id"] or f"call_{indice}", name=parcial["name"],
-                arguments=argumentos if isinstance(argumentos, dict) else {}, raw_arguments=bruto,
-                extra=parcial["extra"] or None,
-            ))
-        return StepResult(
-            text="".join(texto), calls=chamadas,
-            usage={"prompt_tokens": int(uso.get("prompt_tokens") or 0),
-                   "completion_tokens": int(uso.get("completion_tokens") or 0)},
-            truncado=motivo == "length" or not (terminou or motivo),
-            reasoning_content="".join(raciocinio) if raciocinio else None,
-        )
+        """Reconstrói as chamadas e o texto enviados em fragmentos SSE.
+
+        É o mesmo parser do `step_streaming`, só que sem narrar: quem só quer o passo
+        inteiro (Grok e os adaptadores que já entregam stream) descarta os `Piece`.
+        """
+        resultado = StepResult(text="", calls=[])
+        async for item in self._step_streaming_openai(
+            conta, modelo, messages, tools, url, cabecalhos, nome, eventos=eventos,
+        ):
+            if isinstance(item, StepResult):
+                resultado = item
+        return resultado
 
     def _xai_cabecalhos(self, conta: dict[str, Any]) -> dict[str, str]:
         return {
@@ -820,8 +1009,10 @@ class ContaProvider:
         if sistema:
             mensagens = [{"role": "system", "content": sistema}] + mensagens
         corpo: dict[str, Any] = {"model": modelo, "messages": mensagens, "stream": True}
-        async for linha in self._sse(
-            "https://api.x.ai/v1/chat/completions", self._xai_cabecalhos(conta), corpo, conta
+        pedido = campo_de_pensamento("xai", modelo, options.reasoning, options.effort)
+        corpo.update(pedido)
+        async for linha in self._linhas_com_pensamento(
+            "https://api.x.ai/v1/chat/completions", self._xai_cabecalhos(conta), corpo, conta, pedido
         ):
             if not linha.startswith("data:"):
                 continue
@@ -907,6 +1098,8 @@ class ContaProvider:
                 continue
             for escolha in evento.get("choices") or []:
                 delta = escolha.get("delta") or {}
+                if delta.get("reasoning_content"):
+                    yield Piece(text=str(delta["reasoning_content"]), reasoning=True)
                 if delta.get("content"):
                     yield Piece(text=str(delta["content"]))
 
@@ -936,7 +1129,7 @@ class ContaProvider:
         if sistema:
             corpo["messages"] = [{"role": "system", "content": sistema}] + corpo["messages"]
         if options.reasoning:
-            corpo["reasoning_effort"] = str(options.effort or "medium")
+            corpo["reasoning_effort"] = _esforco_para_compativel(str(options.effort or "medium"))
 
         async for linha in self._sse(f"{MAGPIE_URL}/chat/completions", {}, corpo, {"conta": "magpie"}):
             if not linha.startswith("data:"):
@@ -1046,6 +1239,21 @@ class ContaProvider:
                 if resposta.status_code >= 400:
                     texto = (await resposta.aread()).decode("utf-8", "replace")
                     raise ProviderError(f"o provedor respondeu {resposta.status_code}: {texto[:300]}")
+                # Pedido em stream que volta `application/json` não é stream: é recusa com
+                # HTTP 200 (o iFlow faz isso). Ler o motivo agora evita «sem escolhas».
+                if "text/event-stream" not in resposta.headers.get("content-type", ""):
+                    bruto = (await resposta.aread()).decode("utf-8", "replace")
+                    try:
+                        dados = json.loads(bruto)
+                    except ValueError:
+                        dados = None
+                    motivo = _erro_no_corpo(dados)
+                    if motivo:
+                        raise ProviderError(f"{self.provedor} recusou a conversa: {motivo}")
+                    for linha in bruto.splitlines():
+                        if linha.strip():
+                            yield linha
+                    return
                 async for linha in resposta.aiter_lines():
                     if linha.strip():
                         yield linha
@@ -1059,12 +1267,49 @@ class ContaProvider:
         modelo = self.resolve_model(model)
         conta = (await asyncio.to_thread(self._conta) if self.provedor in CONTAS_COM_RENOVACAO
                  else self._conta())
+        if self.provedor in {"api-bedrock", "api-bedrock-xai"}:
+            from ..bedrock_api import executar
+            return await executar(conta, modelo, messages, tools, self.provedor.endswith('xai'))
+        if self.provedor == "api-commandcode":
+            from ..commandcode_api import fluxo
+            async for result in fluxo(conta['access'], modelo, messages, tools):
+                if isinstance(result, StepResult): return result
+            raise ProviderError('Command Code encerrou sem resultado')
+        if self.provedor.startswith("api-"):
+            item, headers = self._api_config(conta)
+            if item['formato'] in {'claude', 'openai-responses'}:
+                fluxo = (self._step_streaming_anthropic(conta, modelo, messages, tools, item['url'], headers, item['nome'], reasoning=False) if item['formato'] == 'claude' else self._step_streaming_responses(conta, modelo, messages, tools, item['url'], headers, item['nome'], reasoning=False))
+                async for result in fluxo:
+                    if isinstance(result, StepResult):
+                        return result
+                raise ProviderError('o provedor encerrou sem resultado')
+            return await self._compativel_step(modelo, messages, tools, item['url'], headers, item['nome'])
         if self.provedor == "anthropic":
             return await self._anthropic_step(conta, modelo, messages, tools)
         if self.provedor == "openai":
             return await self._openai_step(conta, modelo, messages, tools)
         if self.provedor == "magpie":
             return await self._magpie_step(modelo, messages, tools)
+        if self.provedor == "gateway":
+            return await self._magpie_step(modelo, messages, tools)
+        if self.provedor.startswith("custom-"):
+            if ((conta.get("specific") or {}).get("formato")) == "responses":
+                base = str((conta.get('specific') or {}).get('base') or '').rstrip('/')
+                async for result in self._step_streaming_responses(conta, modelo, messages, tools, f"{base}/responses", {"authorization": f"Bearer {conta['access']}"}, "API custom", reasoning=False):
+                    if isinstance(result, StepResult):
+                        return result
+                raise ProviderError('o provedor encerrou sem resultado')
+            if ((conta.get("specific") or {}).get("formato")) == "anthropic":
+                return await self._anthropic_step(conta, modelo, messages, tools)
+            return await self._compativel_step(
+                modelo, messages, tools,
+                f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/chat/completions",
+                {"authorization": f"Bearer {conta['access']}",
+                 "content-type": "application/json"},
+                "API custom",
+            )
+        if self.provedor == "accio":
+            return await self._accio_step(conta, modelo, messages, tools)
         if self.provedor == "xai":
             return await self._xai_step(conta, modelo, messages, tools)
         if self.provedor == "github":
@@ -1107,7 +1352,7 @@ class ContaProvider:
         if self.provedor == "windsurf":
             from .. import windsurf_koda
 
-            eventos = windsurf_koda.linhas(conta, modelo, messages)
+            eventos = windsurf_koda.linhas(conta, modelo, messages, tools)
             return await self._streaming_openai_step(conta, modelo, messages, tools, "", {}, "Windsurf", eventos)
         if self.provedor == "zed":
             from .. import zed_koda
@@ -1122,7 +1367,7 @@ class ContaProvider:
         if self.provedor == "trae":
             from .. import trae_koda
 
-            eventos = trae_koda.linhas(conta, modelo, messages)
+            eventos = trae_koda.linhas(conta, modelo, messages, tools)
             return await self._streaming_openai_step(conta, modelo, messages, tools, "", {}, "Trae", eventos)
         if self.provedor == "gitlab":
             from .. import gitlab_koda
@@ -1153,6 +1398,853 @@ class ContaProvider:
             return await self._minimax_step(conta, modelo, messages, tools)
         raise ProviderError(f"o Koda não possui um adaptador de conversa para {self.provedor}")
 
+    async def step_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str = "",
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        """O passo do agente **narrando o texto enquanto ele chega**.
+
+        O `step()` devolve o passo inteiro e era ele que o laço usava com ferramentas
+        ligadas — por isso a resposta aparecia de uma vez. Aqui cada delta do provedor vira
+        um `Piece` na hora; o `StepResult` fecha o passo com as chamadas remontadas.
+        Provedor sem caminho de stream cai no `step()` e continua funcionando como antes.
+        """
+        modelo = self.resolve_model(model)
+        conta = (await asyncio.to_thread(self._conta) if self.provedor in CONTAS_COM_RENOVACAO
+                 else self._conta())
+
+        if self.provedor in {"api-bedrock", "api-bedrock-xai"}:
+            from ..bedrock_api import executar
+            result = await executar(conta, modelo, messages, tools, self.provedor.endswith('xai'))
+            if result.text: yield Piece(text=result.text)
+            yield result
+            return
+        if self.provedor == "api-commandcode":
+            from ..commandcode_api import fluxo
+            async for result in fluxo(conta['access'], modelo, messages, tools): yield result
+            return
+        if self.provedor.startswith("api-"):
+            config, headers = self._api_config(conta)
+            if config['formato'] in {'claude', 'openai-responses'}:
+                fluxo = (self._step_streaming_anthropic(conta, modelo, messages, tools, config['url'], headers, config['nome'], reasoning=False) if config['formato'] == 'claude' else self._step_streaming_responses(conta, modelo, messages, tools, config['url'], headers, config['nome'], reasoning=False))
+                async for result in fluxo:
+                    yield result
+            else:
+                async for result in self._step_streaming_openai(conta, modelo, messages, tools, config['url'], headers, config['nome'], reasoning=False):
+                    yield result
+            return
+        if self.provedor == "anthropic":
+            async for item in self._step_streaming_anthropic(
+                conta, modelo, messages, tools, ANTHROPIC_URL,
+                {
+                    "authorization": f"Bearer {conta['access']}",
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "content-type": "application/json",
+                    "accept": "text/event-stream",
+                },
+                "Anthropic", effort=effort, reasoning=reasoning):
+                yield item
+            return
+        if self.provedor == "openai":
+            async for item in self._step_streaming_responses(
+                conta, modelo, messages, tools, f"{CODEX_BASE}/responses",
+                self._cabecalhos_openai(conta), "ChatGPT", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor == "magpie":
+            async for item in self._step_streaming_openai(
+                {"conta": "magpie"}, modelo, messages, tools,
+                f"{MAGPIE_URL}/chat/completions", {}, "magpie", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor == "gateway":
+            async for item in self._step_streaming_openai(
+                {"conta": "gateway"}, modelo, messages, tools,
+                f"{MAGPIE_URL}/chat/completions", {}, "9router",
+                reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor.startswith("custom-"):
+            if ((conta.get("specific") or {}).get("formato")) == "responses":
+                base = str((conta.get('specific') or {}).get('base') or '').rstrip('/')
+                async for result in self._step_streaming_responses(conta, modelo, messages, tools, f"{base}/responses", {"authorization": f"Bearer {conta['access']}"}, "API custom", reasoning=False):
+                    yield result
+                return
+            if ((conta.get("specific") or {}).get("formato")) == "anthropic":
+                async for item in self._step_streaming_anthropic(
+                    conta, modelo, messages, tools,
+                    f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/messages",
+                    {
+                        "authorization": f"Bearer {conta['access']}",
+                        "x-api-key": conta['access'],
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                        "accept": "text/event-stream",
+                    },
+                    "API custom", effort=effort, reasoning=reasoning):
+                    yield item
+            else:
+                async for item in self._step_streaming_openai(
+                    conta, modelo, messages, tools,
+                    f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/chat/completions",
+                    {"authorization": f"Bearer {conta['access']}",
+                     "content-type": "application/json"},
+                    "API custom", reasoning=reasoning, effort=effort):
+                    yield item
+            return
+        if self.provedor == "accio":
+            async for item in self._accio_step_streaming(
+                conta, modelo, messages, tools, reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "xai":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "https://api.x.ai/v1/chat/completions",
+                self._xai_cabecalhos(conta), "xAI", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor == "github":
+            _, cabecalhos = await self._copilot_token(conta)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "https://api.githubcopilot.com/chat/completions",
+                cabecalhos, "Copilot", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor == "kimi":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "https://api.kimi.com/coding/v1/chat/completions",
+                self._kimi_cabecalhos(conta), "Kimi", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor == "nous":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, NOUS_URL, self._nous_cabecalhos(conta), "Nous",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor in {"cline", "clinepass"}:
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, CLINE_URL, koda_headers.cline(conta), "Cline",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "kilocode":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, KILO_URL, koda_headers.kilo(conta), "Kilo",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "kimchi":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, KIMCHI_URL, koda_headers.kimchi(conta), "Kimchi",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "glm":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, GLM_URL, koda_headers.glm(conta), "GLM",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "iflow":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, IFLOW_URL, koda_headers.iflow(conta), "iFlow",
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor in CODEBUDDY_URLS:
+            internacional = self.provedor == "codebuddy-intl"
+            async for item in self._step_streaming_openai(
+                conta, modelo, _mensagens_codebuddy(messages, internacional), tools,
+                CODEBUDDY_URLS[self.provedor], koda_headers.codebuddy(conta, internacional),
+                "CodeBuddy", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor in {"qoder", "qoder-cn"}:
+            from .. import qoder_koda
+
+            eventos = qoder_koda.linhas(self.provedor, conta, modelo, messages, tools)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Qoder", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "kiro":
+            from .. import kiro_koda
+
+            eventos = kiro_koda.linhas(conta, modelo, messages, tools, self._marcar_esgotada)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Kiro", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "windsurf":
+            from .. import windsurf_koda
+
+            eventos = windsurf_koda.linhas(conta, modelo, messages, tools)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Windsurf", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "zed":
+            from .. import zed_koda
+
+            eventos = zed_koda.linhas(conta, modelo, messages, tools)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Zed", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor in {"antigravity", "gemini-cli"}:
+            from .. import google_conta_koda
+
+            eventos = google_conta_koda.linhas(
+                self.provedor, conta, modelo, messages, tools, self._marcar_esgotada
+            )
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Google", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "trae":
+            from .. import trae_koda
+
+            eventos = trae_koda.linhas(conta, modelo, messages, tools)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Trae", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "gitlab":
+            from .. import gitlab_koda
+
+            eventos = gitlab_koda.linhas(conta, messages, tools)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "GitLab", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "cursor":
+            if tools:
+                from .. import cursor_agent_koda
+
+                eventos = cursor_agent_koda.linhas(self.settings, conta, modelo, messages, tools)
+            else:
+                from .. import cursor_koda
+
+                eventos = cursor_koda.linhas(conta, modelo, messages)
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, "", {}, "Cursor", eventos=eventos,
+                reasoning=reasoning, effort=effort,
+            ):
+                yield item
+            return
+        if self.provedor == "xiaomi-mimo":
+            from .. import mimo_conta_koda
+
+            if mimo_conta_koda.usa_conta(conta, modelo):
+                eventos = mimo_conta_koda.linhas(conta, modelo, messages, tools)
+                async for item in self._step_streaming_openai(
+                    conta, modelo, messages, tools, "", {}, "MiMo", eventos=eventos,
+                    reasoning=reasoning, effort=effort,
+                ):
+                    yield item
+                return
+            if _mimo_chave_direta(conta, modelo):
+                async for item in self._step_streaming_openai(
+                    conta, modelo, messages, tools, MIMO_API_URL,
+                    koda_headers.mimo_api(conta), "MiMo", reasoning=reasoning, effort=effort):
+                    yield item
+                return
+        if self.provedor == "grok-cli":
+            async for item in self._step_streaming_openai(
+                conta, modelo, messages, tools, GROK_CLI_URL,
+                grok_cabecalhos(conta, modelo), "Grok", reasoning=reasoning, effort=effort):
+                yield item
+            return
+        if self.provedor in MINIMAX_URLS:
+            async for item in self._step_streaming_anthropic(
+                conta, modelo, messages, tools, MINIMAX_URLS[self.provedor],
+                self._minimax_cabecalhos(conta), "MiniMax", effort=effort, reasoning=reasoning):
+                yield item
+            return
+        # Muse usa o envelope Responses com replay opaco; até ele ter um parser próprio,
+        # entrega o passo inteiro como o `step()` sempre fez.
+        yield await self.step(messages, tools, model)
+
+    # ---------------------------------------------------------------- accio
+
+    async def _accio_eventos(
+        self, estado: dict[str, Any], corpo: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Abre o stream do Accio e traduz o que voltou.
+
+        `estado["conta"]` é atualizado quando o token é renovado no meio do caminho — o
+        mesmo dicionário serve ao retry de resposta vazia, para não renovar duas vezes com
+        o refresh token antigo (o Accio troca o refresh a cada uso).
+        """
+        conta = estado["conta"]
+        renovou = False
+        aquecido = False
+        while True:
+            # Cada tentativa leva um `requestId` novo: o `sg_k` da URL é o md5 dele, e o
+            # gateway trata id repetido como repetição da mesma pergunta.
+            pedido = f"req-{uuid.uuid4().hex[:24]}"
+            corpo["requestId"] = pedido
+            corpo["userRequestId"] = pedido
+            # O token vai no **corpo**, não no cabeçalho: depois de uma renovação é esta
+            # linha que faz a tentativa seguinte valer.
+            corpo["token"] = str(conta.get("access") or "")
+            alvo = accio_koda.url(pedido)
+            cabecalhos = accio_koda.cabecalhos(conta, alvo)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=20.0)) as cliente:
+                async with cliente.stream("POST", alvo, headers=cabecalhos, json=corpo) as resposta:
+                    if resposta.status_code in {401, 402} and not renovou:
+                        renovou = True
+                        await resposta.aread()
+                        nova = await asyncio.to_thread(
+                            oauth_login.renovar_agora, self.settings, self.provedor, conta
+                        )
+                        if nova is None:
+                            raise ProviderError(
+                                "a conta do Accio recusou o token — entre de novo em "
+                                "Ajustes › Modelos e Provedores."
+                            )
+                        estado["conta"] = conta = nova
+                        continue
+                    if resposta.status_code == 555 and not aquecido:
+                        aquecido = True
+                        await resposta.aread()
+                        await accio_koda.aquecer(conta)
+                        continue
+                    if resposta.status_code in {429, 555}:
+                        bruto = (await resposta.aread()).decode("utf-8", "replace")
+                        self._marcar_esgotada(conta, _quando_renova(bruto), "limite de uso atingido")
+                        raise TransientProviderError(
+                            f"a conta {conta.get('conta') or ''} do Accio está sem cota agora"
+                        )
+                    if resposta.status_code >= 400:
+                        bruto = (await resposta.aread()).decode("utf-8", "replace")
+                        raise ProviderError(
+                            f"o Accio respondeu {resposta.status_code}: {bruto[:300]}"
+                        )
+                    if "text/event-stream" not in resposta.headers.get("content-type", ""):
+                        bruto = (await resposta.aread()).decode("utf-8", "replace")
+                        raise ProviderError(f"o Accio recusou a conversa: {bruto[:300]}")
+                    erro = ""
+                    async for evento in accio_koda.ler(resposta):
+                        if evento.get("erro"):
+                            erro = str(evento["erro"])
+                            break
+                        yield evento
+                    if not erro:
+                        return
+                    # O gateway também manda erro **dentro** do SSE, com HTTP 200. O código
+                    # vem no começo da frase (`401: …`); tratá-lo como texto deixaria a conta
+                    # boa parecendo quebrada.
+                    codigo = erro.split(":", 1)[0].strip()
+                    if codigo in {"401", "402"} and not renovou:
+                        renovou = True
+                        nova = await asyncio.to_thread(
+                            oauth_login.renovar_agora, self.settings, self.provedor, conta
+                        )
+                        if nova is None:
+                            raise ProviderError(
+                                "a conta do Accio recusou o token — entre de novo em "
+                                "Ajustes › Modelos e Provedores."
+                            )
+                        estado["conta"] = conta = nova
+                        continue
+                    if codigo in {"429", "555"}:
+                        self._marcar_esgotada(
+                            conta, _quando_renova(""), "limite de uso atingido"
+                        )
+                        raise TransientProviderError(
+                            f"a conta {conta.get('conta') or ''} do Accio está sem cota agora"
+                        )
+                    raise ProviderError(f"o Accio interrompeu a resposta: {erro}")
+
+    async def _accio_com_retry_vazio(
+        self, estado: dict[str, Any], corpo: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """O Accio às vezes fecha o stream sem nada quando o teto de saída é baixo.
+
+        É o mesmo remédio do painel do proxy: repetir uma vez com `maxOutputTokens` maior.
+        Sem isto a conversa morria com «resposta vazia» e a conta parecia quebrada.
+        """
+        vazio = True
+        async for evento in self._accio_eventos(estado, corpo):
+            if evento.get("texto") or evento.get("raciocinio") or evento.get("chamada"):
+                vazio = False
+            yield evento
+        if not vazio or corpo.get("maxOutputTokens"):
+            return
+        novo = f"req-{uuid.uuid4().hex[:24]}"
+        async for evento in self._accio_eventos(
+            estado, {**corpo, "requestId": novo, "userRequestId": novo, "maxOutputTokens": 4096}
+        ):
+            yield evento
+
+    async def _accio_stream(
+        self, conta: dict[str, Any], modelo: str, turns: list[ChatTurn], options: ChatOptions
+    ) -> AsyncIterator[Piece]:
+        mensagens: list[dict[str, Any]] = []
+        for turno in turns:
+            if turno.role == "system":
+                continue
+            conteudo: Any = turno.text
+            if turno.imagens:
+                conteudo = [
+                    {"type": "text", "text": turno.text},
+                    *(
+                        {"type": "image_url", "image_url": {"url": imagem}}
+                        for imagem in turno.imagens
+                    ),
+                ]
+            mensagens.append({"role": turno.role, "content": conteudo})
+        sistema = self._sistema(turns)
+        if sistema:
+            mensagens.insert(0, {"role": "system", "content": sistema})
+        estado = {"conta": conta}
+        corpo = accio_koda.corpo(
+            modelo, mensagens, conta["access"],
+            raciocinio=options.reasoning, esforco=options.effort,
+        )
+        async for evento in self._accio_com_retry_vazio(estado, corpo):
+            if evento.get("texto"):
+                yield Piece(text=str(evento["texto"]))
+            elif evento.get("raciocinio"):
+                yield Piece(text=str(evento["raciocinio"]), reasoning=True)
+            elif isinstance(evento.get("usage"), dict):
+                uso = evento["usage"]
+                yield Piece(text="", usage={
+                    "prompt_tokens": int(uso.get("prompt_tokens") or 0),
+                    "completion_tokens": int(uso.get("completion_tokens") or 0),
+                })
+
+    async def _accio_step_streaming(
+        self,
+        conta: dict[str, Any],
+        modelo: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        estado = {"conta": conta}
+        corpo = accio_koda.corpo(
+            modelo, messages, conta["access"], ferramentas=tools,
+            raciocinio=reasoning, esforco=effort,
+        )
+        texto: list[str] = []
+        raciocinio: list[str] = []
+        chamadas: dict[str, ToolCall] = {}
+        uso: dict[str, Any] = {}
+        terminou = False
+        async for evento in self._accio_com_retry_vazio(estado, corpo):
+            if evento.get("fim"):
+                terminou = True
+            elif evento.get("texto"):
+                texto.append(str(evento["texto"]))
+                yield Piece(text=str(evento["texto"]))
+            elif evento.get("raciocinio"):
+                raciocinio.append(str(evento["raciocinio"]))
+                yield Piece(text=str(evento["raciocinio"]), reasoning=True)
+            elif isinstance(evento.get("usage"), dict):
+                uso = evento["usage"]
+            elif isinstance(evento.get("chamada"), dict):
+                chamada = evento["chamada"]
+                bruto = str(chamada.get("args") or "{}")
+                try:
+                    argumentos = json.loads(bruto)
+                except (ValueError, TypeError):
+                    argumentos = {}
+                ident = str(chamada.get("id") or f"call_{len(chamadas)}")
+                chamadas[ident] = ToolCall(
+                    id=ident, name=str(chamada.get("name") or ""),
+                    arguments=argumentos if isinstance(argumentos, dict) else {},
+                    raw_arguments=bruto,
+                )
+        yield StepResult(
+            text="".join(texto), calls=list(chamadas.values()),
+            usage={
+                "prompt_tokens": int(uso.get("prompt_tokens") or 0),
+                "completion_tokens": int(uso.get("completion_tokens") or 0),
+            },
+            truncado=not terminou,
+            reasoning_content="".join(raciocinio) if raciocinio else None,
+        )
+
+    async def _accio_step(
+        self,
+        conta: dict[str, Any],
+        modelo: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> StepResult:
+        resultado = StepResult()
+        async for item in self._accio_step_streaming(conta, modelo, messages, tools):
+            if isinstance(item, StepResult):
+                resultado = item
+        return resultado
+
+    async def _step_streaming_openai(
+        self,
+        conta: dict[str, Any],
+        modelo: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        url: str,
+        cabecalhos: dict[str, str],
+        nome: str,
+        *,
+        eventos: AsyncIterator[str] | None = None,
+        reasoning: bool = False,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        """Lê um SSE OpenAI-compatible e narra texto, raciocínio e chamadas."""
+        corpo: dict[str, Any] = {"model": modelo, "messages": messages, "stream": True}
+        if tools:
+            corpo["tools"] = tools
+        pedido = campo_de_pensamento(self.provedor, modelo, reasoning, effort)
+        corpo.update(pedido)
+        texto: list[str] = []
+        raciocinio: list[str] = []
+        parciais: dict[int, dict[str, Any]] = {}
+        uso: dict[str, Any] = {}
+        motivo = ""
+        terminou = False
+        fonte = (
+            eventos
+            if eventos is not None
+            else self._linhas_com_pensamento(url, cabecalhos, corpo, conta, pedido)
+        )
+        async for linha in fonte:
+            if not linha.startswith("data:"):
+                continue
+            carga = linha[5:].strip()
+            if carga == "[DONE]":
+                terminou = True
+                break
+            if not carga:
+                continue
+            try:
+                evento = json.loads(carga)
+            except ValueError:
+                continue
+            if evento.get("error"):
+                raise ProviderError(f"{nome} interrompeu a resposta: {str(evento['error'])[:300]}")
+            if isinstance(evento.get("usage"), dict):
+                uso = evento["usage"]
+            for escolha in evento.get("choices") or []:
+                motivo = str(escolha.get("finish_reason") or motivo)
+                delta = escolha.get("delta") or {}
+                if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
+                    raciocinio.append(delta["reasoning_content"])
+                    yield Piece(text=delta["reasoning_content"], reasoning=True)
+                if delta.get("content"):
+                    texto.append(str(delta["content"]))
+                    yield Piece(text=str(delta["content"]))
+                for indice, chamada in enumerate(delta.get("tool_calls") or []):
+                    try:
+                        posicao = int(chamada.get("index", indice))
+                    except (ValueError, TypeError):
+                        continue
+                    parcial = parciais.setdefault(
+                        posicao, {"id": "", "name": "", "args": "", "extra": {}}
+                    )
+                    if chamada.get("id"):
+                        parcial["id"] = str(chamada["id"])
+                    parcial["extra"].update({
+                        chave: valor for chave, valor in chamada.items()
+                        if chave not in {"index", "id", "type", "function"}
+                    })
+                    funcao = chamada.get("function") or {}
+                    if funcao.get("name"):
+                        parcial["name"] += str(funcao["name"])
+                    if funcao.get("arguments"):
+                        parcial["args"] += str(funcao["arguments"])
+        chamadas: list[ToolCall] = []
+        for posicao, parcial in sorted(parciais.items()):
+            bruto = parcial["args"] or "{}"
+            try:
+                argumentos = json.loads(bruto)
+            except (ValueError, TypeError):
+                argumentos = {}
+            chamadas.append(ToolCall(
+                id=parcial["id"] or f"call_{posicao}", name=parcial["name"],
+                arguments=argumentos if isinstance(argumentos, dict) else {},
+                raw_arguments=bruto, extra=parcial["extra"] or None,
+            ))
+        yield StepResult(
+            text="".join(texto), calls=chamadas,
+            usage={
+                "prompt_tokens": int(uso.get("prompt_tokens") or 0),
+                "completion_tokens": int(uso.get("completion_tokens") or 0),
+            },
+            truncado=motivo == "length" or not (terminou or motivo),
+            reasoning_content="".join(raciocinio) if raciocinio else None,
+        )
+
+    async def _linhas_com_pensamento(
+        self,
+        url: str,
+        cabecalhos: dict[str, str],
+        corpo: dict[str, Any],
+        conta: dict[str, Any],
+        pedido: dict[str, Any],
+    ) -> AsyncIterator[str]:
+        """Abre o SSE; se o provedor recusar o campo de raciocínio, repete sem ele.
+
+        O campo só vai para os provedores da tabela, mas a tabela segue a documentação do
+        gateway — e gateway muda. O retry protege a resposta: perder o rascunho é aceitável,
+        perder a conversa por causa dele não é.
+        """
+        try:
+            async for linha in self._sse(url, cabecalhos, corpo, conta):
+                yield linha
+            return
+        except ProviderError as erro:
+            if not pedido or not _recusou_pensamento(str(erro)):
+                raise
+        for chave in pedido:
+            corpo.pop(chave, None)
+        async for linha in self._sse(url, cabecalhos, corpo, conta):
+            yield linha
+
+    async def _step_streaming_anthropic(
+        self,
+        conta: dict[str, Any],
+        modelo: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        url: str,
+        cabecalhos: dict[str, str],
+        nome: str,
+        *,
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        """Lê o SSE da Anthropic Messages (texto, pensamento e `input_json_delta`)."""
+        corpo: dict[str, Any] = {
+            "model": modelo, "max_tokens": MAX_TOKENS,
+            "messages": _mensagens_anthropic(messages), "stream": True,
+        }
+        sistema = _sistema_de(messages)
+        if sistema:
+            corpo["system"] = sistema
+        if tools:
+            corpo["tools"] = [_ferramenta_anthropic(item) for item in tools]
+        _talvez_pensar(
+            corpo, modelo, SimpleNamespace(effort=effort, reasoning=reasoning),
+            provedor=self.provedor,
+        )
+        pedido = {"thinking": corpo["thinking"]} if "thinking" in corpo else {}
+
+        texto: list[str] = []
+        raciocinio: list[str] = []
+        parciais: dict[int, dict[str, Any]] = {}
+        # O MiniMax exige que os blocos de pensamento (com assinatura) voltem no próximo
+        # passo junto da chamada — o `_minimax_step` faz isso por `_koda_minimax_thinking`.
+        blocos_pensamento: list[dict[str, Any]] = []
+        por_indice: dict[int, dict[str, Any]] = {}
+        uso: dict[str, Any] = {}
+        motivo = ""
+        async for linha in self._linhas_com_pensamento(url, cabecalhos, corpo, conta, pedido):
+            if linha.startswith("event:"):
+                continue
+            if linha.startswith("data:"):
+                linha = linha[5:].strip()
+            if not linha:
+                continue
+            try:
+                evento = json.loads(linha)
+            except ValueError:
+                continue
+            tipo = evento.get("type")
+            if tipo == "content_block_start":
+                bloco = evento.get("content_block") or {}
+                indice = int(evento.get("index") or 0)
+                if bloco.get("type") == "tool_use":
+                    parciais[indice] = {
+                        "id": str(bloco.get("id") or ""),
+                        "name": str(bloco.get("name") or ""),
+                        "args": "",
+                    }
+                elif bloco.get("type") in {"thinking", "redacted_thinking"}:
+                    por_indice[indice] = dict(bloco)
+                    blocos_pensamento.append(por_indice[indice])
+            elif tipo == "content_block_delta":
+                delta = evento.get("delta") or {}
+                indice = int(evento.get("index") or 0)
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    texto.append(str(delta["text"]))
+                    yield Piece(text=str(delta["text"]))
+                elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                    raciocinio.append(str(delta["thinking"]))
+                    if indice in por_indice:
+                        por_indice[indice]["thinking"] = (
+                            str(por_indice[indice].get("thinking") or "") + str(delta["thinking"])
+                        )
+                    yield Piece(text=str(delta["thinking"]), reasoning=True)
+                elif delta.get("type") == "signature_delta" and indice in por_indice:
+                    por_indice[indice]["signature"] = str(delta.get("signature") or "")
+                elif delta.get("type") == "input_json_delta" and delta.get("partial_json"):
+                    alvo = parciais.get(indice)
+                    if alvo is not None:
+                        alvo["args"] += str(delta["partial_json"])
+            elif tipo == "message_start":
+                mensagem = evento.get("message") or {}
+                uso.update(mensagem.get("usage") or {})
+            elif tipo == "message_delta":
+                delta = evento.get("delta") or {}
+                motivo = str(delta.get("stop_reason") or motivo)
+                uso.update(evento.get("usage") or {})
+            elif tipo == "message_stop":
+                break
+            elif tipo == "error":
+                erro = evento.get("error") or {}
+                raise ProviderError(f"{nome} interrompeu a resposta: {str(erro)[:300]}")
+        chamadas: list[ToolCall] = []
+        for posicao, parcial in sorted(parciais.items()):
+            bruto = parcial["args"] or "{}"
+            try:
+                argumentos = json.loads(bruto)
+            except (ValueError, TypeError):
+                argumentos = {}
+            chamadas.append(ToolCall(
+                id=parcial["id"] or f"call_{posicao}", name=parcial["name"],
+                arguments=argumentos if isinstance(argumentos, dict) else {},
+                raw_arguments=bruto,
+            ))
+        if chamadas and blocos_pensamento and self.provedor in MINIMAX_URLS:
+            # O próximo passo precisa devolver também as assinaturas opacas do provedor.
+            chamadas[0].extra = {"_koda_minimax_thinking": blocos_pensamento}
+        yield StepResult(
+            text="".join(texto), calls=chamadas,
+            usage={
+                "prompt_tokens": int(uso.get("input_tokens") or 0),
+                "completion_tokens": int(uso.get("output_tokens") or 0),
+            },
+            truncado=motivo == "max_tokens",
+            reasoning_content="".join(raciocinio) if raciocinio else None,
+        )
+
+    async def _step_streaming_responses(
+        self,
+        conta: dict[str, Any],
+        modelo: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        url: str,
+        cabecalhos: dict[str, str],
+        nome: str,
+        *,
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Piece | StepResult]:
+        """Lê o SSE do OpenAI Responses (texto, resumo de raciocínio e function calls)."""
+        corpo: dict[str, Any] = {
+            "model": modelo, "input": _entrada_responses(messages),
+            "stream": True, "store": False,
+        }
+        sistema = _sistema_de(messages)
+        if sistema:
+            corpo["instructions"] = sistema
+        if tools:
+            corpo["tools"] = [_ferramenta_responses(item) for item in tools]
+        if aceita_pensar("openai", modelo):
+            # O nível do seletor vira o esforço; sem ele o padrão segue `medium`.
+            corpo.update(campo_de_pensamento("openai", modelo, reasoning, effort))
+
+        texto: list[str] = []
+        raciocinio: list[str] = []
+        chamadas: dict[str, dict[str, Any]] = {}
+        uso: dict[str, Any] = {}
+        incompleto = False
+        async for linha in self._sse(url, cabecalhos, corpo, conta):
+            if not linha.startswith("data:"):
+                continue
+            carga = linha[5:].strip()
+            if not carga or carga == "[DONE]":
+                continue
+            try:
+                evento = json.loads(carga)
+            except ValueError:
+                continue
+            tipo = evento.get("type")
+            if tipo == "response.output_text.delta" and evento.get("delta"):
+                texto.append(str(evento["delta"]))
+                yield Piece(text=str(evento["delta"]))
+            elif tipo == "response.reasoning_summary_text.delta" and evento.get("delta"):
+                raciocinio.append(str(evento["delta"]))
+                yield Piece(text=str(evento["delta"]), reasoning=True)
+            elif tipo == "response.output_item.added":
+                item = evento.get("item") or {}
+                if item.get("type") == "function_call":
+                    chamadas[str(item.get("id") or "")] = {
+                        "id": str(item.get("call_id") or item.get("id") or ""),
+                        "name": str(item.get("name") or ""),
+                        "args": str(item.get("arguments") or ""),
+                    }
+            elif tipo == "response.function_call_arguments.delta":
+                alvo = chamadas.get(str(evento.get("item_id") or ""))
+                if alvo is not None:
+                    alvo["args"] += str(evento.get("delta") or "")
+            elif tipo == "response.completed":
+                resposta = evento.get("response") or {}
+                uso = resposta.get("usage") or uso
+                break
+            elif tipo in {"response.incomplete", "response.failed"}:
+                resposta = evento.get("response") or {}
+                if tipo == "response.failed":
+                    erro = resposta.get("error") or {}
+                    raise ProviderError(f"{nome} falhou: {erro.get('message') or 'sem detalhe'}")
+                incompleto = True
+                uso = resposta.get("usage") or uso
+        lista: list[ToolCall] = []
+        for item in chamadas.values():
+            bruto = item["args"] or "{}"
+            try:
+                entrada = json.loads(bruto)
+            except (ValueError, TypeError):
+                entrada = {}
+            lista.append(ToolCall(
+                id=item["id"], name=item["name"],
+                arguments=entrada if isinstance(entrada, dict) else {},
+                raw_arguments=bruto,
+            ))
+        yield StepResult(
+            text="".join(texto), calls=lista,
+            usage={
+                "prompt_tokens": int(uso.get("input_tokens") or 0),
+                "completion_tokens": int(uso.get("output_tokens") or 0),
+            },
+            truncado=incompleto,
+            reasoning_content="".join(raciocinio) if raciocinio else None,
+        )
+
     async def _anthropic_step(
         self,
         conta: dict[str, Any],
@@ -1174,11 +2266,11 @@ class ContaProvider:
 
         async with httpx.AsyncClient(timeout=120.0) as cliente:
             resposta = await cliente.post(
-                ANTHROPIC_URL,
+                (f"{str((conta.get('specific') or {}).get('base') or '').rstrip('/')}/messages" if self.provedor.startswith("custom-") else ANTHROPIC_URL),
                 headers={
                     "authorization": f"Bearer {conta['access']}",
                     "anthropic-version": "2023-06-01",
-                    "anthropic-beta": "oauth-2025-04-20",
+                    **({"x-api-key": conta['access']} if self.provedor.startswith("custom-") else {"anthropic-beta": "oauth-2025-04-20"}),
                     "content-type": "application/json",
                 },
                 json=corpo,
@@ -1306,14 +2398,21 @@ class ContaProvider:
         )
 
 
-def _talvez_pensar(corpo: dict[str, Any], modelo: str, options: Any) -> None:
+def _talvez_pensar(
+    corpo: dict[str, Any], modelo: str, options: Any, provedor: str = "anthropic"
+) -> None:
     """Liga o pensamento estendido da Anthropic, respeitando o contrato dela.
 
     `budget_tokens` mínimo é 1.024 e o `max_tokens` precisa ser **maior** que o orçamento —
     por isso o teto é recalculado. Sem nível pedido (`none`), o campo não vai: pensamento
     ligado à força gasta cota e tempo de quem só queria uma resposta curta.
+
+    `provedor` existe para o MiniMax: ele fala o mesmo protocolo, mas os modelos dele não
+    entram na tabela `aceita_pensar` — que é da Anthropic — e ficariam sem o campo.
     """
-    if not aceita_pensar("anthropic", modelo):
+    if provedor == "anthropic" and not aceita_pensar("anthropic", modelo):
+        return
+    if options is not None and not getattr(options, "reasoning", True):
         return
     nivel = str(getattr(options, "effort", "medium") or "medium") if options is not None else "medium"
     orcamento = ANTHROPIC_ORCAMENTO.get(nivel, 4096)
@@ -1321,6 +2420,42 @@ def _talvez_pensar(corpo: dict[str, Any], modelo: str, options: Any) -> None:
         return
     corpo["thinking"] = {"type": "enabled", "budget_tokens": orcamento}
     corpo["max_tokens"] = max(int(corpo.get("max_tokens") or 0), orcamento + 8192)
+
+
+def grok_cabecalhos(conta: dict[str, Any], modelo: str) -> dict[str, str]:
+    """Cabeçalhos que o proxy do Grok CLI aceita.
+
+    A versão vai em `x-grok-client-version` — **não** no `user-agent`. Sem esse
+    cabeçalho o serviço responde 426 «version (none) is outdated» e derruba conversa e
+    ferramenta antes de qualquer modelo rodar.
+    """
+    return {
+        "authorization": f"Bearer {conta['access']}", "content-type": "application/json",
+        "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": modelo,
+        "x-grok-client-identifier": "grok-cli", "x-grok-client-version": GROK_CLI_VERSAO,
+        "user-agent": f"grok-cli/{GROK_CLI_VERSAO}",
+    }
+
+
+def _erro_no_corpo(dados: Any) -> str:
+    """O motivo de uma recusa escondida num HTTP 200 (iFlow manda `status:435` assim)."""
+    if not isinstance(dados, dict):
+        return ""
+    codigo = str(dados.get("status") or dados.get("code") or "").strip()
+    bruto = dados.get("msg") or dados.get("message") or dados.get("error")
+    if isinstance(bruto, dict):
+        bruto = bruto.get("message") or bruto.get("msg") or json.dumps(bruto, ensure_ascii=False)
+    texto = str(bruto or "").strip()
+    if codigo == "435":
+        # O iFlow responde 435 para **todo** modelo quando o teste da conta terminou; dizer
+        # só "Model not support" manda a pessoa trocar de modelo à toa.
+        return ("o modelo não está liberado para esta conta — no iFlow isso também acontece "
+                "quando o teste gratuito terminou (código 435)")
+    if texto:
+        return f"{texto} (código {codigo})" if codigo else texto
+    if codigo and codigo.lower() not in {"200", "0", "ok"}:
+        return f"código {codigo}"
+    return ""
 
 
 def _resultado_openai(resposta: Any, quem: str) -> StepResult:
@@ -1334,7 +2469,14 @@ def _resultado_openai(resposta: Any, quem: str) -> StepResult:
         dados = dados["data"]
     escolhas = dados.get("choices")
     if not isinstance(escolhas, list) or not escolhas or not isinstance(escolhas[0], dict):
-        raise ProviderError(f"{quem} devolveu uma resposta sem escolhas")
+        # Alguns provedores recusam com HTTP 200 e o motivo no corpo (o iFlow manda
+        # `{"status":"435","msg":"Model not support"}`). Sem isto a tela dizia apenas
+        # «resposta sem escolhas» e escondia a causa real.
+        erro = _erro_no_corpo(dados)
+        raise ProviderError(
+            f"{quem} recusou a conversa: {erro}" if erro
+            else f"{quem} devolveu uma resposta sem escolhas"
+        )
     escolha = escolhas[0]
     mensagem = escolha.get("message") or {}
     chamadas: list[ToolCall] = []
@@ -1451,10 +2593,7 @@ def _turnos_completos(turnos: list[ChatTurn]) -> list[dict[str, Any]]:
 
 def _mensagens_codebuddy(messages: list[dict[str, Any]], internacional: bool) -> list[dict[str, Any]]:
     """Preserva as instruções do Koda e normaliza mensagens para o gateway."""
-    saida = [{**mensagem, "role": "system"} if mensagem.get("role") == "developer" else dict(mensagem)
-             for mensagem in messages]
-    if not saida or saida[0].get("role") != "system":
-        saida.insert(0, {"role": "system", "content": "Você é Koda, um assistente de programação."})
+    saida = [dict(mensagem) for mensagem in messages if mensagem.get("role") not in ("system", "developer")]
     if internacional:
         for mensagem in saida:
             if mensagem.get("role") == "user" and isinstance(mensagem.get("content"), str):

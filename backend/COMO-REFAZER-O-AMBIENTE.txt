@@ -1,0 +1,66 @@
+COMO REFAZER O AMBIENTE PYTHON DO BACKEND
+=========================================
+
+A pasta `backend/.venv` deste projeto **não funciona em outro computador**.
+
+Por quê: um venv no Windows não é uma cópia do Python, é um atalho. O
+`backend/.venv/Scripts/python.exe` tem 45 KB e a única coisa que ele faz é ler o
+`pyvenv.cfg` e procurar o interpretador de verdade em:
+
+    home = C:\Users\Administrator\AppData\Roaming\uv\python\cpython-3.13-windows-x86_64-none
+
+Esse caminho só existe nesta máquina. Num PC novo o `python.exe` do venv abre e fecha na
+hora, ou dá erro de "não foi possível encontrar o Python".
+
+O que o venv guarda de aproveitável são os **pacotes** (274 MB em `Lib\site-packages`),
+e eles estão listados, com versão fixa, em `backend/requirements.txt`.
+
+
+CUIDADO COM O `pyproject.toml`
+------------------------------
+O `pyproject.toml` declara só 6 dependências (fastapi, uvicorn, httpx,
+pydantic-settings, python-multipart, pypdf). O ambiente real tem **54**.
+
+Faltam lá, entre outras: `faster-whisper`, `ctranslate2`, `onnxruntime`, `av`, `numpy`,
+`huggingface_hub`. São as que fazem a transcrição e a análise de vídeo funcionarem.
+
+Ou seja: `uv sync` sozinho monta um ambiente **incompleto** — o app sobe, mas o vídeo
+quebra. Use o `requirements.txt`.
+
+
+OPÇÃO 1 — COM UV (se o PC novo tiver uv)
+----------------------------------------
+    cd backend
+    uv venv --python 3.13 .venv
+    uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+
+
+OPÇÃO 2 — SEM UV, SÓ COM PYTHON (funciona em qualquer PC)
+---------------------------------------------------------
+Precisa do Python 3.11 ou mais novo instalado (o projeto pede >= 3.11; foi montado no
+3.13).
+
+    cd backend
+    py -3.13 -m venv .venv
+    .venv\Scripts\python.exe -m pip install --upgrade pip
+    .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+Se o `py` não existir, use o caminho do Python que você instalou:
+
+    "C:\Program Files\Python313\python.exe" -m venv .venv
+
+
+CONFERIR SE DEU CERTO
+---------------------
+    .venv\Scripts\python.exe -c "import fastapi, faster_whisper, onnxruntime; print('ok')"
+
+Se imprimir `ok`, o backend sobe:
+
+    .venv\Scripts\uvicorn.exe app.main:app --port 8787
+
+
+O QUE NÃO PRECISA VIR NA CÓPIA
+------------------------------
+  - `backend/.venv` — é o atalho quebrado; refaça com um dos dois comandos acima.
+  - `node_modules` — `npm install` na raiz e `npm ci` em `server/`.
+  - `src-tauri/target` — 6,5 GB de build; o `tauri build` recria.

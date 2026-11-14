@@ -513,13 +513,13 @@ const SECOES: Secao[] = [
           `{
   "tipo": "mapa-radial",
   "titulo": "A família",
-  "centro": "FAMÍLIA LIZ",
+  "centro": "CATÁLOGO KODA",
   "centro_sub": "o time",
   "nos": [
-    { "nome": "Liz", "sub": "o modelo principal" },
-    { "nome": "Koda", "sub": "o shell de chat" },
-    { "nome": "Layze", "sub": "o segundo par de olhos" },
-    { "nome": "Nable", "sub": "o rápido do dia a dia" },
+    { "nome": "Claude", "sub": "o modelo principal" },
+    { "nome": "GLM", "sub": "o rápido do dia a dia" },
+    { "nome": "Qwen", "sub": "o segundo par de olhos" },
+    { "nome": "Qwen Legacy", "sub": "o compatível" },
     { "nome": "Vídeos", "sub": "o motor de análise" },
     { "nome": "Identidade", "sub": "quem fala" }
   ]
@@ -551,7 +551,7 @@ const SECOES: Secao[] = [
 │ - executa as tools (Read, Edit, Bash)                │
 │ - chama o N8N quando precisa de referência           │
 │ - controla o loop (para quando o teste passa)        │
-│ - guarda o que ficou em Liz.md                       │
+│ - guarda o que ficou em Koda.md                      │
 └──────────────────────────────────────────────────────┘
               ┌─────────────┴───────────────┐
               │ chama quando precisa        │ executa no projeto

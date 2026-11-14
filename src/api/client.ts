@@ -39,7 +39,9 @@ export let apiUrl = BASE_FIXA
  */
 let tokenDaExecucao: string | null = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? null
 let sessaoDaConta: string | null = null
+let dadosDaConta: { nome?: string | null; email?: string | null } | null = null
 let versaoDaSessao = 0
+let sincronizacaoDaSessao: Promise<EstadoDoHost> | null = null
 // Identificador por janela: um login não troca a identidade de streams de outra janela.
 const janelaDaExecucao = (() => {
   const fallback = crypto.randomUUID()
@@ -77,6 +79,18 @@ export function prepararAcesso(): Promise<void> {
   return pronto
 }
 
+/**
+ * Relê porta e token do launcher depois de uma queda.
+ *
+ * O backend empacotado usa porta e token por execução. Se ele reiniciar, manter o cache
+ * antigo produziria exatamente a sequência de falhas e reconexões que o usuário via.
+ */
+async function renovarAcessoDoLauncher(): Promise<void> {
+  if (!noApp()) return
+  pronto = null
+  await prepararAcesso()
+}
+
 async function carregarCredenciais(): Promise<void> {
   if (!noApp()) return
   try {
@@ -90,6 +104,92 @@ async function carregarCredenciais(): Promise<void> {
   }
 }
 
+function identificadorDaRequisicao(): string {
+  try {
+    return crypto.randomUUID().slice(0, 8)
+  } catch {
+    return Math.random().toString(36).slice(2, 10)
+  }
+}
+
+function registrarRede(
+  nivel: 'debug' | 'warn',
+  requestId: string,
+  metodo: string,
+  caminho: string,
+  inicio: number,
+  status: number | string,
+): void {
+  const duracao = Math.max(0, performance.now() - inicio).toFixed(0)
+  console[nivel](
+    `[koda:net] ${requestId} ${metodo} ${caminho} status=${status} ${duracao}ms`,
+  )
+}
+
+/**
+ * Envia uma requisição e repara uma vez o estado de execução se o backend tiver
+ * reiniciado.
+ *
+ * A sessão da conta vive em memória no backend. Depois de um restart, o processo novo
+ * não conhece o dono da conversa e responde 404. O cliente ainda tem o token em memória;
+ * ele reenvia esse mesmo token ao endpoint de sessão e repete o pedido, sem pedir login.
+ */
+async function fetchComReparo(
+  caminho: string,
+  init: RequestInit,
+  { repararSessao = true }: { repararSessao?: boolean } = {},
+): Promise<Response> {
+  await prepararAcesso()
+  const requestId = identificadorDaRequisicao()
+  const metodo = (init.method ?? 'GET').toUpperCase()
+  const executar = async () => {
+    const inicio = performance.now()
+    try {
+      const response = await fetch(`${apiUrl}${caminho}`, {
+        ...init,
+        headers: {
+          'x-koda-request-id': requestId,
+          ...cabecalhoDeAcesso(),
+          ...(init.headers ?? {}),
+        },
+      })
+      registrarRede(
+        response.ok ? 'debug' : 'warn',
+        requestId,
+        metodo,
+        caminho,
+        inicio,
+        response.status,
+      )
+      return response
+    } catch (erro) {
+      registrarRede('warn', requestId, metodo, caminho, inicio, 'network-error')
+      throw erro
+    }
+  }
+
+  let response: Response
+  try {
+    response = await executar()
+  } catch (erro) {
+    // Porta/token mudaram junto com o processo: o launcher é a fonte da verdade.
+    if (!(erro instanceof TypeError) || !noApp()) throw erro
+    console.warn(`[koda:net] ${requestId} renovando acesso do launcher`)
+    await renovarAcessoDoLauncher()
+    response = await executar()
+  }
+
+  if (repararSessao && sessaoDaConta && (response.status === 401 || response.status === 404)) {
+    console.warn(
+      `[koda:net] ${requestId} backend sem a sessão atual; reenviando credencial e repetindo`,
+    )
+    if (response.status === 401) await renovarAcessoDoLauncher()
+    await sincronizarSessaoDaConta()
+    response = await executar()
+  }
+  return response
+}
+
 export type Health = {
   status: 'ok'
   provider: string
@@ -101,6 +201,8 @@ export type Health = {
   workspace: string
   /** O provedor atual sabe chamar ferramentas? */
   tools_ready: boolean
+  /** O backend desta execução já recebeu a sessão da conta desta janela. */
+  account_session: boolean
   /** Ferramentas disponíveis nesta configuração. */
   tools: string[]
   /** Teto de contexto em tokens: passando dele, o histórico compacta sozinho. 0 = sem teto. */
@@ -440,12 +542,10 @@ export type ChatPayload = {
  * multipart, e forçá-lo para `application/json` quebraria o upload.
  */
 export async function subirAnexo(arquivo: File): Promise<ApiAnexo> {
-  await prepararAcesso()
   const corpo = new FormData()
   corpo.append('arquivo', arquivo, arquivo.name)
-  const response = await fetch(`${apiUrl}/api/attachments`, {
+  const response = await fetchComReparo('/api/attachments', {
     method: 'POST',
-    headers: { ...cabecalhoDeAcesso() },
     body: corpo,
   })
   if (!response.ok) {
@@ -535,8 +635,7 @@ export const estadoDosLogs = () => request<EstadoDosLogs>('/api/dev-logs')
  * revogar, senão cada quadro vira um vazamento de memória.
  */
 export async function quadroDoNavegador(): Promise<Blob | null> {
-  const resposta = await fetch(`${apiUrl}/api/dev-browser/tela`, {
-    headers: { ...cabecalhoDeAcesso() },
+  const resposta = await fetchComReparo('/api/dev-browser/tela', {
     cache: 'no-store',
   })
   if (!resposta.ok) return null
@@ -679,12 +778,10 @@ export function fraseDeFalha(erro: unknown): string {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  await prepararAcesso()
-  const response = await fetch(`${apiUrl}${path}`, {
+  const response = await fetchComReparo(path, {
     ...init,
     headers: {
       'content-type': 'application/json',
-      ...cabecalhoDeAcesso(),
       ...(init.headers ?? {}),
     },
   })
@@ -703,7 +800,55 @@ export const health = () =>
   // O detalhado, e não o `/api/health`: o mínimo é o que responde **sem** token (só `ok` e
   // versão, ver `app/seguranca.py`). Este é o retrato que a tela precisa — e ele exige o
   // token desta execução, que a requisição manda no cabeçalho.
-  request<Health>('/api/health/detalhado', { signal: AbortSignal.timeout(1500) })
+  (async () => {
+    let info = await request<Health>('/api/health/detalhado', {
+      signal: AbortSignal.timeout(2_000),
+    })
+    if (sessaoDaConta && !info.account_session) {
+      await sincronizarSessaoDaConta()
+      info = await request<Health>('/api/health/detalhado', {
+        signal: AbortSignal.timeout(2_000),
+      })
+    }
+    return info
+  })()
+
+/** Um nível de um modo de economia (Lite/Full/Ultra). */
+export type ApiNivelDeEconomia = {
+  id: 'lite' | 'full' | 'ultra'
+  nome: string
+  descricao: string
+}
+
+/** Um modo de economia de tokens, como a área Economia o desenha. */
+export type ApiModoDeEconomia = {
+  id: 'rtk' | 'headroom' | 'contexto' | 'caveman' | 'ponytail'
+  nome: string
+  descricao: string
+  ligado: boolean
+  /** `null` nos modos que não têm níveis (RTK, Headroom e Context Mode). */
+  nivel: ApiNivelDeEconomia['id'] | null
+  niveis: ApiNivelDeEconomia[]
+}
+
+export type ApiEconomia = { modos: ApiModoDeEconomia[] }
+
+export const economia = () => request<ApiEconomia>('/api/economia')
+
+/**
+ * Liga/desliga **um** modo e, quando a tela manda, troca o nível. A resposta é o estado
+ * inteiro como ficou: dois cliques rápidos em cartões diferentes não se sobrescrevem com
+ * um retrato velho da tela.
+ */
+export const alterarEconomia = (
+  id: ApiModoDeEconomia['id'],
+  ligado: boolean,
+  nivel?: ApiNivelDeEconomia['id'],
+) =>
+  request<ApiEconomia>('/api/economia', {
+    method: 'PUT',
+    body: JSON.stringify({ id, ligado, ...(nivel ? { nivel } : {}) }),
+  })
 
 /**
  * Estado do download do instalador. Quem baixa é o backend local (ele escreve na pasta
@@ -768,8 +913,8 @@ export const fetchAccount = () => request<ApiAccount>('/api/account')
  * que aquele modelo devolveu de verdade (`200` ou `400`).
  *
  * A rota testada, e não o `/api/models` cru, porque o catálogo do host anuncia modelos que
- * ele já não atende — o `liz-4` saiu do ar e continuava no seletor, onde só dava 400 até
- * alguém recarregar o app.
+ * ele já não atende — um modelo antigo saiu do ar e continuava no seletor, onde só dava 400
+ * até alguém recarregar o app.
  */
 export const listModels = () => request<ApiModel[]>('/api/models')
 
@@ -987,6 +1132,12 @@ export type PedidoPermissao = {
 
 export const listProjects = () => request<ProjectsEstado>('/api/projects')
 
+export type EntradaProjeto = { caminho: string; pasta: boolean }
+export const listarArquivosProjeto = (consulta = '', pasta?: string | null) =>
+  request<{ raiz: string; itens: EntradaProjeto[] }>(
+    `/api/projects/arquivos?consulta=${encodeURIComponent(consulta)}${pasta ? `&pasta=${encodeURIComponent(pasta)}` : ''}`,
+  )
+
 export const openProject = (caminho: string, nome?: string | null) =>
   request<ProjectsEstado>('/api/projects', {
     method: 'POST',
@@ -1032,10 +1183,9 @@ export const listVideos = (caminho?: string | null) =>
  * frames e waveform funcionam iguais no navegador e no app.
  */
 export async function blobDoVideo(caminho: string): Promise<Blob> {
-  await prepararAcesso()
-  const resposta = await fetch(
-    `${apiUrl}/api/fs/video?caminho=${encodeURIComponent(caminho)}`,
-    { headers: { ...cabecalhoDeAcesso() } },
+  const resposta = await fetchComReparo(
+    `/api/fs/video?caminho=${encodeURIComponent(caminho)}`,
+    {},
   )
   if (!resposta.ok) throw new Error(`não consegui ler o vídeo (${resposta.status})`)
   return resposta.blob()
@@ -1185,7 +1335,14 @@ export const decidirPlano = (id: string, decision: 'approve' | 'reject') =>
     method: 'POST', body: JSON.stringify({ id, decision }),
   })
 
-type StreamData = {
+export type StreamData = {
+  /**
+   * O detector encontrou um eco depois de parte dele já ter sido desenhada.
+   *
+   * `text` é o texto limpo que deve substituir toda a fala visível. Raciocínio,
+   * ferramentas e interfaces continuam onde estão.
+   */
+  text_replace: { text: string }
   start: { conversation_id: string; at: number; tools: boolean }
   delta: { text: string }
   /** O modelo pensando: vem antes do texto e pode durar minutos. Não é a resposta. */
@@ -1229,6 +1386,35 @@ type StreamData = {
    */
   todos: { todos: ApiTodo[]; step: number }
   /**
+   * O bloco do plano recebeu um `plan_id` — é ele que liga os botões Desistir/Fazer.
+   *
+   * `text` é a resposta inteira já com o id; `de`/`para` são o bloco antes e depois da
+   * injeção. A conversa troca só o bloco que já está na tela, preservando a ordem de
+   * fala, raciocínio e ferramentas.
+   */
+  plano: {
+    /** A resposta inteira já com o `plan_id` (caminho do bloco no texto). */
+    text?: string
+    de?: string
+    para?: string
+    /**
+     * O cartão veio pronto da ferramenta `mostrar_plano`: são os dados que a interface
+     * desenha, já com `plan_id`. Quando presente, a conversa acrescenta o cartão em vez
+     * de trocar texto.
+     */
+    dados?: Record<string, unknown>
+    step?: number
+  }
+  /**
+   * A interface inteligente (Koda UI) veio da ferramenta `mostrar_interface`.
+   *
+   * O documento já chegou validado pelo servidor; a conversa acrescenta um bloco `ui` na
+   * posição em que a ferramenta rodou e o renderer desenha. A mensagem gravada guarda o
+   * mesmo documento numa cerca ```koda-ui-doc```, então reabrir a conversa mostra a mesma
+   * tela com o estado local restaurado.
+   */
+  ui: { documento: Record<string, unknown>; step?: number }
+  /**
    * O que um **sub-agente** está fazendo, em nome dele.
    *
    * Vem como evento próprio, e não misturado aos passos de cima: o sub-agente narra o
@@ -1267,6 +1453,7 @@ type StreamData = {
     tokens?: number | null
     /** O custo da resposta em tokens — ver `Message.tokens_total`. */
     tokens_total?: number | null
+    cobranca_koda?: { modelo: string | null; tempo_ms: number; tokens: number } | null
     /**
      * Contexto do último passo, em tokens de entrada — o medidor ao lado do modelo.
      *
@@ -1281,6 +1468,8 @@ type StreamData = {
 export type StreamHandlers = {
   onStart?: (data: StreamData['start']) => void
   onDelta: (text: string) => void
+  /** Substitui a fala já desenhada por uma versão sem a cópia repetida. */
+  onTextReplace?: (text: string) => void
   /** O modelo pensando, para a tela não ficar parada enquanto ele não escreve. */
   onReasoning?: (text: string) => void
   /**
@@ -1294,6 +1483,10 @@ export type StreamHandlers = {
   onToolResult?: (data: StreamData['tool_result']) => void
   /** O agente mudou o plano: a lista de tarefas da resposta a partir daqui. */
   onTodos?: (data: StreamData['todos']) => void
+  /** O bloco do plano foi vinculado: o cartão passa a ter os botões ativos. */
+  onPlano?: (data: StreamData['plano']) => void
+  /** A ferramenta `mostrar_interface` desenhou uma interface Koda UI na conversa. */
+  onUi?: (data: StreamData['ui']) => void
   /** O agente precisa de permissão — o stream fica parado até a resposta. */
   onApprovalRequest?: (data: StreamData['approval_request']) => void
   /** Um sub-agente lançado narrou um passo do trabalho dele. */
@@ -1309,7 +1502,138 @@ export type StreamHandlers = {
    */
   onClosed?: () => void
   onError?: (message: string) => void
+  /** A sequência do evento — é por ela que uma tela reconecta sem repetir o que já viu. */
+  onSeq?: (seq: number) => void
   signal?: AbortSignal
+}
+
+/** Aplica um evento do protocolo SSE. Devolve `true` quando ele encerra a rodada. */
+function despacharEvento(
+  event: string,
+  parsed: Record<string, unknown>,
+  handlers: StreamHandlers,
+): boolean {
+  const seq = Number(parsed.seq)
+  if (Number.isFinite(seq) && seq > 0) handlers.onSeq?.(seq)
+  if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
+  else if (event === 'delta') handlers.onDelta(String(parsed.text ?? ''))
+  else if (event === 'text_replace')
+    handlers.onTextReplace?.(String(parsed.text ?? ''))
+  else if (event === 'reasoning') handlers.onReasoning?.(String(parsed.text ?? ''))
+  else if (event === 'aviso') handlers.onAviso?.(parsed as unknown as StreamData['aviso'])
+  else if (event === 'tool_call')
+    handlers.onToolCall?.(parsed as unknown as StreamData['tool_call'])
+  else if (event === 'tool_result')
+    handlers.onToolResult?.(parsed as unknown as StreamData['tool_result'])
+  else if (event === 'todos') handlers.onTodos?.(parsed as unknown as StreamData['todos'])
+  else if (event === 'plano') handlers.onPlano?.(parsed as unknown as StreamData['plano'])
+  else if (event === 'ui') handlers.onUi?.(parsed as unknown as StreamData['ui'])
+  else if (event === 'sub') handlers.onSub?.(parsed as unknown as StreamData['sub'])
+  else if (event === 'approval_request')
+    handlers.onApprovalRequest?.(parsed as unknown as StreamData['approval_request'])
+  else if (event === 'done') {
+    handlers.onDone?.(parsed as unknown as StreamData['done'])
+    return true
+  } else if (event === 'error') {
+    // Erro também é terminal: a rodada acabou, e a tela tem de voltar ao normal.
+    handlers.onError?.(String(parsed.message ?? 'erro no backend'))
+    return true
+  }
+  return false
+}
+
+/** Uma rodada que está acontecendo agora — no PC ou no celular. */
+export type ApiLiveSession = {
+  sessao: string
+  conversa: string | null
+  origem: 'pc' | 'celular' | 'api'
+  rodando: boolean
+  iniciada_em: number
+  terminada_em: number | null
+  motivo: string | null
+  texto: string
+  passos: number
+  ultimo: number
+}
+
+export const listLive = () => request<{ sessoes: ApiLiveSession[] }>('/api/live')
+
+/** Para a rodada de verdade. Fechar a aba não para mais: este pedido é o Parar. */
+export const pararLive = (conversa: string) =>
+  request<{ ok: boolean }>('/api/live/parar', {
+    method: 'POST',
+    body: JSON.stringify({ conversa }),
+  })
+
+/**
+ * Acompanha uma rodada que já está rodando — a do celular vista do PC, ou a que
+ * continuou quando o celular saiu do app.
+ *
+ * `desde` é a sequência do último evento que a tela já desenhou. Zero repete o
+ * começo: é o que faz uma tela nova mostrar a resposta inteira, e não só a cauda.
+ */
+export async function streamLive(
+  conversa: string,
+  desde: number,
+  handlers: StreamHandlers,
+) {
+  const interno = new AbortController()
+  const encaminharParada = () => interno.abort()
+  if (handlers.signal) {
+    if (handlers.signal.aborted) interno.abort()
+    else handlers.signal.addEventListener('abort', encaminharParada, { once: true })
+  }
+  const response = await fetchComReparo(
+    `/api/live/${encodeURIComponent(conversa)}/eventos?desde=${Math.max(0, desde)}`,
+    { signal: interno.signal },
+  )
+  if (!response.ok || !response.body) {
+    const { codigo, mensagem } = await motivoDaFalha(response)
+    throw new ApiError(response.status, '/api/live', codigo, mensagem)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let viuTerminal = false
+  let jaRecebeuAlgo = false
+
+  const dispatch = (block: string) => {
+    let event = 'message'
+    let data = ''
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim()
+      else if (line.startsWith('data:')) data += line.slice(5).trim()
+    }
+    if (!data) return
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>
+    } catch {
+      return
+    }
+    if (despacharEvento(event, parsed, handlers)) viuTerminal = true
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await lerComSinalDeVida(
+        reader,
+        jaRecebeuAlgo ? INATIVIDADE_MS : ESPERA_DO_PRIMEIRO_BYTE_MS,
+      )
+      if (done) break
+      jaRecebeuAlgo = true
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split('\n\n')
+      buffer = blocks.pop() ?? ''
+      blocks.forEach(dispatch)
+    }
+  } catch (erro) {
+    interno.abort()
+    throw erro
+  }
+  if (buffer.trim()) dispatch(buffer)
+  if (!viuTerminal) handlers.onClosed?.()
 }
 
 /**
@@ -1317,7 +1641,6 @@ export type StreamHandlers = {
  * Lança em falha de rede; o evento `error` do protocolo é entregue via `onError`.
  */
 export async function streamChat(payload: ChatPayload, handlers: StreamHandlers) {
-  await prepararAcesso()
   // O controle de aborto é **interno**: quem para é o Parar (o sinal de fora), e o
   // sinal de vida é o silêncio (daqui). Abortar o sinal de dentro **não** pode ser
   // confundido com o Parar — o laço da reconexão em `App.tsx` olha o sinal dele para
@@ -1328,11 +1651,11 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
     if (handlers.signal.aborted) interno.abort()
     else handlers.signal.addEventListener('abort', encaminharParada, { once: true })
   }
-  const response = await fetch(`${apiUrl}/api/chat`, {
+  const response = await fetchComReparo('/api/chat', {
     method: 'POST',
     // O token vai também aqui: o stream é a rota mais importante, e ela é protegida como
     // todas as outras.
-    headers: { 'content-type': 'application/json', ...cabecalhoDeAcesso() },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
     signal: interno.signal,
   })
@@ -1365,29 +1688,7 @@ export async function streamChat(payload: ChatPayload, handlers: StreamHandlers)
       // laço de reconexão; antes este catch engolia também o onError do provedor.
       return
     }
-    if (event === 'start') handlers.onStart?.(parsed as unknown as StreamData['start'])
-      else if (event === 'delta') handlers.onDelta(String(parsed.text ?? ''))
-      else if (event === 'reasoning') handlers.onReasoning?.(String(parsed.text ?? ''))
-      else if (event === 'aviso')
-        handlers.onAviso?.(parsed as unknown as StreamData['aviso'])
-      else if (event === 'tool_call')
-        handlers.onToolCall?.(parsed as unknown as StreamData['tool_call'])
-      else if (event === 'tool_result')
-        handlers.onToolResult?.(parsed as unknown as StreamData['tool_result'])
-      else if (event === 'todos')
-        handlers.onTodos?.(parsed as unknown as StreamData['todos'])
-      else if (event === 'sub') handlers.onSub?.(parsed as unknown as StreamData['sub'])
-      else if (event === 'approval_request')
-        handlers.onApprovalRequest?.(parsed as unknown as StreamData['approval_request'])
-      else if (event === 'done') {
-        viuTerminal = true
-        handlers.onDone?.(parsed as unknown as StreamData['done'])
-      }
-      else if (event === 'error') {
-        // Erro também é terminal: a rodada acabou, e a tela tem de voltar ao normal.
-        viuTerminal = true
-        handlers.onError?.(String(parsed.message ?? 'erro no backend'))
-      }
+    if (despacharEvento(event, parsed, handlers)) viuTerminal = true
   }
 
   // O terminal desta rodada. `done` e `error` encerram; qualquer outra saída do fluxo
@@ -1450,22 +1751,69 @@ export type EstadoDoHost = {
   tools_ready: boolean
 }
 
+async function enviarSessaoAoBackend(
+  token: string | null,
+  conta?: { nome?: string | null; email?: string | null } | null,
+): Promise<EstadoDoHost> {
+  await prepararAcesso()
+  const response = await fetchComReparo('/api/host/sessao', {
+    method: token ? 'POST' : 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    ...(token
+      ? { body: JSON.stringify({ token, nome: conta?.nome ?? null, email: conta?.email ?? null }) }
+      : {}),
+  }, { repararSessao: false })
+  if (!response.ok) throw new ApiError(response.status, '/api/host/sessao')
+  return (await response.json()) as EstadoDoHost
+}
+
 export async function definirSessaoDoHost(
   token: string | null,
   conta?: { nome?: string | null; email?: string | null } | null,
 ): Promise<EstadoDoHost> {
   const versao = ++versaoDaSessao
-  await prepararAcesso()
-  const response = await fetch(`${apiUrl}/api/host/sessao`, {
-    method: token ? 'POST' : 'DELETE',
-    headers: { 'content-type': 'application/json', ...cabecalhoDeAcesso() },
-    ...(token
-      ? { body: JSON.stringify({ token, nome: conta?.nome ?? null, email: conta?.email ?? null }) }
-      : {}),
+  const sessaoAnterior = sessaoDaConta
+  const contaAnterior = dadosDaConta
+  // Publica a credencial **antes** de o POST terminar. A tela dispara os catálogos
+  // assim que a conta entra; se `sessaoDaConta` só mudasse na resposta, essas
+  // requisições chegavam sem `x-koda-session` no intervalo em que o backend já
+  // conhece a conta, e o 401 aparecia no navegador como erro de CORS. Quem
+  // chega nessa janela espera a sincronização em andamento e repete o pedido.
+  sessaoDaConta = token
+  dadosDaConta = token ? conta ?? null : null
+  const atual = enviarSessaoAoBackend(token, conta)
+  sincronizacaoDaSessao = atual
+  try {
+    const estado = await atual
+    return estado
+  } catch (erro) {
+    if (versao === versaoDaSessao) {
+      sessaoDaConta = sessaoAnterior
+      dadosDaConta = contaAnterior
+    }
+    throw erro
+  } finally {
+    if (sincronizacaoDaSessao === atual) sincronizacaoDaSessao = null
+  }
+}
+
+/**
+ * Reentrega ao processo atual a credencial que o frontend já possui.
+ *
+ * Chamado quando o backend reiniciou ou quando uma conversa aparece subitamente como
+ * inexistente. Não abre login, não lê disco e não expõe token em log.
+ */
+export function sincronizarSessaoDaConta(): Promise<EstadoDoHost> | Promise<never> {
+  const token = sessaoDaConta
+  if (!token) return Promise.reject(new Error('não há sessão da conta para sincronizar'))
+  if (sincronizacaoDaSessao) return sincronizacaoDaSessao
+  const versao = versaoDaSessao
+  const atual = enviarSessaoAoBackend(token, dadosDaConta).finally(() => {
+    if (sincronizacaoDaSessao === atual) sincronizacaoDaSessao = null
   })
-  if (!response.ok) throw new ApiError(response.status, '/api/host/sessao')
-  if (versao === versaoDaSessao) sessaoDaConta = token
-  return (await response.json()) as EstadoDoHost
+  sincronizacaoDaSessao = atual
+  if (versao !== versaoDaSessao) return Promise.reject(new Error('sessão mudou durante a sincronização'))
+  return atual
 }
 
 /**
@@ -1504,9 +1852,44 @@ export type ApiProvedor = {
   expirado: boolean | null
   renova: boolean
   detalhe: string
+  base?: string
+  formato?: 'openai' | 'anthropic' | 'responses'
+  disponivel?: boolean
+  chaveOpcional?: boolean
 }
 
 export const provedoresDeLogin = () => request<ApiProvedor[]>('/api/provedores')
+
+/** Provedores por chave com conexão direta. */
+export const provedoresDeApi = () => request<ApiProvedor[]>('/api/provedores/api')
+export const salvarChaveApi = (id: string, chave: string, endpoint = '', deployment = '', access_id = '', region = '', session_token = '') =>
+  request<ApiProvedor>(`/api/provedores/api/${encodeURIComponent(id)}/chave`, { method: 'POST', body: JSON.stringify({ chave, endpoint, deployment, access_id, region, session_token }) })
+
+export type NovoProvedorCustom = {
+  nome: string
+  base: string
+  chave: string
+  formato: 'openai' | 'anthropic' | 'responses'
+}
+
+export const salvarProvedorCustom = (dados: NovoProvedorCustom) =>
+  request<{ ok: boolean; estado: ApiProvedor; id: string }>(
+    '/api/provedores/custom',
+    { method: 'POST', body: JSON.stringify(dados) },
+  )
+
+export const testarProvedorCustom = (dados: NovoProvedorCustom) =>
+  request<{ ok: boolean; detalhe: string; modelos?: string[] }>(
+    '/api/provedores/custom/testar',
+    { method: 'POST', body: JSON.stringify(dados) },
+  )
+
+export const atualizarCustom = (id: string, dados: { nome?: string; base?: string; formato?: string; modelo?: string; acao?: string }) =>
+  request<ApiProvedor>(`/api/provedores/custom/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(dados) })
+export const adicionarChaveCustom = (id: string, chave: string) =>
+  request<ApiProvedor>(`/api/provedores/custom/${encodeURIComponent(id)}/chaves`, { method: 'POST', body: JSON.stringify({ chave }) })
+export const substituirChaveCustom = (id: string, conta: string, chave: string) =>
+  request<{ ok: boolean }>(`/api/provedores/custom/${encodeURIComponent(id)}/chaves/${encodeURIComponent(conta)}`, { method: 'PUT', body: JSON.stringify({ chave }) })
 
 export type ApiSaldoDoProvedor = {
   tipo: 'percentual' | 'creditos' | 'indisponivel'
@@ -1524,13 +1907,16 @@ export const testarProvedor = (id: string) =>
     { method: 'POST' },
   )
 
-export const modelosDoProvedor = (id: string) =>
+export const modelosDoProvedor = (id: string, atualizar = false) =>
   request<{
     modelos: string[]
+    modelosOcultos?: string[]
     nomes?: Record<string, string>
+    /** Multiplicador oficial de uso por modelo (o «0,03x» a «3,5x» do Accio). */
+    multiplos?: Record<string, number>
     fonte: string | null
     motivo: string
-  }>(`/api/provedores/${encodeURIComponent(id)}/modelos`)
+  }>(`/api/provedores/${encodeURIComponent(id)}/modelos${atualizar ? '?atualizar=true' : ''}`)
 
 /** O que `entrar` devolve: um fluxo para seguir, ou a explicação de por que não há. */
 export type InicioDeLogin = {
@@ -1538,6 +1924,7 @@ export type InicioDeLogin = {
   url?: string
   codigo?: string
   estado?: string
+  conta?: string | null
   mensagem?: string
 }
 
@@ -1586,3 +1973,135 @@ export const testarContaDoProvedor = (id: string, conta: string) =>
     `/api/provedores/${encodeURIComponent(id)}/contas/${encodeURIComponent(conta)}/testar`,
     { method: 'POST' },
   )
+
+/* ------------------------------------------------------------------------- */
+/* koda-link — o celular falando com o Koda deste PC                         */
+/* ------------------------------------------------------------------------- */
+
+export type ApiLinkEstado = {
+  link: {
+    rodando: boolean
+    porta: number | null
+    ip: string | null
+    url: string | null
+    /** O celular acha o PC sozinho na Wi-Fi enquanto isto estiver ligado. */
+    rede_local: boolean
+  }
+  tunel: {
+    aberto: boolean
+    porta: number | null
+    public_url: string | null
+    sala: string | null
+    desde: number | null
+  }
+  cliente: {
+    conectado: boolean
+    sala: string | null
+    link: string | null
+    convidado: boolean
+    desde: number | null
+    ultimo_sinal: number | null
+    erro: string | null
+    api: string
+  } | null
+}
+
+export type ApiSalaLink = {
+  sala: string
+  codigo: string
+  segredo: string
+  url: string
+  expira_em: number
+  modo: 'direto' | 'relay' | 'tunel'
+  qr: string | null
+  public_url?: string
+  porta?: number
+}
+
+export type ApiSalaLinkEstado = {
+  sala: string
+  host: boolean
+  convidado: boolean
+  pareada: boolean
+  expira_em: number
+  modo: string
+}
+
+export const estadoDoLink = () => request<ApiLinkEstado>('/api/remoto/estado')
+
+/** Sobe o servidor de link no próprio PC (modo mesma Wi-Fi). */
+export const iniciarLinkLocal = (porta?: number) =>
+  request<ApiLinkEstado>('/api/remoto/link/iniciar', {
+    method: 'POST',
+    body: JSON.stringify(porta ? { porta } : {}),
+  })
+
+export const pararLinkLocal = () =>
+  request<ApiLinkEstado>('/api/remoto/link/parar', { method: 'POST', body: '{}' })
+
+/** Liga/desliga o pareamento sem QR na rede local (o botão do celular). */
+export const definirRedeLocal = (ativo: boolean) =>
+  request<ApiLinkEstado>('/api/remoto/rede', {
+    method: 'POST',
+    body: JSON.stringify({ ativo }),
+  })
+
+/**
+ * Cria a sala. Sem `link`, é a sala do servidor local; com `link`, é a do
+ * servidor próprio do dono (VPS, Raspberry Pi, Tailscale…).
+ */
+export const criarSalaDoLink = (link?: string, token?: string) =>
+  request<ApiSalaLink>('/api/remoto/sala', {
+    method: 'POST',
+    body: JSON.stringify({ ...(link ? { link } : {}), ...(token ? { token } : {}) }),
+  })
+
+export const estadoDaSalaDoLink = (sala: string) =>
+  request<ApiSalaLinkEstado>(`/api/remoto/sala/${encodeURIComponent(sala)}`)
+
+/** Mantém este PC conectado de saída ao servidor de link (modo de qualquer lugar). */
+export const conectarAoLink = (dados: { link: string; sala: string; segredo: string }) =>
+  request<ApiLinkEstado['cliente']>('/api/remoto/conectar', {
+    method: 'POST',
+    body: JSON.stringify(dados),
+  })
+
+export const desconectarDoLink = () =>
+  request<ApiLinkEstado['cliente']>('/api/remoto/desconectar', {
+    method: 'POST',
+    body: '{}',
+  })
+
+/**
+ * Abre um QR público por túnel Cloudflare. Cada chamada fecha o QR anterior e
+ * cria porta, link, túnel, sala e código novos — nada se repete entre QRs.
+ * O servidor fica aberto até `fecharTunelCloudflare`.
+ */
+export const abrirTunelCloudflare = (forcar = false) =>
+  request<ApiSalaLink>('/api/remoto/tunel/abrir', {
+    method: 'POST',
+    body: JSON.stringify({ forcar }),
+  })
+
+export const fecharTunelCloudflare = () =>
+  request<ApiLinkEstado>('/api/remoto/tunel/fechar', { method: 'POST', body: '{}' })
+
+export const estadoDaSalaDoTunel = (sala: string) =>
+  request<ApiSalaLinkEstado>(`/api/remoto/tunel/sala/${encodeURIComponent(sala)}`)
+
+export type ComboKoda = {
+  id?: string
+  nome: string
+  estrategia: 'fallback' | 'round-robin' | 'smart' | 'fusion'
+  modelos: string[]
+  decisor: string
+  juiz: string
+  politica: 'smart-switch' | 'strict' | 'per-turn'
+  limiar: number
+}
+export const listarCombos = () => request<ComboKoda[]>('/api/combos')
+export const salvarCombo = (dados: ComboKoda) => request<ComboKoda>('/api/combos', { method: 'POST', body: JSON.stringify(dados) })
+export const removerCombo = (id: string) => request<{ok: boolean}>(`/api/combos/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+export const editarMensagemEnviada = (conversa: string, mensagem: string, text: string) =>
+  request<{ ok: boolean; text: string }>(`/api/conversations/${encodeURIComponent(conversa)}/messages/${encodeURIComponent(mensagem)}`, { method: 'PATCH', body: JSON.stringify({ text }) })

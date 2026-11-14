@@ -15,7 +15,7 @@ tela de Ajustes usa. Uma seção por agente:
     ## revisor
     skills: revisao, testes
     mcps: navegador
-    modelo: liz-4
+    modelo: glm-5.3-flash
 
     Você revisa código e aponta o que está errado, sem consertar nada.
 

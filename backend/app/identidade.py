@@ -106,7 +106,10 @@ _AUTORREFERENCIA = re.compile(
 #: Nome próprio com cara de assistente (os do catálogo do serviço) — é o que distingue
 #: "sou a Koda, criada por Fulano Labs" de "sou um modelo de linguagem criado por
 #: pesquisadores": a segunda frase é conversa normal e fica.
-_MARCA = re.compile(r"\b(?:liz|koda|layze|layz|gemini|ai\s*studio|studio)\b", re.IGNORECASE)
+_MARCA = re.compile(
+    r"\b(?:liz|koda|layze|layz|claude|anthropic|qwen|glm|zhipu|alibaba|gemini|ai\s*studio|studio)\b",
+    re.IGNORECASE,
+)
 
 
 def _tem_intro(texto: str) -> bool:

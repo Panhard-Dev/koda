@@ -351,8 +351,12 @@
           "nome": "Gemini 3.1 Flash Lite Preview"
         },
         {
-          "id": "kwaipilot/kat-coder-pro",
-          "nome": "KAT Coder Pro"
+          "id": "deepseek/deepseek-v4-pro",
+          "nome": "DeepSeek V4 Pro"
+        },
+        {
+          "id": "qwen/qwen3.7-plus",
+          "nome": "Qwen3.7 Plus"
         }
       ]
     },
@@ -373,44 +377,40 @@
       },
       "modelos": [
         {
-          "id": "cline-pass/glm-5.2",
-          "nome": "GLM-5.2 (ClinePass)"
+          "id": "anthropic/claude-opus-4.7",
+          "nome": "Claude Opus 4.7"
         },
         {
-          "id": "cline-pass/kimi-k2.7-code",
-          "nome": "Kimi K2.7 Code (ClinePass)"
+          "id": "anthropic/claude-sonnet-4.6",
+          "nome": "Claude Sonnet 4.6"
         },
         {
-          "id": "cline-pass/kimi-k2.6",
-          "nome": "Kimi K2.6 (ClinePass)"
+          "id": "openai/gpt-5.4",
+          "nome": "GPT-5.4"
         },
         {
-          "id": "cline-pass/deepseek-v4-pro",
-          "nome": "DeepSeek V4 Pro (ClinePass)"
+          "id": "openai/gpt-5.3-codex",
+          "nome": "GPT-5.3 Codex"
         },
         {
-          "id": "cline-pass/deepseek-v4-flash",
-          "nome": "DeepSeek V4 Flash (ClinePass)"
+          "id": "google/gemini-3.1-pro-preview",
+          "nome": "Gemini 3.1 Pro Preview"
         },
         {
-          "id": "cline-pass/mimo-v2.5",
-          "nome": "MiMo-V2.5 (ClinePass)"
+          "id": "moonshotai/kimi-k3.1-pro",
+          "nome": "Kimi K3.1 Pro"
         },
         {
-          "id": "cline-pass/mimo-v2.5-pro",
-          "nome": "MiMo-V2.5-Pro (ClinePass)"
+          "id": "minimax/minimax-m3.1-flash",
+          "nome": "MiniMax M3.1 Flash"
         },
         {
-          "id": "cline-pass/minimax-m3",
-          "nome": "MiniMax M3 (ClinePass)"
+          "id": "deepseek/deepseek-v4-pro",
+          "nome": "DeepSeek V4 Pro"
         },
         {
-          "id": "cline-pass/qwen3.7-max",
-          "nome": "Qwen3.7 Max (ClinePass)"
-        },
-        {
-          "id": "cline-pass/qwen3.7-plus",
-          "nome": "Qwen3.7 Plus (ClinePass)"
+          "id": "qwen/qwen3.7-plus",
+          "nome": "Qwen3.7 Plus"
         }
       ]
     },
@@ -774,10 +774,6 @@
         {
           "id": "claude-haiku-4.5",
           "nome": "Claude Haiku 4.5"
-        },
-        {
-          "id": "claude-haiku-5.5",
-          "nome": "Claude Haiku 5.5"
         },
         {
           "id": "claude-opus-4.8",
@@ -1170,88 +1166,8 @@
       },
       "modelos": [
         {
-          "id": "claude-opus-5.5",
-          "nome": "Claude Opus 5.5"
-        },
-        {
-          "id": "claude-opus-5.5-thinking",
-          "nome": "Claude Opus 5.5 (Thinking)"
-        },
-        {
-          "id": "claude-opus-5.5-agentic",
-          "nome": "Claude Opus 5.5 (Agentic)"
-        },
-        {
-          "id": "claude-opus-5.5-thinking-agentic",
-          "nome": "Claude Opus 5.5 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-opus-5",
-          "nome": "Claude Opus 5"
-        },
-        {
-          "id": "claude-opus-5-thinking",
-          "nome": "Claude Opus 5 (Thinking)"
-        },
-        {
-          "id": "claude-opus-5-agentic",
-          "nome": "Claude Opus 5 (Agentic)"
-        },
-        {
-          "id": "claude-opus-5-thinking-agentic",
-          "nome": "Claude Opus 5 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-opus-4.8",
-          "nome": "Claude Opus 4.8"
-        },
-        {
-          "id": "claude-opus-4.8-thinking",
-          "nome": "Claude Opus 4.8 (Thinking)"
-        },
-        {
-          "id": "claude-opus-4.8-agentic",
-          "nome": "Claude Opus 4.8 (Agentic)"
-        },
-        {
-          "id": "claude-opus-4.8-thinking-agentic",
-          "nome": "Claude Opus 4.8 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-opus-4.7",
-          "nome": "Claude Opus 4.7"
-        },
-        {
-          "id": "claude-opus-4.7-thinking",
-          "nome": "Claude Opus 4.7 (Thinking)"
-        },
-        {
-          "id": "claude-opus-4.7-agentic",
-          "nome": "Claude Opus 4.7 (Agentic)"
-        },
-        {
-          "id": "claude-opus-4.7-thinking-agentic",
-          "nome": "Claude Opus 4.7 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-opus-4.5",
-          "nome": "Claude Opus 4.5"
-        },
-        {
-          "id": "claude-opus-4.5-thinking",
-          "nome": "Claude Opus 4.5 (Thinking)"
-        },
-        {
-          "id": "claude-opus-4.5-agentic",
-          "nome": "Claude Opus 4.5 (Agentic)"
-        },
-        {
-          "id": "claude-opus-4.5-thinking-agentic",
-          "nome": "Claude Opus 4.5 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-sonnet-5",
-          "nome": "Claude Sonnet 5"
+          "id": "auto",
+          "nome": "Auto"
         },
         {
           "id": "claude-sonnet-4.5",
@@ -1266,100 +1182,20 @@
           "nome": "DeepSeek 3.2"
         },
         {
-          "id": "qwen3-coder-next",
-          "nome": "Qwen3 Coder Next"
+          "id": "minimax-m2.5",
+          "nome": "MiniMax M2.5"
+        },
+        {
+          "id": "minimax-m2.1",
+          "nome": "MiniMax M2.1"
         },
         {
           "id": "glm-5",
           "nome": "GLM 5"
         },
         {
-          "id": "MiniMax-M2.5",
-          "nome": "MiniMax M2.5"
-        },
-        {
-          "id": "gpt-5.6-sol",
-          "nome": "GPT 5.6 Sol"
-        },
-        {
-          "id": "gpt-5.6-terra",
-          "nome": "GPT 5.6 Terra"
-        },
-        {
-          "id": "gpt-5.6-luna",
-          "nome": "GPT 5.6 Luna"
-        },
-        {
-          "id": "claude-sonnet-5-thinking",
-          "nome": "Claude Sonnet 5 (Thinking)"
-        },
-        {
-          "id": "claude-sonnet-4.5-thinking",
-          "nome": "Claude Sonnet 4.5 (Thinking)"
-        },
-        {
-          "id": "claude-haiku-4.5-thinking",
-          "nome": "Claude Haiku 4.5 (Thinking)"
-        },
-        {
-          "id": "gpt-5.6-sol-thinking",
-          "nome": "GPT 5.6 Sol (Thinking)"
-        },
-        {
-          "id": "gpt-5.6-terra-thinking",
-          "nome": "GPT 5.6 Terra (Thinking)"
-        },
-        {
-          "id": "gpt-5.6-luna-thinking",
-          "nome": "GPT 5.6 Luna (Thinking)"
-        },
-        {
-          "id": "claude-sonnet-5-agentic",
-          "nome": "Claude Sonnet 5 (Agentic)"
-        },
-        {
-          "id": "claude-sonnet-4.5-agentic",
-          "nome": "Claude Sonnet 4.5 (Agentic)"
-        },
-        {
-          "id": "claude-haiku-4.5-agentic",
-          "nome": "Claude Haiku 4.5 (Agentic)"
-        },
-        {
-          "id": "gpt-5.6-sol-agentic",
-          "nome": "GPT 5.6 Sol (Agentic)"
-        },
-        {
-          "id": "gpt-5.6-terra-agentic",
-          "nome": "GPT 5.6 Terra (Agentic)"
-        },
-        {
-          "id": "gpt-5.6-luna-agentic",
-          "nome": "GPT 5.6 Luna (Agentic)"
-        },
-        {
-          "id": "claude-sonnet-5-thinking-agentic",
-          "nome": "Claude Sonnet 5 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-sonnet-4.5-thinking-agentic",
-          "nome": "Claude Sonnet 4.5 (Thinking + Agentic)"
-        },
-        {
-          "id": "claude-haiku-4.5-thinking-agentic",
-          "nome": "Claude Haiku 4.5 (Thinking + Agentic)"
-        },
-        {
-          "id": "gpt-5.6-sol-thinking-agentic",
-          "nome": "GPT 5.6 Sol (Thinking + Agentic)"
-        },
-        {
-          "id": "gpt-5.6-terra-thinking-agentic",
-          "nome": "GPT 5.6 Terra (Thinking + Agentic)"
-        },
-        {
-          "id": "gpt-5.6-luna-thinking-agentic",
-          "nome": "GPT 5.6 Luna (Thinking + Agentic)"
+          "id": "qwen3-coder-next",
+          "nome": "Qwen3 Coder Next"
         }
       ]
     },
@@ -2207,6 +2043,191 @@
         "rsaKeyExchange": true
       },
       "modelos": []
+    },
+    {
+      "id": "accio",
+      "fonteId": "accio",
+      "nome": "Accio",
+      "sigla": "AC",
+      "cli": "Conta do provedor",
+      "website": "https://www.accio.com",
+      "tipo": "authorization_code",
+      "oauth": {
+        "authorizeUrl": "https://www.accio.com/login",
+        "clientId": "accio-work",
+        "tokenUrl": "https://phoenix-gw.alibaba.com/api/oauth/token",
+        "pkce": true
+      },
+      "modelos":       [
+        {
+          "id": "auto",
+          "nome": "Auto"
+        },
+        {
+          "id": "gpt-6-astra",
+          "nome": "GPT 6 Astra"
+        },
+        {
+          "id": "gpt-6-sol",
+          "nome": "GPT 6 Sol"
+        },
+        {
+          "id": "gpt-6-luna",
+          "nome": "GPT 6 Luna"
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "nome": "GPT 5.6 Sol"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "nome": "GPT 5.6 Terra"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "nome": "GPT 5.6 Luna"
+        },
+        {
+          "id": "gpt-5.5",
+          "nome": "GPT 5.5"
+        },
+        {
+          "id": "grok-4.6",
+          "nome": "Grok 4.6"
+        },
+        {
+          "id": "claude-opus-5.5",
+          "nome": "Claude Opus 5.5"
+        },
+        {
+          "id": "claude-opus-5",
+          "nome": "Claude Opus 5"
+        },
+        {
+          "id": "claude-opus-4.8",
+          "nome": "Claude Opus 4.8"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "nome": "Claude Opus 4.7"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "nome": "Claude Sonnet 5"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "nome": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "claude-haiku-5.5",
+          "nome": "Claude Haiku 5.5"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "nome": "Claude Haiku 4.5"
+        },
+        {
+          "id": "claude-fable-5.1",
+          "nome": "Claude Fable 5.1"
+        },
+        {
+          "id": "claude-fable-5",
+          "nome": "Claude Fable 5"
+        },
+        {
+          "id": "gemini-4-argon",
+          "nome": "Gemini 4 Argon"
+        },
+        {
+          "id": "gemini-3.8-flash",
+          "nome": "Gemini 3.8 Flash"
+        },
+        {
+          "id": "gemini-3.7-flash",
+          "nome": "Gemini 3.7 Flash"
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "nome": "Gemini 3.5 Flash"
+        },
+        {
+          "id": "gemini-3-flash",
+          "nome": "Gemini 3 Flash"
+        },
+        {
+          "id": "gemini-3.1-pro",
+          "nome": "Gemini 3.1 Pro"
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "nome": "DeepSeek V4 Flash"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "nome": "DeepSeek V4 Pro"
+        },
+        {
+          "id": "glm-5.3",
+          "nome": "GLM 5.3"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "nome": "GLM 5.3 Flash"
+        },
+        {
+          "id": "glm-5.2",
+          "nome": "GLM 5.2"
+        },
+        {
+          "id": "glm-5.1",
+          "nome": "GLM 5.1"
+        },
+        {
+          "id": "qwen-3.8-flash",
+          "nome": "Qwen 3.8 Flash"
+        },
+        {
+          "id": "qwen-3.8-flash-legacy",
+          "nome": "Qwen 3.8 Flash (Legacy)"
+        },
+        {
+          "id": "qwen-3.8-flash-plus",
+          "nome": "Qwen 3.8 Flash+"
+        },
+        {
+          "id": "qwen-3.8-max",
+          "nome": "Qwen 3.8 Max"
+        },
+        {
+          "id": "qwen-3.8-max-plus",
+          "nome": "Qwen 3.8 Max+"
+        },
+        {
+          "id": "qwen-3.8-27b",
+          "nome": "Qwen 3.8 27B"
+        },
+        {
+          "id": "qwen-3.7-max",
+          "nome": "Qwen 3.7 Max"
+        },
+        {
+          "id": "qwen-3.7-plus",
+          "nome": "Qwen 3.7 Plus"
+        },
+        {
+          "id": "qwen-3.5-a3b",
+          "nome": "Qwen 3.5 A3B"
+        },
+        {
+          "id": "kimi-k2.6",
+          "nome": "Kimi K2.6"
+        },
+        {
+          "id": "minimax-m3",
+          "nome": "MiniMax M3"
+        }
+      ]
     }
   ]
 }

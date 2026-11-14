@@ -13,15 +13,22 @@ if (!existsSync(scriptNsis)) {
 }
 
 const conteudoNsis = readFileSync(scriptNsis, 'utf8')
+const versaoNsis = conteudoNsis.match(/^!define VERSION "([^"]+)"/m)?.[1]
+if (versaoNsis !== versao) {
+  throw new Error(`O NSIS declara ${versaoNsis ?? 'sem versão'}, esperado ${versao}`)
+}
 const preinstall = readFileSync(hooksNsis, 'utf8').split('!macro NSIS_HOOK_PREINSTALL')[1]?.split('!macroend')[0]
 if (!preinstall || /RMDir\s+\/r\s+"\$LOCALAPPDATA\\app\.koda\.desktop"/i.test(preinstall)) {
   throw new Error('O upgrade NSIS apagaria o perfil WebView2 e a sessão da conta.')
 }
-if (!/File \/a "\/oname=host\\c-host\.exe" "[^"]*host[\\/]c-host\.exe"/i.test(conteudoNsis)) {
-  throw new Error(`O script NSIS não inclui host/c-host.exe: ${scriptNsis}`)
+if (!/LizProxy\.py/i.test(conteudoNsis)) {
+  throw new Error(`O script NSIS não inclui o proxy de modelos: ${scriptNsis}`)
 }
-if (!/File \/a "\/oname=host\\kodahost1\.exe" "[^"]*host[\\/]kodahost1\.exe"/i.test(conteudoNsis)) {
-  throw new Error(`O script NSIS não inclui host/kodahost1.exe: ${scriptNsis}`)
+if (!/link[\\/]+server\.py/i.test(conteudoNsis)) {
+  throw new Error(`O script NSIS não inclui o servidor do link remoto: ${scriptNsis}`)
+}
+if (!/bin[\\/]+cloudflared\.exe/i.test(conteudoNsis)) {
+  throw new Error(`O script NSIS não inclui o cloudflared Windows: ${scriptNsis}`)
 }
 
 if (!existsSync(instalador) || !statSync(instalador).isFile()) {
@@ -33,6 +40,6 @@ if (!launcher.includes(Buffer.from('KODA_TEMP_OVERRIDE_WRAPPER_V1'))) {
 }
 
 console.log(
-  `Instalador ${versao} conferido: NSIS inclui c-host.exe e kodahost1.exe, e o lançador corrige TEMP/TMP; ` +
+  `Instalador ${versao} conferido: proxy, link, Cloudflare e lançador presentes; ` +
     `${(statSync(instalador).size / 1048576).toFixed(1)} MB em ${instalador}`,
 )

@@ -10,10 +10,9 @@
  *
  * A regra do dono: **qualquer erro** reconecta — acertando, o contexto continua de
  * onde parou (o backend guarda a conversa, e a retomada usa `resume` para não repetir
- * a mensagem do usuário); batendo 10 tentativas, a rodada para e **diz o erro** —
- * nada de laço infinito. A decisão de tentar até os erros de pedido (401/422/404) é
- * deliberada: dez tentativas custam menos que uma resposta que morre sem explicação,
- * e a linha «Reconectando…» deixa claro que o Koda está tentando, não travado.
+ * a mensagem do usuário); falhas transitórias têm quatro tentativas curtas e silenciosas.
+ * Erros permanentes (401/404/409/422) encerram na hora, depois que o cliente tenta
+ * reconstruir uma sessão perdida por restart.
  *
  * O silêncio também é erro: conexão viva que não manda nada (backend travado, host
  * engasgado, proxy furando) nunca lançava — a rodada ficava pendurada para sempre,
@@ -21,18 +20,23 @@
  * silêncio e o transforma em `QuedaDeConexao`, que cai no mesmo laço.
  */
 
-/** Quantas vezes o Koda tenta reconectar antes de desistir e avisar o erro. */
-export const TENTATIVAS_DE_RECONEXAO = 10
+/**
+ * Quantas tentativas rápidas para falhas transitórias.
+ *
+ * Erros permanentes (credencial, conversa inexistente, pedido inválido) não entram neste
+ * laço. Insistir neles só atrasava o erro e mantinha a interface presa.
+ */
+export const TENTATIVAS_DE_RECONEXAO = 4
 
 /**
  * Quanto esperar antes da tentativa `tentativa` (1 = depois da primeira falha), em ms.
  *
- * Sobe de um em um segundo e para em 8: o serviço que caiu por acaso volta em
- * segundos, e uma espera que crescesse para sempre faria a pessoa esperar minutos
- * por uma conexão que não vem.
+ * A primeira repetição é imediata; as seguintes ficam abaixo de um segundo. Uma queda
+ * local normalmente se resolve antes de o usuário perceber. O limite curto evita a linha
+ * «Reconectando» eterna que aparecia quando o processo tinha mudado de estado.
  */
 export function esperaDaTentativa(tentativa: number): number {
-  return Math.min(Math.max(tentativa, 1), 8) * 1000
+  return [0, 250, 750, 1_500][Math.min(Math.max(tentativa, 1), 4) - 1]
 }
 
 /**
@@ -138,6 +142,19 @@ export function ehFalhaDeConexao(erro: unknown): boolean {
   if (erro instanceof TypeError) return true
   const status = (erro as { status?: unknown } | null)?.status
   return typeof status === 'number' && status >= 500
+}
+
+/**
+ * Vale repetir sem pedir nenhuma ação ao usuário?
+ *
+ * Só falhas transitórias. Um 404 pode ser estado antigo de sessão; o cliente tenta
+ * reconstruir a sessão uma vez antes de chamar esta função. Se continuar 404, é erro
+ * permanente e deve aparecer na hora.
+ */
+export function ehFalhaTransitoria(erro: unknown): boolean {
+  if (ehFalhaDeConexao(erro)) return true
+  const status = (erro as { status?: unknown } | null)?.status
+  return status === 408 || status === 425 || status === 429
 }
 
 /** Espera `ms`, ou até o sinal disparar — o Parar não espera a reconexão acabar. */

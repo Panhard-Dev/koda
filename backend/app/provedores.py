@@ -10,8 +10,12 @@ O catálogo de modelos fica em `provedores_koda.json`; o login fica em `oauth_lo
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
 import json
+import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -128,6 +132,15 @@ CAPACIDADES: dict[str, dict[str, Any]] = {
         "niveis": ["low", "medium", "high"],
         "nota": "token plan compatível com OpenAI.",
     },
+    "accio": {
+        "protocolo": "Accio (ADK/SSE)",
+        "chat": True,
+        "pensamento": "reasoningEffort",
+        "niveis": ["low", "medium", "high", "xhigh", "max"],
+        "nota": "login, contas e rodízio são do Koda; o token vai no corpo do pedido, como "
+                "no app desktop do Accio. Os modelos que raciocinam aceitam low..max; os "
+                "demais ignoram o campo.",
+    },
 }
 
 
@@ -204,7 +217,163 @@ def _estado(provedor: dict[str, Any], settings: Settings | None) -> dict[str, An
 
 
 def listar(settings: Settings | None = None) -> list[dict[str, Any]]:
-    return [_estado(provedor, settings) for provedor in PROVEDORES]
+    saida = [_estado(provedor, settings) for provedor in PROVEDORES]
+    if settings is not None:
+        for identificador in oauth_login.provedores_salvos(settings, IDENTIDADE_CUSTOM_PREFIXO):
+            saida.append(estado_custom(identificador, settings))
+    from . import provedores_api
+    saida.extend(item for item in provedores_api.listar(settings) if item["conectado"])
+    return saida
+
+
+def estado_do_gateway(settings: Settings | None = None) -> dict[str, Any]:
+    """O gateway local (9router/magpie) como provedor na lista, quando está de pé."""
+    if not garantir_gateway():
+        return {
+            "id": IDENTIDADE_GATEWAY, "nome": "9router", "sigla": "9R",
+            "cli": "API do gateway local", "conectado": False, "conta": None,
+            "plano": None, "planoAte": None, "expiraEm": None, "expirado": None,
+            "renova": False, "detalhe": "gateway local fora do ar", "contas": [],
+            "capacidades": {"protocolo": "OpenAI compatível", "chat": True},
+        }
+    catalogo = _modelos_do_magpie() or {"modelos": [], "nomes": {}, "fonte": None, "motivo": ""}
+    return {
+        "id": IDENTIDADE_GATEWAY, "nome": "9router", "sigla": "9R",
+        "cli": "API do gateway local", "conectado": True,
+        "conta": "gateway local", "plano": None, "planoAte": None,
+        "expiraEm": None, "expirado": None, "renova": False,
+        "detalhe": f"{len(catalogo['modelos'])} modelos no gateway",
+        "contas": [{"id": "gateway", "conta": "gateway local", "expiraEm": None,
+                    "esgotadaAte": None, "motivo": None, "atual": True}],
+        "capacidades": {"protocolo": "OpenAI compatível", "chat": True},
+    }
+
+
+def estado_custom(identificador: str, settings: Settings | None = None) -> dict[str, Any]:
+    """Um provedor custom guardado, no formato que a tela já sabe ler."""
+    nome = identificador.removeprefix(IDENTIDADE_CUSTOM_PREFIXO).replace("-", " ")
+    contas = oauth_login.contas(settings, identificador) if settings is not None else []
+    especificos = ((contas[0] if contas else None) or {}).get("specific") or {}
+    return {
+        "id": identificador, "nome": especificos.get("nome_custom") or nome, "sigla": "CX",
+        "base": especificos.get("base") or "", "formato": especificos.get("formato") or "openai",
+        "cli": "API custom (OpenAI/Anthropic)", "conectado": bool(contas),
+        "conta": (contas[0] or {}).get("conta") if contas else None,
+        "plano": None, "planoAte": None, "expiraEm": None, "expirado": None,
+        "renova": False, "detalhe": str(especificos.get("base") or "sem endereço"),
+        "contas": [{
+            "id": item["id"], "conta": item.get("conta"), "expiraEm": None,
+            "esgotadaAte": item.get("esgotadaAte"), "motivo": item.get("motivo"),
+            "atual": item["id"] == (oauth_login.guardado(settings, identificador) or {}).get("id"),
+        } for item in contas],
+        "capacidades": {
+            "protocolo": "Anthropic Messages" if especificos.get("formato") == "anthropic"
+            else "OpenAI compatível",
+            "chat": True,
+        },
+    }
+
+
+def salvar_custom(
+    settings: Settings | None, *, nome: str, base: str, chave: str, formato: str
+) -> dict[str, Any]:
+    """Cria/atualiza um provedor custom (URL + chave) e devolve o estado dele."""
+    if settings is None:
+        return {"ok": False, "detalhe": "o serviço local não está pronto"}
+    nome_limpo = "".join(
+        c if c.isalnum() or c in "- _" else "-" for c in nome.strip()
+    ).strip("- _")
+    if not nome_limpo:
+        return {"ok": False, "detalhe": "dê um nome ao provedor"}
+    if not base.strip().startswith(("http://", "https://")):
+        return {"ok": False, "detalhe": "a URL precisa começar com http:// ou https://"}
+    if not chave.strip():
+        return {"ok": False, "detalhe": "a chave é obrigatória"}
+    formato_limpo = formato if formato in {"anthropic", "openai", "responses"} else "openai"
+    identificador = f"{IDENTIDADE_CUSTOM_PREFIXO}{nome_limpo.lower().replace(' ', '-')}"
+    existentes = oauth_login.contas(settings, identificador)
+    if any((c.get("specific") or {}).get("base", "").rstrip("/") != base.strip().rstrip("/") or
+           (c.get("specific") or {}).get("formato", "openai") != formato_limpo for c in existentes):
+        return {"ok": False, "detalhe": "Este nome já está associado a outra URL ou formato"}
+    specific = dict((existentes[0].get("specific") or {}) if existentes else {})
+    specific.update({"base": base.strip().rstrip("/"), "formato": formato_limpo})
+    specific.setdefault("nome_custom", nome_limpo)
+    oauth_login.gravar_chave(settings, identificador, chave.strip(), specific)
+    esquecer_modelos(identificador)
+    return {"ok": True, "estado": estado_custom(identificador, settings), "id": identificador}
+
+
+def atualizar_custom(settings: Settings, identificador: str, *, nome: str | None = None,
+                     base: str | None = None, formato: str | None = None,
+                     modelo: str | None = None, acao: str | None = None) -> dict[str, Any]:
+    if not identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
+        raise ValueError("Provedor custom inválido")
+    contas = oauth_login.contas(settings, identificador)
+    if not contas:
+        raise ValueError("Provedor custom não encontrado")
+    if nome is not None and not nome.strip():
+        raise ValueError("Informe o nome")
+    if base is not None and not base.strip().startswith(("http://", "https://")):
+        raise ValueError("Informe uma URL válida")
+    if formato is not None and formato not in {"openai", "responses", "anthropic"}:
+        raise ValueError("Formato inválido")
+    if acao is not None and (acao not in {"adicionar", "remover", "restaurar"} or not (modelo or "").strip()):
+        raise ValueError("Informe um modelo e uma ação válidos")
+    with oauth_login._conexao(settings) as banco:
+        for conta in contas:
+            specific = dict(conta.get("specific") or {})
+            if nome is not None: specific["nome_custom"] = nome.strip()
+            if base is not None: specific["base"] = base.strip().rstrip("/")
+            if formato is not None: specific["formato"] = formato
+            if acao:
+                valor = modelo.strip()
+                adicionados = list(specific.get("modelos_adicionados") or [])
+                ocultos = list(specific.get("modelos_ocultos") or [])
+                if acao == "adicionar":
+                    if valor not in adicionados: adicionados.append(valor)
+                    ocultos = [m for m in ocultos if m != valor]
+                elif acao == "remover":
+                    if valor not in ocultos: ocultos.append(valor)
+                else:
+                    ocultos = [m for m in ocultos if m != valor]
+                specific.update(modelos_adicionados=adicionados, modelos_ocultos=ocultos)
+            banco.execute("UPDATE provedor_contas SET specific = ? WHERE provedor = ? AND id = ?", (json.dumps(specific), identificador, conta["id"]))
+        banco.commit()
+    esquecer_modelos(identificador)
+    return estado_custom(identificador, settings)
+
+
+def substituir_chave_custom(settings: Settings, identificador: str, conta_id: str, chave: str) -> None:
+    contas = oauth_login.contas(settings, identificador) if identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO) else []
+    conta = next((c for c in contas if c['id'] == conta_id), None)
+    if not conta or not chave.strip(): raise ValueError("Chave ou provedor inválido")
+    if any(c['id'] != conta_id and c.get('access') == chave.strip() for c in contas):
+        raise ValueError("Esta chave já está adicionada")
+    oauth_login._gravar(settings, identificador, {"id": conta_id, "conta": conta.get("conta"), "access": chave.strip(), "specific": conta.get("specific") or {}})
+    esquecer_modelos(identificador)
+
+
+def testar_custom(base: str, chave: str, formato: str) -> dict[str, Any]:
+    """Consulta modelos para verificar URL e autenticação, sem presumir um modelo."""
+    base_limpa = base.strip().rstrip('/')
+    if not base_limpa.startswith(('http://', 'https://')) or not chave.strip():
+        return {'ok': False, 'detalhe': 'Informe URL e chave'}
+    headers = {'authorization': f'Bearer {chave.strip()}'}
+    if formato == 'anthropic':
+        headers.update({'x-api-key': chave.strip(), 'anthropic-version': '2023-06-01'})
+    try:
+        with httpx.Client(timeout=20, follow_redirects=False) as cliente:
+            resposta = cliente.get(f'{base_limpa}/models', headers=headers)
+        if resposta.status_code >= 400:
+            return {'ok': False, 'detalhe': f'Consulta de modelos recusada (HTTP {resposta.status_code})'}
+        dados = resposta.json()
+        itens = dados.get('data', []) if isinstance(dados, dict) else dados
+        if not isinstance(itens, list):
+            return {'ok': False, 'detalhe': 'Resposta de modelos inválida', 'modelos': []}
+        modelos = [str(item['id']) for item in itens if isinstance(item, dict) and item.get('id')]
+        return {'ok': True, 'detalhe': f'{len(modelos)} modelos encontrados', 'modelos': modelos}
+    except (httpx.HTTPError, ValueError):
+        return {'ok': False, 'detalhe': 'Não foi possível consultar a API'}
 
 
 def _numero(valor: Any) -> float | None:
@@ -590,6 +759,32 @@ def saldo_do_provedor(identificador: str, settings: Settings) -> dict[str, Any]:
     """
     if identificador not in POR_ID:
         return {"tipo": "indisponivel", "motivo": "Provedor desconhecido"}
+    if identificador == "accio":
+        from . import accio_koda
+
+        lista = oauth_login.contas(settings, "accio")
+        if not lista:
+            return {"tipo": "indisponivel", "motivo": "Conta não conectada"}
+        total = 0.0
+        achou = False
+        for item in lista:
+            conta_do_saldo = oauth_login.garantir(settings, "accio", item["id"]) or item
+            info = accio_koda.creditos(conta_do_saldo)
+            if info is None:
+                continue
+            total += float(info.get("remaining") or 0)
+            achou = True
+        if achou:
+            return {
+                "tipo": "creditos",
+                "valor": round(total, 2),
+                "motivo": f"Créditos restantes em {len(lista)} conta(s) do Accio",
+                "atualizadoEm": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        return {
+            "tipo": "indisponivel",
+            "motivo": "O Accio não informou os créditos das contas conectadas",
+        }
     conta = oauth_login.garantir(settings, identificador)
     if not conta or not conta.get("access"):
         return {"tipo": "indisponivel", "motivo": "Conta não conectada"}
@@ -637,6 +832,23 @@ def testar(identificador: str, settings: Settings | None = None) -> dict[str, An
     Não lê arquivo de CLI e não fala com o fornecedor: quem valida token de verdade é ele, na
     primeira chamada. O que se pode afirmar aqui é o que o nosso próprio arquivo diz.
     """
+    if identificador == IDENTIDADE_GATEWAY:
+        estado = estado_do_gateway(settings)
+        if not estado["conectado"]:
+            return {"ok": False, "estado": estado, "detalhe": "gateway local fora do ar"}
+        return {"ok": True, "estado": estado, "detalhe": "gateway local respondendo"}
+    if identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
+        estado = estado_custom(identificador, settings)
+        if not estado["conectado"]:
+            return {"ok": False, "estado": estado, "detalhe": "provedor custom não existe"}
+        conta = oauth_login.contas(settings, identificador)[0]
+        especificos = conta.get("specific") or {}
+        resultado = testar_custom(
+            str(especificos.get("base") or ""), str(conta.get("access") or ""),
+            str(especificos.get("formato") or "openai"),
+        )
+        resultado["estado"] = estado
+        return resultado
     provedor = POR_ID.get(identificador)
     if provedor is None:
         return {"ok": False, "detalhe": "provedor desconhecido"}
@@ -663,6 +875,9 @@ MAGPIE_CAMINHOS = (
 
 #: Só tenta subir o gateway uma vez por processo; falhar não pode virar laço de spawn.
 _tentou_subir = False
+
+IDENTIDADE_GATEWAY = "gateway"
+IDENTIDADE_CUSTOM_PREFIXO = "custom-"
 
 
 def _porta_aberta() -> bool:
@@ -757,14 +972,129 @@ def _modelos_do_magpie(prefixo: str | None = None) -> dict[str, Any] | None:
     }
 
 
+def _desempatar_nomes(nomes: dict[str, str]) -> dict[str, str]:
+    """Dá nome distinto a modelos que o provedor publica com o **mesmo** rótulo.
+
+    O Copilot chama `mai-code-1-flash-4th`, `-secondary` e `-tertiary` de
+    "MAI-Code-1.1-Flash"; o seletor mostrava três linhas idênticas e não havia como
+    escolher. Quem repete ganha o trecho do id que sobra fora do nome.
+    """
+    por_nome: dict[str, list[str]] = {}
+    for ident, nome in nomes.items():
+        por_nome.setdefault(nome, []).append(ident)
+    saida = dict(nomes)
+    for nome, idents in por_nome.items():
+        if len(idents) < 2:
+            continue
+        achatado = re.sub(r"[^a-z0-9]+", "", nome.lower())
+        for ident in idents:
+            partes = [p for p in re.split(r"[^a-z0-9]+", ident.lower()) if p]
+            # `gpt-4-o-preview` → `gpt`, `4`, `o` já estão em "GPT-4o"; sobra `preview`.
+            sobra = [p for p in partes if p not in achatado]
+            if sobra:
+                saida[ident] = f"{nome} · {' '.join(sobra)}"
+    return saida
+
+
+#: Catálogo de modelos por provedor, com validade curta. Cada `/modelos` ia à rede do
+#: fornecedor — e o celular pede um por provedor conectado ao abrir o seletor. Com 17
+#: provedores, isso era a espera de 5 a 10 segundos que a pessoa via. O cache é do
+#: processo e vale para o PC e para o celular; login/logout e o TTL renovam.
+_MODELOS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MODELOS_CACHE_LOCK = threading.Lock()
+_MODELOS_CACHE_TTL = 300.0
+
+
+def esquecer_modelos(identificador: str | None = None) -> None:
+    """Derruba o cache de um provedor (ou de todos) depois de login/logout."""
+    with _MODELOS_CACHE_LOCK:
+        if identificador is None:
+            _MODELOS_CACHE.clear()
+        else:
+            _MODELOS_CACHE.pop(identificador, None)
+
+
 def modelos(identificador: str, settings: Settings | None = None) -> dict[str, Any]:
+    agora = time.monotonic()
+    with _MODELOS_CACHE_LOCK:
+        guardado = _MODELOS_CACHE.get(identificador)
+        if guardado is not None and agora - guardado[0] < _MODELOS_CACHE_TTL:
+            return copy.deepcopy(guardado[1])
+    resultado = _modelos_sem_cache(identificador, settings)
+    if settings is not None and identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
+        contas = oauth_login.contas(settings, identificador)
+        specific = ((contas[0] if contas else None) or {}).get("specific") or {}
+        ocultos = specific.get("modelos_ocultos") or []
+        incluidos = specific.get("modelos_adicionados") or []
+        resultado["modelos"] = list(dict.fromkeys(m for m in [*resultado.get("modelos", []), *incluidos] if m not in ocultos))
+        resultado["modelosOcultos"] = ocultos
+        if resultado["modelos"] and not resultado.get("fonte"): resultado["fonte"] = "modelos adicionados"
+    if resultado.get("modelos"):
+        with _MODELOS_CACHE_LOCK:
+            _MODELOS_CACHE[identificador] = (agora, copy.deepcopy(resultado))
+    return resultado
+
+
+def _modelos_sem_cache(identificador: str, settings: Settings | None = None) -> dict[str, Any]:
+    if identificador.startswith("api-"):
+        from . import provedores_api
+        return provedores_api.modelos(identificador, settings)
+    if identificador == IDENTIDADE_GATEWAY:
+        vivo = _modelos_do_magpie()
+        if vivo is None:
+            return {"modelos": [], "fonte": None, "motivo": "gateway local fora do ar"}
+        for modelo in vivo["modelos"]:
+            _CACHE[modelo] = identificador
+        return vivo
+    if identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
+        if settings is None:
+            return {"modelos": [], "fonte": None, "motivo": "o serviço local não está pronto"}
+        conta = oauth_login.guardado(settings, identificador)
+        if not conta:
+            return {"modelos": [], "fonte": None, "motivo": "provedor custom não existe"}
+        especificos = conta.get("specific") or {}
+        base = str(especificos.get("base") or "").rstrip("/")
+        chave = str(conta.get("access") or "")
+        if not base or not chave:
+            return {"modelos": [], "fonte": None, "motivo": "provedor custom sem URL ou chave"}
+        try:
+            with httpx.Client(timeout=20) as cliente:
+                resposta = cliente.get(
+                    f"{base}/models",
+                    headers={
+                        "authorization": f"Bearer {chave}",
+                        **({"x-api-key": chave, "anthropic-version": "2023-06-01"} if especificos.get("formato") == "anthropic" else {}),
+                    },
+                )
+            if resposta.status_code >= 400:
+                return {"modelos": [], "fonte": None,
+                        "motivo": f"o provedor recusou a lista de modelos (HTTP {resposta.status_code})"}
+            dados = resposta.json()
+        except (httpx.HTTPError, ValueError):
+            return {"modelos": [], "fonte": None, "motivo": "o provedor não respondeu a lista"}
+        itens = dados.get("data") if isinstance(dados, dict) else dados
+        if not isinstance(itens, list):
+            itens = []
+        modelos = [str(item.get("id")) for item in itens
+                   if isinstance(item, dict) and item.get("id")]
+        if not modelos:
+            return {"modelos": [], "fonte": None,
+                    "motivo": "o provedor não publicou modelos"}
+        nomes = {str(item.get("id")): str(item.get("display_name") or item.get("id"))
+                 for item in itens if isinstance(item, dict) and item.get("id")}
+        return {"modelos": modelos, "nomes": nomes, "fonte": "API do provedor", "motivo": ""}
     if identificador not in POR_ID:
         return {"modelos": [], "fonte": None, "motivo": "provedor desconhecido"}
     vivo = _ao_vivo(identificador, settings)
     if vivo is not None:
         for modelo in vivo["modelos"]:
             _CACHE[modelo] = identificador
-        vivo["esforcos"] = _esforcos_por_modelo(identificador, vivo["modelos"])
+        # O gateway local já sabe quais níveis cada modelo aceita; a tabela fixa só serve
+        # para os provedores cujo catálogo não traz essa informação.
+        vivo["esforcos"] = vivo.get("esforcos") or _esforcos_por_modelo(
+            identificador, vivo["modelos"]
+        )
+        vivo["nomes"] = _desempatar_nomes(vivo.get("nomes") or {})
         return vivo
     itens = CATALOGO.get(identificador) or []
     if not itens:
@@ -786,6 +1116,32 @@ def modelos(identificador: str, settings: Settings | None = None) -> dict[str, A
 CODEX_UA = "codex_cli_rs/0.162.0 (Windows 10; x86_64) vscode"
 
 
+def _rodar(coro: Any) -> Any:
+    """Roda uma corrotina a partir de código síncrono — com ou sem laço já ativo.
+
+    `asyncio.run` estoura dentro de um laço rodando (o `modelos()` pode ser chamado de
+    um handler async). Nesse caso a corrotina vai para uma thread com laço próprio.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    caixa: dict[str, Any] = {}
+
+    def alvo() -> None:
+        try:
+            caixa["valor"] = asyncio.run(coro)
+        except BaseException as erro:  # noqa: BLE001 — repassado para quem chamou
+            caixa["erro"] = erro
+
+    thread = threading.Thread(target=alvo, daemon=True)
+    thread.start()
+    thread.join()
+    if "erro" in caixa:
+        raise caixa["erro"]
+    return caixa.get("valor")
+
+
 def _ao_vivo(identificador: str, settings: Settings | None) -> dict[str, Any] | None:
     """A lista de modelos **da conta**, pedida ao fornecedor. `None` quando não há como.
 
@@ -793,6 +1149,10 @@ def _ao_vivo(identificador: str, settings: Settings | None) -> dict[str, Any] | 
     pergunta que o botão «Testar» faz. Onde não existe endpoint público, volta `None` e a
     tela cai no catálogo de referência.
     """
+    if identificador == "accio":
+        from . import accio_koda
+
+        return accio_koda.catalogo()
     dado = oauth_login.garantir(settings, identificador) if settings is not None else None
     if not dado or not dado.get("access"):
         return None
@@ -811,19 +1171,140 @@ def _ao_vivo(identificador: str, settings: Settings | None) -> dict[str, Any] | 
                 "nomes": {str(item["id"]): str(item.get("name") or item["id"]) for item in itens},
                 "fonte": "API da conta Kilo", "motivo": ""}
 
+    if identificador == "github":
+        # A lista estática do Copilot mostrava justamente os modelos `disabled` da conta —
+        # 28 ids que respondem 400 `model_not_available_for_integrator`. A lista de verdade
+        # vem de `/models`, com `policy.state` e `supported_endpoints` por modelo.
+        try:
+            with httpx.Client(timeout=20) as cliente:
+                troca = cliente.get(
+                    "https://api.github.com/copilot_internal/v2/token",
+                    headers={"authorization": f"token {token}", "accept": "application/json",
+                             "user-agent": "koda/1.0"},
+                )
+                if troca.status_code >= 400:
+                    return None
+                sessao = str((troca.json() or {}).get("token") or "")
+                if not sessao:
+                    return None
+                resposta = cliente.get(
+                    "https://api.githubcopilot.com/models",
+                    headers={
+                        "authorization": f"Bearer {sessao}",
+                        "copilot-integration-id": "vscode-chat",
+                        "editor-version": "vscode/1.95.0",
+                        "editor-plugin-version": "copilot-chat/0.22.0",
+                        "user-agent": "GitHubCopilotChat/0.22.0",
+                        "accept": "application/json",
+                    },
+                )
+        except (httpx.HTTPError, ValueError):
+            return None
+        if resposta.status_code >= 400:
+            return None
+        itens = (resposta.json() or {}).get("data")
+        if not isinstance(itens, list):
+            return None
+        escolhidos: list[dict[str, Any]] = []
+        for item in itens:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            ident = str(item["id"])
+            capacidades = item.get("capabilities") or {}
+            if capacidades.get("type") != "chat":
+                continue
+            estado = str((item.get("policy") or {}).get("state") or "")
+            if estado == "disabled":
+                continue
+            # Sem política (`None`) sobram os legados: só os que já usam o tokenizador
+            # atual são servidos pela integração — gpt-3.5/gpt-4 ficam de fora.
+            if not estado and capacidades.get("tokenizer") != "o200k_base":
+                continue
+            # `/chat/completions` é o único caminho que o Koda fala. `None` = modelo
+            # legado, que aceita o endpoint antigo; lista sem ele só serve em `/responses`.
+            fins = item.get("supported_endpoints")
+            if isinstance(fins, list) and "/chat/completions" not in fins:
+                continue
+            if ident.startswith("copilot-"):
+                continue  # buscadores internos da integração, não são modelos de conversa
+            if re.search(r"-\d{4}-\d{2}-\d{2}$", ident):
+                continue  # variante presa à data; o apelido sem data é o que se usa
+            escolhidos.append(item)
+        escolhidos.sort(key=lambda i: (
+            0 if str((i.get("policy") or {}).get("state") or "") == "enabled" else 1,
+            str(i["id"]),
+        ))
+        return {
+            "modelos": [str(i["id"]) for i in escolhidos],
+            "nomes": {str(i["id"]): str(i.get("name") or i["id"]) for i in escolhidos},
+            "fonte": "API da conta Copilot",
+            "motivo": "",
+        }
+
     if identificador == "zed":
-        import asyncio
         from . import zed_koda
         from .providers.base import ProviderError
 
         try:
-            itens = asyncio.run(zed_koda.modelos(dado))
+            itens = _rodar(zed_koda.modelos(dado))
         except ProviderError:
             return None
         return {"modelos": [str(i["id"]) for i in itens if i.get("id")],
                 "nomes": {str(i["id"]): str(i.get("name") or i["id"])
                           for i in itens if i.get("id")},
                 "fonte": "catálogo da conta Zed", "motivo": ""}
+
+    if identificador in {"qoder", "qoder-cn"}:
+        from . import qoder_koda
+        from .providers.base import ProviderError
+
+        try:
+            itens = _rodar(qoder_koda.modelos(identificador, dado))
+        except ProviderError:
+            return None
+        if not itens:
+            return None
+        return {
+            "modelos": [str(item["id"]) for item in itens],
+            "nomes": {str(item["id"]): str(item.get("name") or item["id"]) for item in itens},
+            "fonte": "catálogo da conta Qoder",
+            "motivo": "",
+        }
+
+    if identificador == "windsurf":
+        from . import windsurf_koda
+        from .providers.base import ProviderError
+
+        try:
+            itens = _rodar(windsurf_koda.modelos(dado))
+        except ProviderError:
+            return None
+        if not itens:
+            return None
+        return {
+            "modelos": [str(item["id"]) for item in itens],
+            "nomes": {str(item["id"]): str(item.get("name") or item["id"]) for item in itens},
+            "fonte": "catálogo da conta Windsurf",
+            "motivo": "",
+        }
+
+    if identificador == "kiro":
+        from . import kiro_koda
+        from .providers.base import ProviderError
+
+        try:
+            itens = _rodar(kiro_koda.modelos(dado))
+        except ProviderError:
+            return None
+        return {
+            "modelos": [str(item["id"]) for item in itens if item.get("id")],
+            "nomes": {
+                str(item["id"]): str(item.get("name") or item["id"])
+                for item in itens if item.get("id")
+            },
+            "fonte": "catálogo da conta Kiro",
+            "motivo": "",
+        }
 
     if identificador == "anthropic":
         try:
@@ -893,12 +1374,26 @@ def testar_modelo(identificador: str, modelo: str, settings: Settings | None = N
     cota. Aqui o pedido é uma pergunta curta ao modelo — resposta, `ok`; cota estourada, o
     motivo e até quando; qualquer outra coisa, o erro do fornecedor, como ele escreveu.
     """
-    if identificador not in POR_ID:
+    if identificador.startswith(("api-", "custom-")):
+        if settings is None:
+            return {"ok": False, "detalhe": "o serviço local não está pronto"}
+        from .providers.conta import ContaProvider
+        try:
+            result = _rodar(ContaProvider(settings, identificador).step([{"role": "user", "content": "Responda apenas: ok"}], [], modelo))
+            return {"ok": bool(result.text), "detalhe": result.text[:120] or "resposta vazia"}
+        except Exception as erro:
+            return {"ok": False, "detalhe": str(erro)[:300]}
+    if identificador not in POR_ID and identificador != IDENTIDADE_GATEWAY and not identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
         return {"ok": False, "detalhe": "provedor desconhecido"}
     if settings is None:
         return {"ok": False, "detalhe": "o serviço local não está pronto"}
 
-    lista = oauth_login.contas(settings, identificador)
+    if identificador == IDENTIDADE_GATEWAY:
+        lista = [{"id": "gateway", "conta": "gateway local", "access": "", "specific": {}}]
+    elif identificador.startswith(IDENTIDADE_CUSTOM_PREFIXO):
+        lista = oauth_login.contas(settings, identificador)
+    else:
+        lista = oauth_login.contas(settings, identificador)
     if not lista:
         return {"ok": False, "detalhe": "entre no provedor primeiro — o teste usa a conta"}
 
@@ -908,7 +1403,7 @@ def testar_modelo(identificador: str, modelo: str, settings: Settings | None = N
         if conta.get("esgotadaAte") and _ainda_esgotada(conta["esgotadaAte"]):
             tentativas.append(f"{conta.get('conta') or conta['id']}: sem cota até {conta['esgotadaAte'][:10]}")
             continue
-        if identificador in {"antigravity", "gemini-cli", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl", "grok-cli", "kimi", "kiro", "minimax-code", "minimax-code-global", "nous", "xai"}:
+        if identificador in {"antigravity", "accio", "gemini-cli", "cline", "clinepass", "codebuddy-cn", "codebuddy-intl", "grok-cli", "kimi", "kiro", "minimax-code", "minimax-code-global", "nous", "xai"}:
             conta = oauth_login.garantir(settings, identificador, conta["id"]) or conta
         resultado = _chamar_modelo(identificador, conta, modelo, settings)
         if resultado.get("esgotadaAte"):
@@ -941,7 +1436,7 @@ def _chamar_modelo(
 ) -> dict[str, Any]:
     """Uma mensagem curta ao modelo, com **uma** conta. Devolve ok, texto ou o motivo."""
     token = str(conta.get("access") or "")
-    if not token:
+    if not token and identificador != IDENTIDADE_GATEWAY:
         return {"ok": False, "detalhe": "conta sem token de acesso"}
 
     if identificador == "anthropic":
@@ -980,6 +1475,23 @@ def _chamar_modelo(
     if identificador == "muse":
         return _chamar_modelo_muse(conta, modelo)
 
+    if identificador == "accio":
+        return _chamar_modelo_accio(conta, modelo, settings)
+    if identificador == IDENTIDADE_GATEWAY:
+        try:
+            with httpx.Client(timeout=45) as cliente:
+                resposta = cliente.post(
+                    f"{MAGPIE_URL}/chat/completions",
+                    json={"model": modelo, "max_tokens": 24,
+                          "messages": [{"role": "user", "content": "responda apenas: ok"}]},
+                )
+            if resposta.status_code >= 400:
+                return {"ok": False, "detalhe": _motivo(resposta, "9router")}
+            dados = resposta.json()
+            texto = str(((dados.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+            return {"ok": True, "detalhe": texto.strip()[:120] or "respondeu"}
+        except httpx.HTTPError as erro:
+            return {"ok": False, "detalhe": f"não deu para falar com o gateway: {erro}"}
     if identificador in {"cline", "clinepass", "github", "glm", "iflow", "kilocode", "kimchi", "kimi", "nous", "xai"}:
         return _chamar_modelo_compativel(identificador, conta, modelo)
     if identificador in {"minimax-code", "minimax-code-global"}:
@@ -1032,6 +1544,61 @@ def _chamar_modelo_muse(conta: dict[str, Any], modelo: str) -> dict[str, Any]:
         return {"ok": True, "detalhe": resultado.text.strip()[:120] or "respondeu"}
     except (httpx.HTTPError, ProviderError) as erro:
         return {"ok": False, "detalhe": str(erro)}
+
+
+def _chamar_modelo_accio(
+    conta: dict[str, Any], modelo: str, settings: Settings | None = None
+) -> dict[str, Any]:
+    """Uma pergunta curta pelo protocolo do Accio, com a conta escolhida."""
+    from . import accio_koda
+
+    if not str(conta.get("access") or ""):
+        return {"ok": False, "detalhe": "conta sem token de acesso"}
+
+    def pedir(usar: dict[str, Any]) -> dict[str, Any]:
+        corpo = accio_koda.corpo(
+            modelo, [{"role": "user", "content": "responda apenas: ok"}],
+            str(usar.get("access") or ""), max_tokens=64,
+        )
+        alvo = accio_koda.url(str(corpo["requestId"]))
+
+        async def fluxo() -> dict[str, Any]:
+            texto: list[str] = []
+            async with httpx.AsyncClient(timeout=90) as cliente:
+                async with cliente.stream(
+                    "POST", alvo, headers=accio_koda.cabecalhos(usar, alvo), json=corpo
+                ) as resposta:
+                    if resposta.status_code in {429, 555}:
+                        await resposta.aread()
+                        return {"ok": False, "esgotadaAte": _quando_renova(resposta),
+                                "detalhe": "limite de uso atingido"}
+                    if resposta.status_code in {401, 402}:
+                        await resposta.aread()
+                        return {"ok": False, "recusou": True,
+                                "detalhe": f"o Accio recusou o token (HTTP {resposta.status_code})"}
+                    if resposta.status_code >= 400:
+                        bruto = (await resposta.aread()).decode("utf-8", "replace")
+                        return {"ok": False, "detalhe":
+                                f"o Accio respondeu {resposta.status_code}: {bruto[:200]}"}
+                    async for evento in accio_koda.ler(resposta):
+                        if evento.get("erro"):
+                            return {"ok": False, "detalhe": str(evento["erro"])[:300]}
+                        if evento.get("texto") or evento.get("raciocinio"):
+                            texto.append(str(evento.get("texto") or evento.get("raciocinio")))
+            return {"ok": True, "detalhe": "".join(texto).strip()[:120] or "respondeu"}
+
+        return _rodar(fluxo())
+
+    try:
+        resultado = pedir(conta)
+        if resultado.get("recusou") and settings is not None:
+            nova = oauth_login.renovar_agora(settings, "accio", conta)
+            if nova:
+                resultado = pedir(nova)
+        resultado.pop("recusou", None)
+        return resultado
+    except (httpx.HTTPError, RuntimeError, ValueError) as erro:
+        return {"ok": False, "detalhe": f"não deu para falar com o Accio: {erro}"}
 
 
 def _chamar_modelo_compativel(
@@ -1163,7 +1730,6 @@ def _chamar_modelo_minimax(identificador: str, conta: dict[str, Any], modelo: st
 
 
 def _chamar_modelo_cursor(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import cursor_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1176,7 +1742,7 @@ def _chamar_modelo_cursor(conta: dict[str, Any], modelo: str, settings: Settings
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         return {"ok": bool(resultado.text and not resultado.truncado), "detalhe": resultado.text.strip()[:120] or "sem resposta"}
     except (ProviderError, httpx.HTTPError) as erro:
         return {"ok": False, "detalhe": str(erro)}
@@ -1185,7 +1751,6 @@ def _chamar_modelo_cursor(conta: dict[str, Any], modelo: str, settings: Settings
 
 
 def _chamar_modelo_gitlab(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import gitlab_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1198,7 +1763,7 @@ def _chamar_modelo_gitlab(conta: dict[str, Any], modelo: str, settings: Settings
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         return {"ok": bool(resultado.text and not resultado.truncado), "detalhe": resultado.text.strip()[:120] or "sem resposta"}
     except (ProviderError, httpx.HTTPError) as erro:
         return {"ok": False, "detalhe": str(erro)}
@@ -1207,7 +1772,6 @@ def _chamar_modelo_gitlab(conta: dict[str, Any], modelo: str, settings: Settings
 
 
 def _chamar_modelo_mimo_conta(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import mimo_conta_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1220,7 +1784,7 @@ def _chamar_modelo_mimo_conta(conta: dict[str, Any], modelo: str, settings: Sett
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o MiMo não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1231,7 +1795,6 @@ def _chamar_modelo_mimo_conta(conta: dict[str, Any], modelo: str, settings: Sett
 
 
 def _chamar_modelo_trae(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import trae_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1244,7 +1807,7 @@ def _chamar_modelo_trae(conta: dict[str, Any], modelo: str, settings: Settings |
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Trae não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1255,7 +1818,6 @@ def _chamar_modelo_trae(conta: dict[str, Any], modelo: str, settings: Settings |
 def _chamar_modelo_google_conta(
     identificador: str, conta: dict[str, Any], modelo: str, settings: Settings | None
 ) -> dict[str, Any]:
-    import asyncio
     from . import google_conta_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1268,7 +1830,7 @@ def _chamar_modelo_google_conta(
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Google não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1277,7 +1839,6 @@ def _chamar_modelo_google_conta(
 
 
 def _chamar_modelo_zed(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import zed_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1290,7 +1851,7 @@ def _chamar_modelo_zed(conta: dict[str, Any], modelo: str, settings: Settings | 
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Zed não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1299,7 +1860,6 @@ def _chamar_modelo_zed(conta: dict[str, Any], modelo: str, settings: Settings | 
 
 
 def _chamar_modelo_windsurf(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import windsurf_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1312,7 +1872,7 @@ def _chamar_modelo_windsurf(conta: dict[str, Any], modelo: str, settings: Settin
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Windsurf não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1321,7 +1881,6 @@ def _chamar_modelo_windsurf(conta: dict[str, Any], modelo: str, settings: Settin
 
 
 def _chamar_modelo_kiro(conta: dict[str, Any], modelo: str, settings: Settings | None) -> dict[str, Any]:
-    import asyncio
     from . import kiro_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1334,7 +1893,7 @@ def _chamar_modelo_kiro(conta: dict[str, Any], modelo: str, settings: Settings |
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Kiro não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1345,7 +1904,6 @@ def _chamar_modelo_kiro(conta: dict[str, Any], modelo: str, settings: Settings |
 def _chamar_modelo_qoder(
     identificador: str, conta: dict[str, Any], modelo: str, settings: Settings | None
 ) -> dict[str, Any]:
-    import asyncio
     from . import qoder_koda
     from .providers.base import ProviderError
     from .providers.conta import ContaProvider
@@ -1358,7 +1916,7 @@ def _chamar_modelo_qoder(
         )
 
     try:
-        resultado = asyncio.run(testar())
+        resultado = _rodar(testar())
         if resultado.truncado or not resultado.text:
             return {"ok": False, "detalhe": "o Qoder não concluiu a resposta do modelo"}
         return {"ok": True, "detalhe": resultado.text.strip()[:120]}
@@ -1415,7 +1973,7 @@ def _chamar_modelo_codebuddy(identificador: str, conta: dict[str, Any], modelo: 
 
 def _chamar_modelo_grok(conta: dict[str, Any], modelo: str) -> dict[str, Any]:
     """Testa um modelo do Grok CLI por streaming, como exigido pelo serviço."""
-    from .providers.conta import GROK_CLI_URL
+    from .providers.conta import GROK_CLI_URL, grok_cabecalhos
 
     token = str(conta.get("access") or "")
     if not token:
@@ -1424,8 +1982,7 @@ def _chamar_modelo_grok(conta: dict[str, Any], modelo: str) -> dict[str, Any]:
         with httpx.Client(timeout=45) as cliente:
             with cliente.stream(
                 "POST", GROK_CLI_URL,
-                headers={"authorization": f"Bearer {token}", "x-xai-token-auth": "xai-grok-cli",
-                         "x-grok-model-override": modelo, "user-agent": "grok-cli/0.2.1"},
+                headers=grok_cabecalhos(conta, modelo),
                 json={"model": modelo, "messages": [{"role": "user", "content": "responda apenas: ok"}],
                       "stream": True, "max_tokens": 24},
             ) as resposta:
@@ -1569,6 +2126,10 @@ def _esforcos_por_modelo(identificador: str, modelos: list[str]) -> dict[str, li
     """
     from .providers.conta import aceita_pensar
 
+    if identificador == "accio":
+        from . import accio_koda
+
+        return {modelo: accio_koda.esforcos(modelo) for modelo in modelos}
     if identificador == "openai":
         niveis = ["none", "minimal", "low", "medium", "high"]
     elif identificador == "anthropic":
@@ -1587,10 +2148,16 @@ def entrar(identificador: str, settings: Settings | None = None) -> dict[str, An
     return oauth_login.iniciar(settings, identificador)
 
 
+def estado_do_login(identificador: str) -> dict[str, Any]:
+    """O andamento do login, do mesmo jeito que os outros provedores de conta."""
+    return oauth_login.estado(identificador)
+
+
 def sair(identificador: str, settings: Settings | None = None, conta_id: str | None = None) -> dict[str, Any]:
     """Sai da conta — de uma específica, ou de todas as do provedor."""
     if settings is not None:
         oauth_login.esquecer(settings, identificador, conta_id)
+    esquecer_modelos(identificador)
     return {"ok": True}
 
 

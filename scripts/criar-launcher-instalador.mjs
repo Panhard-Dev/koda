@@ -11,6 +11,10 @@ const instaladorInterno = join(pastaBundle, `Koda_${versao}_x64-setup-nsis.exe`)
 const simbolos = join(pastaBundle, `Koda_${versao}_x64-setup.pdb`)
 const fonte = join(raiz, 'scripts', 'installer-launcher', 'main.rs')
 const assinaturaLauncher = Buffer.from('KODA_TEMP_OVERRIDE_WRAPPER_V1')
+const compilandoNoLinux = process.platform !== 'win32'
+const rustc = compilandoNoLinux
+  ? join(raiz, '.toolchain', 'rustup', 'toolchains', 'stable-x86_64-unknown-linux-gnu', 'bin', 'rustc')
+  : 'rustc'
 
 const mb = (caminho) => (statSync(caminho).size / 1048576).toFixed(1)
 
@@ -34,9 +38,10 @@ if (!publicoExiste) {
 copyFileSync(instaladorNsis, instaladorInterno)
 
 const resultado = spawnSync(
-  'rustc',
+  rustc,
   [
     '--edition=2021',
+    ...(compilandoNoLinux ? ['--target', 'x86_64-pc-windows-gnu', '-C', 'linker=x86_64-w64-mingw32-gcc'] : []),
     '-C',
     'opt-level=s',
     '-C',
