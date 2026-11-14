@@ -51,23 +51,29 @@ ferramentas incluídas.
 
 ## Modelos
 
-O seletor mostra sempre o catálogo que o **host** publica, o mesmo em qualquer máquina. Sem
-o host no ar, ele cai na lista da casa, que é esta:
+O seletor usa o catálogo que o backend publica em `/api/models`, espelho do `/v1/models` do
+host. Enquanto o backend não responde, ele cai no espelho local de `src/models.tsx`:
 
 | Família | Modelos |
 | --- | --- |
-| **Claude** | `Claude Haiku 5.5` (padrão) |
-| **GLM** | `GLM 5.3 Flash` |
-| **Qwen** | `Qwen 3.8 Flash` · `Qwen 3.8 Flash (Legacy)` |
+| **Layze** | `Layze 2.1 flash` (padrão) |
+| **Liz** | `Liz 4.5 super` |
+| **Koda** | `Koda 1` · `Koda 2 pro` |
+| **MX** | `MX LZ1 teste` |
 
-O host é o **`host/gateway-local`**, um gateway OpenAI-compatible. O backend o descobre em
-`8790–8799` (a porta não é fixa: o headless sobe em 8794 e pula para a próxima livre) e o
-sobe sozinho quando o Node está disponível.
+O host oficial é o **LizProxy** (`LizProxy.py`), um processo Python OpenAI-compatible com
+`/v1/models` e `/v1/chat/completions`, protegido pela senha dinâmica do dia. No app
+instalado, o launcher Tauri sobe e vigia esse processo; em desenvolvimento,
+`backend/app/providers/host_boot.py` faz esse papel e guarda a porta real em arquivo.
+Os helpers de `host/gateway-local`, `host/c-host.exe` e da faixa `8790–8799` ficam só para
+compatibilidade com checkouts antigos.
 
-- **A ordem é explícita**, do mais forte para o mais fraco: Claude Haiku 5.5 → GLM 5.3 Flash
-  → Qwen 3.8 Flash → Qwen 3.8 Flash (Legacy). Número de geração não é força, e adivinhar
-  pelo nome já colocou um modelo "mini" no meio da fila. Modelo novo do gateway entra em
-  «Outros», sem lista fixa no frontend.
+- **A ordem é explícita** no front (`ORDEM_DE_FORCA`), do mais forte para o mais fraco:
+  `Layze 2.1 flash` → `Liz 4.5 super` → `Koda 1` → `Koda 2 pro` → `MX LZ1 teste`.
+  Número de geração não decide força. Família desconhecida entra em «Outros», sem exigir
+  release do frontend.
+- **Padrão:** `layze-2.1-flash` (`MODELO_PADRAO`); `KODA_HOST_MODEL` troca o fallback do
+  backend.
 - **Esforço de raciocínio, por modelo.** Ao lado do seletor de modelo há o de esforço —
   `Automático` (quem decide é o botão *Reasoning*), `Mínimo`, `Baixo`, `Médio` ou `Alto` — e
   cada modelo guarda o seu. Pergunta rápida num modelo leve, tarefa cabeluda num modelo
@@ -97,8 +103,9 @@ sobe sozinho quando o Node está disponível.
   qualquer serviço OpenAI-compatível — OpenAI, Groq, OpenRouter, Ollama em `/v1`. Sem chave,
   quem responde é o provider local, offline e explícito.
 
-Os modelos da casa vêm do **host** (`host/c-host.exe`), que é proprietário e distribuído à
-parte — sem ele o app continua de pé, respondendo offline em vez de fingir que está pensando.
+O catálogo da casa vem do **LizProxy**, que é proprietário e não é versionado no Git — sem
+ele o app continua de pé com o provider local, offline e explícito, em vez de fingir que
+está pensando.
 
 ## Comece agora
 
@@ -133,15 +140,16 @@ npm run app          # janela em modo dev (usa o Vite com HMR)
 npm run app:build    # instalador NSIS + exe em src-tauri/target
 ```
 
-O instalador exige o binário proprietário `host/c-host.exe`, que não é versionado no Git.
-`npm run app:build` valida o arquivo antes de gerar o pacote e falha com o caminho esperado se
-ele não estiver presente; a etapa de release deve provisionar o binário oficial nessa pasta.
+O build exige o `LizProxy.py` proprietário na raiz, que não é versionado no Git.
+`npm run app:host` valida o arquivo antes do Tauri e `npm run app:bundle:host` confere se o
+proxy entrou no instalador; a etapa de release deve provisionar o arquivo oficial.
 
 Ao abrir, o app sobe as duas peças da conversa, nesta ordem, e **encerra as duas quando
 fecha**:
 
-1. o **host** (`host/c-host.exe`), o serviço dos modelos oficiais — ele vai **dentro do
-   instalador** (recurso `host/` do bundle) e o app o encontra ao lado do próprio exe;
+1. o **host** (`LizProxy.py`), o serviço Python dos modelos oficiais — ele vai **dentro do
+   instalador** como `backend/LizProxy.py` e é executado pelo Python empacotado; o launcher
+   escolhe a porta e a repassa ao backend em `KODA_HOST_URL`;
 2. o **backend** (`uvicorn`), procurado como `backend/.venv/Scripts/python.exe` na árvore do
    projeto. A porta é escolhida na abertura — efêmera no app instalado, `8787` no dev — e vai
    para a interface junto com o **token da execução**, os dois por `invoke`.
@@ -233,7 +241,7 @@ Três peças, todas na sua máquina:
 | --- | --- | --- |
 | **Interface** | React 19 + Vite 8 + Tailwind 4 | `src/` |
 | **Backend** | FastAPI + SQLite: agente, ferramentas, histórico | `backend/`, porta efêmera (8787 em dev) |
-| **Host** | Serviço dos modelos (proprietário, à parte) | `host/c-host.exe`, porta `21128` |
+| **Host** | Serviço Python OpenAI-compatible dos modelos (proprietário) | `LizProxy.py` na raiz em dev; `backend/LizProxy.py` no bundle; porta escolhida na abertura |
 
 O backend é quem conversa com o modelo e executa as ferramentas; a interface só mostra o que
 ele manda. O app desktop é a mesma interface dentro de uma janela Tauri, com o app subindo e
