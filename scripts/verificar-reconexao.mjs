@@ -1,19 +1,16 @@
 /**
  * Prova a reconexão da conversa (`src/reconectar.ts` + o laço do `App.tsx`).
  *
- * A regra do dono: **qualquer** erro reconecta — rede, 5xx, fluxo fechado no meio,
- * silêncio estourado e até os erros de pedido (401/422/404). Acertando, o contexto
- * continua; batendo 10 tentativas, a rodada para e **diz o erro**. Esta bancada
- * tranca as partes:
+ * A regra atual: falhas transitórias têm quatro tentativas curtas e silenciosas.
+ * Erros permanentes (401/404/409/422) encerram na hora. Esta bancada tranca as partes:
  *
  * 1. o que ainda **não** é falha de conexão — `ehFalhaDeConexao` só decide marcar o
  *    backend como fora e a frase do fim (a repetição agora é sempre);
- * 2. a espera entre tentativas — sobe de um em um segundo e trava em 8 s;
+ * 2. a espera entre tentativas — 0, 250, 750 e 1,5 s;
  * 3. o sinal de vida (`lerComSinalDeVida`) — silêncio estoura, atividade reinicia,
  *    falha de leitura atravessa;
- * 4. o laço — falhar nove vezes e acertar na décima continua a rodada (com `resume`,
- *    sem repetir a pergunta); falhar dez encerra com o erro dito; e agora **todo**
- *    erro (inclusive 401/422/404) passa pelas dez tentativas antes de morrer.
+ * 4. o laço — falhas transitórias repetem sem mostrar «Reconectando»; 401/422/404
+ *    encerram imediatamente.
  *
  * O laço simulado aqui espelha o `for` dentro de `handleSend` (App.tsx): o que a
  * bancada prova é o contrato dos helpers e o desfecho, com um `streamChat` de
@@ -61,6 +58,7 @@ const {
   TENTATIVAS_DE_RECONEXAO,
   esperaDaTentativa: espera,
   ehFalhaDeConexao,
+  ehFalhaTransitoria,
   ErroDoServico,
   QuedaDeConexao,
   dormir,
@@ -76,7 +74,7 @@ const checar = (nome, ok, detalhe = '') => {
 
 // 1. classificação (o que marca o backend como fora / escolhe a frase) -----------
 
-checar('são 10 tentativas', TENTATIVAS_DE_RECONEXAO === 10)
+checar('são 4 tentativas', TENTATIVAS_DE_RECONEXAO === 4)
 const verdadeiros = [
   ['rede: TypeError do fetch', new TypeError('Failed to fetch')],
   ['serviço: 500', new ApiError(500)],
@@ -93,16 +91,20 @@ const falsos = [
   ['erro genérico', new Error('qualquer coisa')],
   ['texto solto', 'não é erro'],
 ]
+checar('408 é transitório', ehFalhaTransitoria(new ApiError(408)))
+checar('425 é transitório', ehFalhaTransitoria(new ApiError(425)))
+checar('429 é transitório', ehFalhaTransitoria(new ApiError(429)))
+checar('422 não é transitório', !ehFalhaTransitoria(new ApiError(422)))
 for (const [nome, erro] of verdadeiros) checar(`conexão: ${nome}`, ehFalhaDeConexao(erro) === true)
 for (const [nome, erro] of falsos)
   checar(`serviço de pé: ${nome}`, ehFalhaDeConexao(erro) === false)
 
 // 2. espera entre tentativas ----------------------------------------------------
 
-const esperas = Array.from({ length: 10 }, (_, i) => espera(i + 1))
+const esperas = Array.from({ length: 4 }, (_, i) => espera(i + 1))
 checar(
-  'espera sobe 1..8s e trava em 8s',
-  JSON.stringify(esperas) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 8, 8].map((s) => s * 1000)),
+  'espera é curta e cresce até 1,5 s',
+  JSON.stringify(esperas) === JSON.stringify([0, 250, 750, 1500]),
   JSON.stringify(esperas),
 )
 
@@ -227,7 +229,9 @@ async function rodarLaço({
         throw new QuedaDeConexao('a conexão ficou 60s sem enviar nada')
       return { chamadas, esperasPedidas, textoErro: null }
     } catch (error) {
-      if (tentativa >= TENTATIVAS_DE_RECONEXAO) {
+      const podeRepetir =
+        ehFalhaTransitoria(error) && tentativa < TENTATIVAS_DE_RECONEXAO
+      if (!podeRepetir) {
         textoErro =
           error instanceof QuedaDeConexao
             ? error.message
@@ -253,8 +257,8 @@ async function rodarLaço({
     r.chamadas[0].retomando === false && r.chamadas[3].retomando === true,
   )
   checar(
-    'esperas entre as três quedas: 1s, 2s, 3s',
-    JSON.stringify(r.esperasPedidas) === JSON.stringify([1000, 2000, 3000]),
+    'esperas entre as três quedas: 0, 250 e 750 ms',
+    JSON.stringify(r.esperasPedidas) === JSON.stringify([0, 250, 750]),
     JSON.stringify(r.esperasPedidas),
   )
 }
@@ -264,8 +268,8 @@ async function rodarLaço({
   const r = await rodarLaço({ quedasNoMeio: 2 })
   checar('fluxo fechado no meio reconecta', r.textoErro === null && r.chamadas.length === 3)
   checar(
-    'duas quedas no meio pedem 1s e 2s de espera',
-    JSON.stringify(r.esperasPedidas) === JSON.stringify([1000, 2000]),
+    'duas quedas no meio pedem 0 e 250 ms de espera',
+    JSON.stringify(r.esperasPedidas) === JSON.stringify([0, 250]),
     JSON.stringify(r.esperasPedidas),
   )
 }
@@ -276,8 +280,8 @@ async function rodarLaço({
   const r = await rodarLaço({ silencios: 2 })
   checar('silêncio estourado reconecta', r.textoErro === null && r.chamadas.length === 3)
   checar(
-    'os dois silêncios pedem 1s e 2s de espera',
-    JSON.stringify(r.esperasPedidas) === JSON.stringify([1000, 2000]),
+    'os dois silêncios pedem 0 e 250 ms de espera',
+    JSON.stringify(r.esperasPedidas) === JSON.stringify([0, 250]),
     JSON.stringify(r.esperasPedidas),
   )
 }
@@ -286,7 +290,7 @@ async function rodarLaço({
   // O backend responde que não deu (cota, provedor estourado): também entra no laço
   // e, se não passar, morre dizendo a fala do backend.
   const r = await rodarLaço({ erroSempre: new ErroDoServico('a cota do host esgotou') })
-  checar('erro do serviço também tenta', r.chamadas.length === 10 && r.esperasPedidas.length === 9)
+  checar('erro do serviço encerra sem repetir', r.chamadas.length === 1 && r.esperasPedidas.length === 0)
   checar(
     'a fala do backend chega ao fim da rodada',
     r.textoErro === 'a cota do host esgotou',
@@ -296,26 +300,25 @@ async function rodarLaço({
 
 {
   // Nunca volta: para na 10ª e diz o erro.
-  const r = await rodarLaço({ falhasDeRede: 10 })
-  checar('sem serviço, tenta 10 vezes', r.chamadas.length === 10 && r.esperasPedidas.length === 9)
-  checar('décima falha encerra com o erro', typeof r.textoErro === 'string' && r.textoErro.length > 0)
+  const r = await rodarLaço({ falhasDeRede: 4 })
+  checar('sem serviço, tenta 4 vezes', r.chamadas.length === 4 && r.esperasPedidas.length === 3)
+  checar('quarta falha encerra com o erro', typeof r.textoErro === 'string' && r.textoErro.length > 0)
   checar(
-    'as 10 tentativas pedem 9 esperas: 1..8s e 8s',
-    JSON.stringify(r.esperasPedidas) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 8].map((s) => s * 1000)),
+    'as 4 tentativas pedem 0, 250 e 750 ms',
+    JSON.stringify(r.esperasPedidas) === JSON.stringify([0, 250, 750]),
     JSON.stringify(r.esperasPedidas),
   )
 }
 
 {
-  // Os erros de pedido agora **também** passam pelas dez antes de morrer — regra do
-  // dono: todo erro tenta. (Antes morriam na primeira.)
+  // Erros permanentes encerram na primeira resposta.
   for (const [nome, erro] of [
     ['422', new ApiError(422)],
     ['401', new ApiError(401)],
     ['404', new ApiError(404)],
   ]) {
     const r = await rodarLaço({ erroSempre: erro })
-    checar(`${nome} vira laço de 10`, r.chamadas.length === 10 && r.esperasPedidas.length === 9)
+    checar(`${nome} não entra em laço`, r.chamadas.length === 1 && r.esperasPedidas.length === 0)
     checar(`${nome} morre dizendo o status`, r.textoErro === `serviço respondeu ${erro.status}`)
   }
 }
@@ -326,5 +329,5 @@ if (falhas.length > 0) {
   process.exit(1)
 }
 console.log(
-  'reconexão: tudo verde (classificação, espera, dormir, sinal de vida e o laço de 10 tentativas para todo erro)',
+  'reconexão: tudo verde (4 retries curtos para falhas transitórias e erro permanente imediato)',
 )

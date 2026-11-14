@@ -1,8 +1,11 @@
 import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
+import { abrirNoNavegador } from '../abrirNoNavegador'
 import { DiagramaDeTexto, desenhar, ehBlocoVisual, primeiroObjeto } from './BlocosVisuais'
 import { DesenhoUi } from './UiGenerativa'
+import { DesenhoDocumento } from './KodaUI/desenho'
+import { urlSegura } from './KodaUI/protocolo'
 import { pareceCodigoDeUi } from './UiGenerativa/deteccao'
 
 /**
@@ -26,6 +29,99 @@ import { pareceCodigoDeUi } from './UiGenerativa/deteccao'
 
 /** Marcador de uma letra que pode ser escapado com `\`. */
 const ESCAPAVEIS = '\\`*_[]'
+
+/** `![descrição](url)` — a imagem que o modelo devolve da busca ou de uma fonte. */
+const IMAGEM = /^!\[([^\]]{0,300})\]\(([^)\s]{1,2000})\)/
+const IMAGEM_GLOBAL = /!\[([^\]]{0,300})\]\(([^)\s]{1,2000})\)/g
+
+/** Uma imagem só, com erro que não quebra o texto: vira uma linha discreta. */
+function Imagem({ src, alt }: { src: string; alt: string }) {
+  const [falhou, setFalhou] = useState(false)
+  if (falhou) {
+    return (
+      <span className="my-1 inline-flex items-center gap-1 rounded-lg bg-koda-fg/5 px-2 py-1 text-[11.5px] text-koda-fg/40">
+        imagem indisponível{alt ? `: ${alt}` : ''}
+      </span>
+    )
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFalhou(true)}
+      className="my-1.5 block aspect-[4/3] w-full max-w-[320px] rounded-lg border border-koda-fg/10 object-cover"
+    />
+  )
+}
+
+/** Uma linha composta só de imagens vira galeria alinhada, não uma pilha de links. */
+function Galeria({
+  itens,
+  chave,
+}: {
+  itens: Array<{ src: string; alt: string }>
+  chave: string
+}) {
+  const [falhas, setFalhas] = useState<Record<number, boolean>>({})
+  const colunas =
+    itens.length === 1
+      ? 'max-w-[320px] grid-cols-1'
+      : itens.length === 2
+        ? 'grid-cols-2'
+        : 'grid-cols-2 sm:grid-cols-3'
+  return (
+    <div key={chave} className={`grid gap-2 ${colunas}`}>
+      {itens.map((item, indice) =>
+        falhas[indice] ? (
+          <div
+            key={indice}
+            className="flex aspect-[4/3] items-center justify-center rounded-lg bg-koda-fg/4 px-2 text-center text-[11px] text-koda-fg/35 ring-1 ring-koda-fg/8"
+          >
+            imagem indisponível
+          </div>
+        ) : (
+          <button
+            key={indice}
+            type="button"
+            onClick={() => abrirNoNavegador(item.src)}
+            title={item.alt || 'abrir imagem'}
+            className="group relative overflow-hidden rounded-lg ring-1 ring-koda-fg/8 transition-shadow hover:ring-koda-accent/40"
+          >
+            <img
+              src={item.src}
+              alt={item.alt}
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={() => setFalhas((atual) => ({ ...atual, [indice]: true }))}
+              className="aspect-[4/3] w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+            />
+            {item.alt ? (
+              <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/65 to-transparent px-2 py-1.5 text-left text-[10.5px] text-white/80">
+                {item.alt}
+              </span>
+            ) : null}
+          </button>
+        ),
+      )}
+    </div>
+  )
+}
+
+/** Extrai as imagens de uma linha e diz se ela é feita só delas. */
+function imagensDaLinha(linha: string): Array<{ src: string; alt: string }> {
+  const achadas: Array<{ src: string; alt: string }> = []
+  for (const achado of linha.matchAll(IMAGEM_GLOBAL)) {
+    const src = urlSegura(achado[2], { imagem: true })
+    if (src && !src.startsWith('mailto:')) achadas.push({ src, alt: achado[1] })
+  }
+  return achadas
+}
+
+function ehSoImagens(linha: string): boolean {
+  return linha.includes('![') && linha.replace(IMAGEM_GLOBAL, '').trim() === ''
+}
 
 /**
  * Uma linha em elementos React.
@@ -63,6 +159,42 @@ function inline(texto: string, chave: string): ReactNode[] {
       texto_puro += depois(i)
       i += 2
       continue
+    }
+
+    if (caractere === '!' && depois(i) === '[') {
+      const achado = IMAGEM.exec(texto.slice(i))
+      if (achado) {
+        const src = urlSegura(achado[2], { imagem: true })
+        if (src && !src.startsWith('mailto:')) {
+          entrar(<Imagem key={`${chave}-img${n++}`} src={src} alt={achado[1]} />)
+          i += achado[0].length
+          continue
+        }
+      }
+    }
+
+    if (caractere === '[') {
+      const achado = /^\[([^\]]{0,300})\]\(([^)\s]{1,2000})\)/.exec(texto.slice(i))
+      if (achado) {
+        const destino = urlSegura(achado[2])
+        if (destino) {
+          entrar(
+            <a
+              key={`${chave}-a${n++}`}
+              href={destino}
+              onClick={(evento) => {
+                evento.preventDefault()
+                abrirNoNavegador(destino)
+              }}
+              className="text-koda-accent underline decoration-koda-accent/30 underline-offset-2 transition-colors hover:decoration-koda-accent"
+            >
+              {inline(achado[1], `${chave}-at${n}`)}
+            </a>,
+          )
+          i += achado[0].length
+          continue
+        }
+      }
     }
 
     if (caractere === '`') {
@@ -418,6 +550,20 @@ function blocos(linhas: string[], chave: string): ReactNode[] {
       continue
     }
 
+    // Linha só de imagens: vira galeria alinhada, com as vizinhas do mesmo bloco.
+    if (ehSoImagens(limpa)) {
+      const itens = imagensDaLinha(limpa)
+      while (i + 1 < linhas.length && ehSoImagens(linhas[i + 1].trim())) {
+        itens.push(...imagensDaLinha(linhas[i + 1].trim()))
+        i += 1
+      }
+      if (itens.length) {
+        descarregarTudo()
+        nos.push(<Galeria key={`${chave}-g${contador++}`} itens={itens} chave={`${chave}-g${contador}`} />)
+        continue
+      }
+    }
+
     // Tabela: precisa da linha de cima (cabeçalho) e da separadora logo abaixo.
     if (ehLinhaDaLinha(limpa) && i + 1 < linhas.length && ehSeparadora(linhas[i + 1])) {
       const corpo: string[][] = []
@@ -535,6 +681,17 @@ function RichText({ text, className = '' }: { text: string; className?: string }
         // Koda desenha — sem tipo fixo, sem `eval`. Vem antes do `Codigo` e ao lado dos
         // blocos visuais: é a porta pra simuladores, contadores e telas que os 21 formatos
         // fixos não cobrem. Ver `components/UiGenerativa/`.
+        // Koda UI Protocol (JSON): o documento que veio da ferramenta `mostrar_interface`
+        // fica gravado como cerca. Ao reabrir a conversa, o mesmo renderer desenha a
+        // mesma tela — com o estado local restaurado pelo `documentId` + `revision`.
+        if (idioma === 'koda-ui-doc') {
+          montado.push(
+            <div key={`uidoc-${indice}`} className="min-w-0">
+              <DesenhoDocumento fonte={codigo} />
+            </div>,
+          )
+          return
+        }
         if (idioma === 'koda-ui' || pareceCodigoDeUi(idioma, codigo)) {
           montado.push(
             <div key={`ui-${indice}`} className="min-w-0">

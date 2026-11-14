@@ -7,15 +7,13 @@ import type { MenuOption } from './components/Menu'
  * caixa de mensagem (ligado → `minimal`, desligado → `none`). Os outros valores vão como
  * estão, e aí o Reasoning deixa de influenciar.
  *
- * Não existe `none` na lista de propósito: o host recusa esse valor em parte do catálogo
- * (`liz-4` e `layze-2`, de alvo `openai-responses`, respondem 400) — desligar o
- * raciocínio é o que o botão Reasoning já faz, com o cuidado de cair no `minimal` nesses
- * modelos.
+ * Não existe `none` na lista de propósito: o gateway recusa esse valor em parte do
+ * catálogo — desligar o raciocínio é o que o botão Reasoning já faz, com o cuidado de cair
+ * no `minimal` quando o modelo não aceita.
  *
- * `xhigh` e `max` entraram em 10/10/2026: o host publica os **sete** níveis para 6 dos 8
- * modelos, e parar em `high` deixava o topo do catálogo inalcançável pela interface. Quem
- * não aceita o nível (o `layze-2` recusa `max`) não quebra — o backend arredonda para o
- * mais próximo que o modelo aceita.
+ * `xhigh` e `max` continuam na lista porque o gateway publica os níveis por modelo; no
+ * catálogo atual nenhum modelo declara raciocínio. Quem não aceita o nível não quebra — o
+ * backend arredonda para o mais próximo que o modelo aceita.
  */
 export type Effort = 'auto' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -43,8 +41,8 @@ export function effortLabel(value: string): string {
 
 /**
  * Esforço guardado para um modelo. Cada modelo tem o seu: trocar de modelo troca o
- * esforço junto, em vez de manter um valor só para todos (`liz-4` no alto não quer dizer
- * `liz-nano` no alto).
+ * esforço junto, em vez de manter um valor só para todos (`qwen-3.8-flash` no alto não
+ * quer dizer `glm-5.3-flash` no alto).
  */
 export function effortDoModelo(mapa: Record<string, Effort>, modelo: string): Effort {
   return mapa[modelo] ?? EFFORT_PADRAO

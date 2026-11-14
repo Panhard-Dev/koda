@@ -24,6 +24,7 @@ import nousLogo from './assets/provedores/nous.svg'
 import traeLogo from './assets/provedores/trae.svg'
 import windsurfLogo from './assets/provedores/windsurf.svg'
 import zedLogo from './assets/provedores/zed.svg'
+import accioLogo from './assets/provedores/accio.svg'
 
 /**
  * A logo de cada provedor, num lugar só.
@@ -70,4 +71,12 @@ export const LOGO_DO_PROVEDOR: Record<string, string> = {
   windsurf: windsurfLogo,
   glm: zcodeLogo,
   zed: zedLogo,
+  accio: accioLogo,
+}
+
+// Logos dos provedores de chave (catálogo baseado no 9router).
+const logosApi = import.meta.glob('./assets/provedores-api/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>
+for (const [path, logo] of Object.entries(logosApi)) {
+  const nome = path.split('/').pop()?.replace(/\.png$/, '')
+  if (nome) LOGO_DO_PROVEDOR[`api-${nome}`] = logo
 }

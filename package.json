@@ -2,11 +2,11 @@
   "name": "koda",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.8.0",
+  "version": "0.8.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787",
+    "dev:api": "cd backend && uv run uvicorn app.main:app --reload --port 8787 --env-file .env",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "verificar": "tsc -b --pretty false && npm run lint",
@@ -14,13 +14,18 @@
     "tauri": "tauri",
     "app": "tauri dev",
     "app:host": "node scripts/verificar-host.mjs",
+    "app:version": "node scripts/verificar-versao.mjs",
+    "app:cloudflare": "node scripts/verificar-cloudflare.mjs",
     "app:bundle:host": "node scripts/verificar-bundle-host.mjs",
     "app:launcher": "node scripts/criar-launcher-instalador.mjs",
     "app:runtime": "node scripts/gerar-runtime-backend.mjs",
     "app:node": "node scripts/gerar-runtime-node.mjs",
-    "app:build": "npm run app:host && npm run app:runtime && npm run app:node && tauri build && npm run app:launcher && npm run app:bundle:host"
+    "app:build": "npm run app:version && npm run app:cloudflare && npm run app:host && npm run app:runtime && npm run app:node && tauri build && npm run app:launcher && npm run app:bundle:host",
+    "app:build:linux": "scripts/gerar-appimage-linux.sh"
   },
   "dependencies": {
+    "@tauri-apps/plugin-http": "^2.8.3",
+    "@tauri-apps/plugin-opener": "2.7.2",
     "ajv": "^8.20.0",
     "lodash": "^4.18.1",
     "lucide-react": "^1.47.0",
@@ -32,7 +37,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/api": "2.12.4",
     "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",

@@ -74,6 +74,8 @@ class ChatOptions:
     resumo: str = ""
     visuals: bool = True
     interactive_ui: bool = True
+    #: Consultas obrigatórias de `#caminho` e `/arquivos`, já lidas do disco.
+    contexto_marcado: str = ""
 
 
 @dataclass(slots=True)
@@ -119,7 +121,7 @@ class Provider(Protocol):
         ...
 
 
-from .presentation import BLOCOS_VISUAIS, UI_GENERATIVA
+from .presentation import BLOCOS_VISUAIS, INTERFACE_DOCUMENTO, UI_GENERATIVA
 
 #: **UI generativa (`koda-ui`)** — a porta para além dos formatos fixos.
 #:
@@ -210,7 +212,10 @@ def system_prompt(options: ChatOptions) -> str:
     if options.visuals:
         parts.append(BLOCOS_VISUAIS)
     if options.interactive_ui:
+        parts.append(INTERFACE_DOCUMENTO)
         parts.append(UI_GENERATIVA)
+    if options.contexto_marcado:
+        parts.append("\n\n" + options.contexto_marcado)
     # A identidade vence a persona que o host injeta na conversa (ver `app/identidade.py`).
     parts.append(regras(options.assistente))
     # E o idioma fecha o prompt. Ver o comentário de `IDIOMA`: instrução no começo de um

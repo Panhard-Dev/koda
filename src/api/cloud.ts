@@ -18,6 +18,9 @@
  * voz do app, sem repassar texto de servidor.
  */
 
+import { isTauri } from '@tauri-apps/api/core'
+import { fetch as fetchDoApp } from '@tauri-apps/plugin-http'
+
 import { dayKey, monthStart, weekStart } from '../plan'
 import { planoParaBeneficios } from '../plano'
 
@@ -166,7 +169,12 @@ export async function pedir<T>(
 ): Promise<T> {
   let resposta: Response
   try {
-    resposta = await fetch(`${painelUrl}${caminho}`, {
+    // No app instalado o pedido sai pelo Rust (`@tauri-apps/plugin-http`): o webview do
+    // Linux serve a interface em `tauri://localhost` e o Worker publicado não libera essa
+    // origem no CORS. No navegador (dev) o `fetch` normal continua valendo — o Worker
+    // libera loopback.
+    const buscar = isTauri() ? fetchDoApp : fetch
+    resposta = await buscar(`${painelUrl}${caminho}`, {
       method: init.metodo ?? 'GET',
       headers: {
         'content-type': 'application/json',

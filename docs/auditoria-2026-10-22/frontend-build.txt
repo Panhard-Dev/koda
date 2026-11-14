@@ -1,0 +1,26 @@
+[36mvite v8.3.0 [32mbuilding client environment for production...[36m[39m
+transforming...
+✓ 1958 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/blocos.html                         0.51 kB │ gzip:  0.31 kB
+dist/chat.html                           0.59 kB │ gzip:  0.34 kB
+dist/index.html                          0.63 kB │ gzip:  0.34 kB
+dist/assets/FalaDoModelo-D8aOnMIZ.css   95.67 kB │ gzip: 14.89 kB
+dist/assets/chat-DZw6SeJY.js             2.67 kB │ gzip:  1.30 kB
+dist/assets/blocos-DRaWhmyl.js          31.20 kB │ gzip:  9.70 kB
+dist/assets/modelo-salvo-uOsBxNFf.js    82.80 kB │ gzip: 26.06 kB
+dist/assets/principal-Cq6ChcfE.js      262.57 kB │ gzip: 69.37 kB
+dist/assets/FalaDoModelo-DTWV2Zhd.js   316.09 kB │ gzip: 94.04 kB
+
+[32m✓ built in 24.60s[39m
+[33m[33m[PLUGIN_TIMINGS] [0mPlugin hooks ran for 24.1s of this 24.5s build (98%).
+The slowest hooks, timed inside each callback (the wait before a callback starts is excluded, the time it awaits is included):
+  - @tailwindcss/vite:generate:build transform (95%, 23.4s, 1 call)
+Additional hook time came from the hooks below and from hooks under 1s.
+1 hook is listed without a time. Its calls overlapped, so the time inside one call includes work from other calls. To find its cost, profile the build with `node --cpu-prof`:
+  - vite:build-html transform (3 calls)
+See https://rolldown.rs/reference/InputOptions.checks#plugintimings for more details.
+[39m
+
+exit_code=0

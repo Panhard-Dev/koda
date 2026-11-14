@@ -16,7 +16,10 @@ from ..contracts.tools import _def
 from typing import Any
 
 #: Ferramentas de acesso web, disponíveis somente quando a pessoa liga o botão Web.
-FERRAMENTAS_WEB = frozenset({"web_search", "url_reader", "browser", "download_file"})
+FERRAMENTAS_WEB = frozenset({
+    "web_search", "url_reader", "browser", "download_file",
+    "clima", "cotacao", "buscar_imagens",
+})
 #: Nomes que um modelo costuma escrever no lugar do nome real da ferramenta. O catálogo
 #: anuncia o nome canônico; o apelido existe para a chamada **funcionar** em vez de voltar
 #: "ferramenta desconhecida" — que era o que fazia a tarefa inteira parar numa tarefa
@@ -106,6 +109,10 @@ APELIDOS: dict[str, str] = {
     "fetch_file": "download_file",
     "upload": "upload_file",
     "send_file": "upload_file",
+    "enviar_para_celular": "send_to_phone",
+    "mandar_para_celular": "send_to_phone",
+    "send_to_mobile": "send_to_phone",
+    "send_file_to_phone": "send_to_phone",
     "install": "install_package",
     "add_package": "install_package",
     "install_dependency": "install_package",
@@ -114,6 +121,21 @@ APELIDOS: dict[str, str] = {
     "uninstall": "uninstall_package",
     "remove_package": "uninstall_package",
     "uninstall_dependency": "uninstall_package",
+    # dados reais
+    "weather": "clima",
+    "forecast": "clima",
+    "previsao_tempo": "clima",
+    "previsao_do_tempo": "clima",
+    "exchange": "cotacao",
+    "currency": "cotacao",
+    "cambio": "cotacao",
+    "currency_exchange": "cotacao",
+    "image_search": "buscar_imagens",
+    "buscar_imagem": "buscar_imagens",
+    "search_images": "buscar_imagens",
+    "memory": "memoria",
+    "lembrar": "memoria",
+    "memorizar": "memoria",
     # plano
     "todo_list": "update_todos",
     "todo_write": "update_todos",
@@ -229,8 +251,10 @@ def _sinonimos(argumentos: dict[str, Any]) -> dict[str, Any]:
     return normalizado
 
 from .domains.agentes.schema import DEFINICOES as _AGENTES
+from .domains.dados.schema import DEFINICOES as _DADOS
 from .domains.files.schema import DEFINICOES as _ARQUIVOS
 from .domains.git.schema import DEFINICOES as _GIT
+from .domains.interface.schema import DEFINICOES as _INTERFACE
 from .domains.plano.schema import DEFINICOES as _PLANO
 from .domains.shell.schema import DEFINICOES as _EXECUCAO
 from .domains.skills.schema import DEFINICOES as _SKILLS
@@ -242,7 +266,9 @@ DEFINICOES: list[dict[str, Any]] = [
     *_EXECUCAO,
     *_GIT,
     *_WEB,
+    *_DADOS,
     *_PLANO,
+    *_INTERFACE,
     *_SKILLS,
     # Por último de propósito: é a ferramenta que **delega**, e o modelo deve olhar as
     # outras antes de decidir que precisa de outra cabeça.
@@ -267,6 +293,8 @@ ESCRITA = {
     "apply_patch",
     "download_file",
     "upload_file",
+    "send_to_phone",
+    "save_attachment",
 }
 #: Ferramentas que recebem um `caminho` e por isso passam pela checagem de pasta.
 FERRAMENTAS_DE_ARQUIVO = {
@@ -286,6 +314,8 @@ FERRAMENTAS_DE_ARQUIVO = {
     "linter",
     "download_file",
     "upload_file",
+    "send_to_phone",
+    "save_attachment",
 }
 #: Tudo o que **alcança a máquina da pessoa**: os arquivos, o shell, o interpretador de
 #: código, o ambiente e o git.

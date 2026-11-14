@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import {
   ArrowLeft,
   Activity,
@@ -21,18 +21,24 @@ import {
   Puzzle,
   RefreshCw,
   Sliders,
+  Smartphone,
   Sun,
   SunMoon,
   X,
 } from 'lucide-react'
 import AccountSection from './AccountSection'
+import CombosSection from './CombosSection'
+import CelularSection from './CelularSection'
 import DiagnosticoLocal from './DiagnosticoLocal'
+import EconomiaSection from './EconomiaSection'
+import { abrirNoNavegador } from '../abrirNoNavegador'
 import type { Conta as ContaKoda, PlanoDaConta } from '../api/cloud'
 import type { ApiAgente, ApiProject, NovoAgente } from '../api/client'
 import { LOGO_DO_PROVEDOR } from '../logos-provedores'
 import catalogoProvedores from '../../backend/app/provedores_koda.json'
 import KodaLogo from './KodaLogo'
 import Menu from './Menu'
+import PorquinhoComMoedas from './PorquinhoComMoedas'
 import { WindowControls } from './WindowControls'
 import { apelidoDaConta, iniciaisDaConta } from '../account'
 import { findModel, modelMenu } from '../models'
@@ -40,6 +46,7 @@ import type { RemoteModel } from '../models'
 import { dailyReset, dayKey, monthlyReset, weeklyReset } from '../plan'
 import { tempoCurto } from '../tempo'
 import { moedasLegiveis } from '../custo'
+import { textoDoMultiplo, tomDoMultiplo } from '../multiplo'
 import { ACCENTS, FONTS, SCALES, THEMES } from '../appearance'
 import type { Appearance, ThemeId } from '../appearance'
 import {
@@ -55,9 +62,15 @@ import {
   fraseDeFalha,
   modelosDoProvedor,
   provedoresDeLogin,
+  provedoresDeApi,
+  salvarChaveApi,
   sairDoProvedor,
   statusDoDownload,
   testarProvedor,
+  testarProvedorCustom,
+  atualizarCustom,
+  adicionarChaveCustom,
+  substituirChaveCustom,
 } from '../api/client'
 import type {
   ApiCloud,
@@ -110,9 +123,12 @@ export type BackendSummary = {
 
 export type SettingsSection =
   | 'geral'
+  | 'celular'
   | 'aparencia'
   | 'conta'
   | 'uso'
+  | 'economia'
+  | 'combos'
   | 'modelos'
   | 'skills'
   | 'agents'
@@ -135,6 +151,13 @@ const SECTIONS: {
     subtitle: 'Preferências do Koda.',
   },
   {
+    id: 'celular',
+    label: 'Celular',
+    icon: <Smartphone className="h-4 w-4" strokeWidth={1.7} />,
+    title: 'Celular',
+    subtitle: 'Conecte o Koda do celular a este computador — sem nuvem.',
+  },
+  {
     id: 'aparencia',
     label: 'Aparência',
     icon: <Palette className="h-4 w-4" strokeWidth={1.7} />,
@@ -155,6 +178,14 @@ const SECTIONS: {
     title: 'Uso',
     subtitle: 'O que você rodou no Koda, contado na mesma conta.',
   },
+  {
+    id: 'economia',
+    label: 'Economia',
+    icon: <PorquinhoComMoedas className="h-4 w-4" />,
+    title: 'Economia',
+    subtitle: 'Os modos que gastam menos tokens — ligados, valem para todos os provedores.',
+  },
+  { id: 'combos', label: 'Combos', icon: <Cable className="h-4 w-4" />, title: 'Combos', subtitle: 'Agrupe modelos e escolha uma estratégia.' },
   {
     id: 'modelos',
     label: 'Modelos e Provedores',
@@ -1202,6 +1233,7 @@ export function SettingsScreen({
   planoDaConta = null,
   onAssinaturaMudou,
   initialSection,
+  abrirQrDoCelular = false,
   backend,
   cloud = null,
   remoteModels = null,
@@ -1244,6 +1276,8 @@ export function SettingsScreen({
   onSignOut: () => void
   /** Seção aberta ao entrar na tela (ex.: Conta, vindo do menu do header). */
   initialSection?: SettingsSection
+  /** Veio do ícone de celular do header: abre o QR público sem esperar um clique. */
+  abrirQrDoCelular?: boolean
   /** Modelos que vieram do backend, além dos da casa. */
   remoteModels?: RemoteModel[] | null
   /**
@@ -1276,16 +1310,8 @@ export function SettingsScreen({
    * a configuração de cada um vai morar quando houver contrato no backend.
    */
   const [provedorAberto, setProvedorAberto] = useState<string | null>(null)
-  /**
-   * O provedor da tela só existe **dentro** da seção Modelos: sair para Conta (ou qualquer
-   * outra) não pode deixar o topo trocado. Quem zera o estado é a troca de seção, no clique
-   * da coluna — e não um efeito observando `section`, que o compilador do React sinaliza como
-   * estado escrito dentro de efeito.
-   */
-  const provedorDaTela =
-    section === 'modelos' && provedorAberto
-      ? (PROVEDORES.find((item) => item.id === provedorAberto) ?? null)
-      : null
+  /** Qual lista está aberta em Modelos e Provedores: login (atual), API ou custom. */
+  const [abaProvedores, setAbaProvedores] = useState<'login' | 'api' | 'custom'>('login')
   /**
    * O retrato que o backend faz dos logins desta máquina — por id de provedor.
    *
@@ -1294,6 +1320,61 @@ export function SettingsScreen({
    */
   const [estadoDosProvedores, setEstadoDosProvedores] =
     useState<Record<string, ApiProvedor> | null>(null)
+  /** O grupo «API»: gateway local (9router) + provedores custom guardados. */
+  const [provedoresApi, setProvedoresApi] = useState<ApiProvedor[] | null>(null)
+  const [chaveApi, setChaveApi] = useState('')
+  const [endpointApi, setEndpointApi] = useState('')
+  const [deploymentApi, setDeploymentApi] = useState('')
+  const [accessIdApi, setAccessIdApi] = useState('')
+  const [regiaoApi, setRegiaoApi] = useState('us-east-1')
+  const [tokenAwsApi, setTokenAwsApi] = useState('')
+  const [mensagemApi, setMensagemApi] = useState('')
+  /**
+   * O provedor da tela só existe **dentro** da seção Modelos: sair para Conta (ou qualquer
+   * outra) não pode deixar o topo trocado. Quem zera o estado é a troca de seção, no clique
+   * da coluna — e não um efeito observando `section`, que o compilador do React sinaliza como
+   * estado escrito dentro de efeito.
+   */
+  const provedorDaTela =
+    section === 'modelos' && provedorAberto
+      ? (
+          PROVEDORES.find((item) => item.id === provedorAberto) ??
+          (provedoresApi ?? []).find((item) => item.id === provedorAberto) ??
+          estadoDosProvedores?.[provedorAberto] ??
+          null
+        )
+      : null
+  /** Formulário do provedor custom: URL + chave, com teste antes de salvar. */
+  const [formCustom, setFormCustom] = useState({
+    nome: '',
+    base: '',
+    chave: '',
+    formato: 'openai' as 'openai' | 'anthropic' | 'responses',
+  })
+  const [resultadoCustom, setResultadoCustom] = useState<{ ok?: boolean; texto: string | null }>({ texto: null })
+  const [modelosCustom, setModelosCustom] = useState<string[]>([])
+  const [criandoCustom, setCriandoCustom] = useState(false)
+  const [editCustom, setEditCustom] = useState({ nome: '', base: '', formato: 'openai' as 'openai' | 'anthropic' | 'responses' })
+  const [chavesCustom, setChavesCustom] = useState('')
+  const [substituindoChave, setSubstituindoChave] = useState<string | null>(null)
+  const [novaChaveCustom, setNovaChaveCustom] = useState('')
+  const [novoModeloCustom, setNovoModeloCustom] = useState('')
+  const [ocultosCustom, setOcultosCustom] = useState<string[]>([])
+  const [mensagemCustom, setMensagemCustom] = useState('')
+  const [confirmarRemocaoCustom, setConfirmarRemocaoCustom] = useState(false)
+
+  useEffect(() => {
+    const chave = formCustom.chave.split(/\s+/).find(Boolean)
+    if (!/^https?:\/\//.test(formCustom.base.trim()) || !chave) { setModelosCustom([]); return }
+    let ativo = true
+    const timer = window.setTimeout(() => {
+      void testarProvedorCustom({ ...formCustom, nome: formCustom.nome || 'teste', chave }).then((r) => {
+        if (ativo) { setModelosCustom(r.modelos ?? []); setResultadoCustom({ ok: r.ok, texto: r.detalhe }) }
+      }).catch(() => { if (ativo) { setModelosCustom([]); setResultadoCustom({ ok: false, texto: 'Não foi possível consultar a API' }) } })
+    }, 700)
+    return () => { ativo = false; window.clearTimeout(timer) }
+  }, [formCustom.base, formCustom.chave, formCustom.formato])
+
   const [teste, setTeste] = useState<{ ocupado: boolean; texto: string | null; ok: boolean | null }>(
     { ocupado: false, texto: null, ok: null },
   )
@@ -1301,9 +1382,10 @@ export function SettingsScreen({
     ocupado: boolean
     lista: string[]
     nomes: Record<string, string>
+    multiplos: Record<string, number>
     motivo: string | null
     fonte: string | null
-  }>({ ocupado: false, lista: [], nomes: {}, motivo: null, fonte: null })
+  }>({ ocupado: false, lista: [], nomes: {}, multiplos: {}, motivo: null, fonte: null })
   /**
    * O login em curso: `aguardando` enquanto o navegador não volta, e o código quando o
    * fornecedor usa device flow (GitHub) — nesse caso o código é a única coisa que a pessoa
@@ -1350,6 +1432,21 @@ export function SettingsScreen({
     }
   }, [section, estadoDosProvedores])
 
+  useEffect(() => {
+    if (section !== 'modelos' || provedoresApi !== null) return
+    let cancelado = false
+    void provedoresDeApi()
+      .then((lista) => {
+        if (!cancelado) setProvedoresApi(lista)
+      })
+      .catch(() => {
+        if (!cancelado) setProvedoresApi([])
+      })
+    return () => {
+      cancelado = true
+    }
+  }, [section, provedoresApi])
+
   /** Troca de seção sempre fecha o provedor aberto — a coluna leva à lista, não à última tela. */
   const abrirSecao = (id: SettingsSection) => {
     setProvedorAberto(null)
@@ -1359,10 +1456,17 @@ export function SettingsScreen({
   /** Abrir um provedor zera o que era do anterior: teste, lista e recado não são dele. */
   const abrirProvedor = (id: string) => {
     setProvedorAberto(id)
+    setChaveApi('')
+    setEndpointApi('')
+    setDeploymentApi('')
+    setAccessIdApi('')
+    setRegiaoApi('us-east-1')
+    setTokenAwsApi('')
+    setMensagemApi('')
     setTeste({ ocupado: false, texto: null, ok: null })
     // Já entra em «lendo»: o efeito abaixo busca o catálogo, e o estado de carregamento não
     // pode ser escrito lá dentro (o compilador do React acusa setState síncrono em efeito).
-    setModelos({ ocupado: true, lista: [], nomes: {}, motivo: null, fonte: null })
+    setModelos({ ocupado: true, lista: [], nomes: {}, multiplos: {}, motivo: null, fonte: null })
     setLogin({ estado: 'parado' })
     setCodigoColado('')
     setTesteDoModelo({})
@@ -1384,18 +1488,27 @@ export function SettingsScreen({
 
   const baixarModelos = async () => {
     if (!provedorDaTela) return
-    setModelos({ ocupado: true, lista: [], nomes: {}, motivo: null, fonte: null })
+    setModelos({ ocupado: true, lista: [], nomes: {}, multiplos: {}, motivo: null, fonte: null })
     try {
-      const resultado = await modelosDoProvedor(provedorDaTela.id)
+      const resultado = await modelosDoProvedor(provedorDaTela.id, true)
+      setOcultosCustom(resultado.modelosOcultos ?? [])
       setModelos({
         ocupado: false,
         lista: resultado.modelos,
         nomes: resultado.nomes ?? {},
+        multiplos: resultado.multiplos ?? {},
         motivo: resultado.motivo || null,
         fonte: resultado.fonte,
       })
     } catch (erro) {
-      setModelos({ ocupado: false, lista: [], nomes: {}, motivo: fraseDeFalha(erro), fonte: null })
+      setModelos({
+        ocupado: false,
+        lista: [],
+        nomes: {},
+        multiplos: {},
+        motivo: fraseDeFalha(erro),
+        fonte: null,
+      })
     }
   }
 
@@ -1408,7 +1521,17 @@ export function SettingsScreen({
         setLogin({ estado: 'erro', mensagem: inicio.mensagem || 'Não foi possível iniciar o login.' })
         return
       }
-      if (inicio.tipo === 'pkce' || inicio.tipo === 'device' || inicio.tipo === 'cookie') {
+      if (inicio.estado === 'concluido') {
+        setLogin({ estado: 'concluido', mensagem: inicio.mensagem || 'conectado' })
+        const lista = await provedoresDeLogin()
+        setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item])))
+        return
+      }
+      if (
+        inicio.tipo === 'pkce' ||
+        inicio.tipo === 'device' ||
+        inicio.tipo === 'cookie'
+      ) {
         setLogin({
           estado: 'aguardando',
           url: inicio.url,
@@ -1416,9 +1539,10 @@ export function SettingsScreen({
           tipo: inicio.tipo,
           mensagem: inicio.mensagem,
         })
-        // Abrir a página é o que a pessoa espera do botão; o popup pode ser barrado pelo
-        // navegador, e é por isso que o link também fica na tela.
-        if (inicio.url) window.open(inicio.url, '_blank', 'noopener,noreferrer')
+        // Abrir a página é o que a pessoa espera do botão. No app empacotado quem abre é
+        // o navegador do sistema (ver `abrirNoNavegador`); no navegador de dev, uma aba
+        // nova. O link também fica na tela — um popup barrado não deixa a pessoa sem saída.
+        if (inicio.url) abrirNoNavegador(inicio.url)
       } else {
         setLogin({ estado: 'erro', mensagem: inicio.mensagem })
       }
@@ -1450,6 +1574,50 @@ export function SettingsScreen({
       setEstadoDosProvedores(Object.fromEntries(lista.map((item) => [item.id, item])))
     } catch {
       // Sem serviço local a tela fica com o último retrato conhecido.
+    }
+  }
+
+  const recarregarApi = async () => {
+    try {
+      setProvedoresApi(await provedoresDeApi())
+    } catch {
+      // sem serviço: mantém o retrato atual
+    }
+  }
+
+  const testarCustom = async () => {
+    setResultadoCustom({ texto: 'testando…' })
+    try {
+      const resultado = await testarProvedorCustom({
+        nome: formCustom.nome || 'teste',
+        base: formCustom.base,
+        chave: formCustom.chave.split(/\s+/).find(Boolean) ?? '',
+        formato: formCustom.formato,
+      })
+      setResultadoCustom({ ok: resultado.ok, texto: resultado.detalhe })
+      setModelosCustom(resultado.modelos ?? [])
+    } catch (erro) {
+      setResultadoCustom({ ok: false, texto: fraseDeFalha(erro) })
+    }
+  }
+
+  const salvarCustom = async () => {
+    setResultadoCustom({ texto: 'salvando…' })
+    try {
+      const { salvarProvedorCustom } = await import('../api/client')
+      const chaves = formCustom.chave.split(/\s+/).filter(Boolean)
+      if (!chaves.length) throw new Error('Informe ao menos uma chave')
+      let id = ''
+      for (const chave of chaves) {
+        const resultado = await salvarProvedorCustom({ nome: formCustom.nome, base: formCustom.base, chave, formato: formCustom.formato })
+        id = resultado.id
+      }
+      setResultadoCustom({ ok: true, texto: `${chaves.length} chave(s) salvas em ${id}` })
+      setFormCustom({ nome: '', base: '', chave: '', formato: 'openai' })
+      setCriandoCustom(false)
+      await recarregarProvedores()
+    } catch (erro) {
+      setResultadoCustom({ ok: false, texto: fraseDeFalha(erro) })
     }
   }
 
@@ -1523,17 +1691,26 @@ export function SettingsScreen({
     void modelosDoProvedor(id)
       .then((resultado) => {
         if (cancelado) return
+        setOcultosCustom(resultado.modelosOcultos ?? [])
         setModelos({
           ocupado: false,
           lista: resultado.modelos,
           nomes: resultado.nomes ?? {},
+          multiplos: resultado.multiplos ?? {},
           motivo: resultado.motivo || null,
           fonte: resultado.fonte,
         })
       })
       .catch(() => {
         if (!cancelado) {
-          setModelos({ ocupado: false, lista: [], nomes: {}, motivo: null, fonte: null })
+          setModelos({
+            ocupado: false,
+            lista: [],
+            nomes: {},
+            multiplos: {},
+            motivo: null,
+            fonte: null,
+          })
         }
       })
     return () => {
@@ -1868,7 +2045,7 @@ export function SettingsScreen({
               </button>
               <div className="flex items-center gap-3.5">
                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-koda-fg/8">
-                  {provedorDaTela.logo ? <img src={provedorDaTela.logo} alt="" aria-hidden="true" className="h-6 w-6 object-contain" />
+                  {(('logo' in provedorDaTela && provedorDaTela.logo) || LOGO_DO_PROVEDOR[provedorDaTela.id]) ? <img src={('logo' in provedorDaTela && provedorDaTela.logo) || LOGO_DO_PROVEDOR[provedorDaTela.id]} alt="" aria-hidden="true" className="h-6 w-6 object-contain" />
                     : <span aria-hidden="true" className="text-sm font-bold text-koda-fg/65">{provedorDaTela.sigla}</span>}
                 </span>
                 <div className="min-w-0">
@@ -1885,6 +2062,153 @@ export function SettingsScreen({
               <p className="mt-1 text-[13px] text-koda-fg/45">{current.subtitle}</p>
             </div>
           )}
+
+          {/*
+           * As três entradas de Modelos e Provedores. «Login» é a grade que já existia;
+           * «API» contém provedores por chave; «Custom» é o
+           * formulário de URL + chave (OpenAI/Anthropic).
+           */}
+          {section === 'modelos' && !provedorDaTela ? (
+            <div className="flex items-center gap-1 rounded-xl bg-koda-fg/6 p-1">
+              {([
+                ['login', 'Login'],
+                ['api', 'Endpoints/Api'],
+                ['custom', 'Custom'],
+              ] as const).map(([valor, rotulo]) => (
+                <button
+                  key={valor}
+                  type="button"
+                  onClick={() => setAbaProvedores(valor)}
+                  className={[
+                    'rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors duration-150',
+                    abaProvedores === valor
+                      ? 'bg-koda-fg/10 text-koda-fg'
+                      : 'text-koda-fg/50 hover:text-koda-fg/80',
+                  ].join(' ')}
+                >
+                  {rotulo}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {section === 'modelos' && !provedorDaTela && abaProvedores === 'api' ? (
+            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+              {(provedoresApi ?? []).map((provedor) => (
+                <button
+                  key={provedor.id}
+                  type="button"
+                  onClick={() => abrirProvedor(provedor.id)}
+                  className="group flex flex-col gap-3 rounded-2xl bg-koda-panel p-4 text-left ring-1 ring-koda-fg/8 transition-colors duration-150 hover:bg-koda-fg/6 hover:ring-koda-accent/45 focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-koda-fg/8 text-xs font-bold text-koda-fg/60">
+                    {LOGO_DO_PROVEDOR[provedor.id] ? <img src={LOGO_DO_PROVEDOR[provedor.id]} alt="" aria-hidden="true" className="h-5 w-5 object-contain" /> : provedor.sigla}
+                  </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="truncate text-[13px] font-medium text-koda-fg/85 group-hover:text-koda-fg">
+                      {provedor.nome}
+                    </span>
+                    <span className="truncate text-[11px] text-koda-fg/35">{provedor.detalhe}</span>
+                  </span>
+                </button>
+              ))}
+              {provedoresApi === null ? (
+                <p className="text-[12.5px] text-koda-fg/45">lendo provedores de API…</p>
+              ) : provedoresApi.length === 0 ? (
+                <p className="text-[12.5px] text-koda-fg/45">Nenhum provedor de API disponível.</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {section === 'modelos' && !provedorDaTela && abaProvedores === 'custom' && !criandoCustom ? (
+            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+              {Object.values(estadoDosProvedores ?? {}).filter((p) => p.id.startsWith('custom-')).map((p) => (
+                <button key={p.id} type="button" onClick={() => { setEditCustom({ nome: p.nome, base: p.base ?? '', formato: p.formato ?? 'openai' }); setMensagemCustom(''); setConfirmarRemocaoCustom(false); setProvedorAberto(p.id) }} className="flex min-h-28 flex-col items-start gap-2 rounded-2xl bg-koda-panel p-4 text-left ring-1 ring-koda-fg/10 hover:ring-koda-accent/45">
+                  <span className="rounded-xl bg-koda-fg/8 px-3 py-2 text-xs font-bold">CX</span><span className="text-sm font-medium">{p.nome}</span><span className="text-xs text-koda-fg/45">{p.contas.length} chave(s) · {p.base}</span>
+                </button>
+              ))}
+              <button type="button" onClick={() => { setResultadoCustom({ texto: null }); setCriandoCustom(true) }} className="flex min-h-28 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-koda-fg/20 text-sm text-koda-fg/70 hover:border-koda-accent"><Plus className="h-5 w-5" /> Adicionar provedor</button>
+            </div>
+          ) : null}
+
+          {section === 'modelos' && !provedorDaTela && abaProvedores === 'custom' && criandoCustom ? (
+            <Card
+              title="Provedor custom"
+              description="Qualquer API compatível com OpenAI ou Anthropic."
+            >
+              <div className="flex flex-col gap-3 border-t border-koda-fg/8 px-5 py-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[12px] text-koda-fg/55">Nome</span>
+                    <input
+                      value={formCustom.nome}
+                      onChange={(evento) => setFormCustom({ ...formCustom, nome: evento.target.value })}
+                      placeholder="Meu gateway"
+                      className="rounded-lg bg-koda-input px-3 py-2 text-[13px] text-koda-fg ring-1 ring-koda-fg/10 outline-none focus:ring-2 focus:ring-koda-accent"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[12px] text-koda-fg/55">Formato</span>
+                    <select
+                      value={formCustom.formato}
+                      onChange={(evento) => setFormCustom({
+                        ...formCustom,
+                        formato: evento.target.value as 'openai' | 'anthropic' | 'responses',
+                      })}
+                      className="rounded-lg bg-koda-input px-3 py-2 text-[13px] text-koda-fg ring-1 ring-koda-fg/10 outline-none focus:ring-2 focus:ring-koda-accent"
+                    >
+                      <option value="openai">OpenAI (chat/completions)</option>
+                      <option value="anthropic">Anthropic (messages)</option>
+                      <option value="responses">OpenAI (responses)</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 md:col-span-2">
+                    <span className="text-[12px] text-koda-fg/55">URL base</span>
+                    <input
+                      value={formCustom.base}
+                      onChange={(evento) => setFormCustom({ ...formCustom, base: evento.target.value })}
+                      placeholder="https://api.exemplo.com/v1"
+                      className="rounded-lg bg-koda-input px-3 py-2 text-[13px] text-koda-fg ring-1 ring-koda-fg/10 outline-none focus:ring-2 focus:ring-koda-accent"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 md:col-span-2">
+                    <span className="text-[12px] text-koda-fg/55">Chave</span>
+                    <textarea
+                      value={formCustom.chave}
+                      onChange={(evento) => setFormCustom({ ...formCustom, chave: evento.target.value })}
+                      placeholder="Uma chave por linha"
+                      style={{ WebkitTextSecurity: 'disc' } as CSSProperties}
+                      rows={3}
+                      className="rounded-lg bg-koda-input px-3 py-2 text-[13px] text-koda-fg ring-1 ring-koda-fg/10 outline-none focus:ring-2 focus:ring-koda-accent"
+                    />
+                  </label>
+                </div>
+                {modelosCustom.length > 0 ? <div className="max-h-48 overflow-auto text-xs text-koda-fg/70"><p>{modelosCustom.length} modelos encontrados</p>{modelosCustom.map((modelo) => <p key={modelo}>{modelo}</p>)}</div> : null}
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => setCriandoCustom(false)} className="rounded-xl bg-koda-fg/6 px-3.5 py-1.5 text-xs">Cancelar</button>
+                  <button
+                    type="button"
+                    onClick={() => void testarCustom()}
+                    className="rounded-xl bg-koda-fg/6 px-3.5 py-1.5 text-[12.5px] font-medium text-koda-fg/80 hover:bg-koda-fg/10"
+                  >
+                    Testar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void salvarCustom()}
+                    className="rounded-xl bg-koda-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-koda-bg hover:opacity-90"
+                  >
+                    Salvar
+                  </button>
+                  {resultadoCustom.texto ? (
+                    <span className={resultadoCustom.ok === false ? 'text-[12px] text-amber-400/90' : 'text-[12px] text-emerald-400'}>
+                      {resultadoCustom.texto}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+          ) : null}
 
           {section === 'geral' ? (
             <Card
@@ -1954,6 +2278,8 @@ export function SettingsScreen({
               </div>
             </Card>
           ) : null}
+
+          {section === 'celular' ? <CelularSection abrirQrAoEntrar={abrirQrDoCelular} /> : null}
 
           {section === 'nuvem' ? (
             <Atualizacoes cloud={cloud} version={backend.version} />
@@ -2103,6 +2429,11 @@ export function SettingsScreen({
             </>
           ) : null}
 
+          {/* Os cinco modos de economia de tokens. O estado mora no backend: ligado vale
+              para todos os provedores e modelos, e não só para a janela aberta. */}
+          {section === 'economia' ? <EconomiaSection /> : null}
+          {section === 'combos' ? <CombosSection /> : null}
+
           {/*
            * Um **box por provedor**, soltos na área — sem cartão em volta. Foi o pedido dele
            * em 26/10/2026, duas vezes: o quadro é a unidade, não a lista dentro de um quadro.
@@ -2113,7 +2444,7 @@ export function SettingsScreen({
            * corpo dela fica vazio de propósito — não há o que configurar enquanto não houver
            * contrato no backend, e inventar campos seria pior do que o vazio.
            */}
-          {section === 'modelos' && !provedorDaTela ? (
+          {section === 'modelos' && !provedorDaTela && abaProvedores === 'login' ? (
             <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
               {PROVEDORES.map((provedor) => (
                 <button
@@ -2144,7 +2475,67 @@ export function SettingsScreen({
            * arquivo, conta e validade, sem rede. «Baixar modelos» lê o catálogo que o CLI
            * deixou em disco; quando não há, diz por quê em vez de inventar uma lista.
            */}
-          {section === 'modelos' && provedorDaTela ? (
+          {section === 'modelos' && provedorDaTela && provedorDaTela.id.startsWith('custom-') && 'contas' in provedorDaTela ? (
+            <div className="flex flex-col gap-4">
+              <Card title="Configuração" description="Edite os dados do provedor.">
+                <div className="grid gap-3 border-t border-koda-fg/8 p-5 md:grid-cols-2">
+                  <label className="text-xs text-koda-fg/65">Nome<input aria-label="Nome do provedor" value={editCustom.nome} onChange={(e) => setEditCustom({ ...editCustom, nome: e.target.value })} className="mt-1 w-full rounded-lg bg-koda-input p-2 text-sm text-koda-fg" /></label>
+                  <label className="text-xs text-koda-fg/65">Formato<select aria-label="Formato do provedor" value={editCustom.formato} onChange={(e) => setEditCustom({ ...editCustom, formato: e.target.value as typeof editCustom.formato })} className="mt-1 w-full rounded-lg bg-koda-input p-2 text-sm text-koda-fg"><option value="openai">OpenAI (chat/completions)</option><option value="responses">OpenAI (responses)</option><option value="anthropic">Anthropic (messages)</option></select></label>
+                  <label className="text-xs text-koda-fg/65 md:col-span-2">URL base<input aria-label="URL do provedor" value={editCustom.base} onChange={(e) => setEditCustom({ ...editCustom, base: e.target.value })} className="mt-1 w-full rounded-lg bg-koda-input p-2 text-sm text-koda-fg" /></label>
+                  <div className="flex flex-wrap gap-3 md:col-span-2"><button type="button" onClick={() => void (async () => { try { await atualizarCustom(provedorDaTela.id, editCustom); await recarregarProvedores(); setMensagemCustom('Configuração salva.'); await baixarModelos() } catch (e) { setMensagemCustom(fraseDeFalha(e)) } })()} className="rounded-lg bg-koda-accent px-3 py-2 text-xs text-koda-bg">Salvar alterações</button>
+                  {confirmarRemocaoCustom ? <><span className="text-xs text-red-400">Remover provedor e todas as chaves?</span><button type="button" onClick={() => void (async () => { try { await sairDoProvedor(provedorDaTela.id); setProvedorAberto(null); setConfirmarRemocaoCustom(false); await recarregarProvedores() } catch (e) { setMensagemCustom(fraseDeFalha(e)) } })()} className="text-xs text-red-400">Confirmar remoção</button><button type="button" onClick={() => setConfirmarRemocaoCustom(false)} className="text-xs">Cancelar remoção</button></> : <button type="button" onClick={() => setConfirmarRemocaoCustom(true)} className="text-xs text-red-400">Remover provedor</button>}</div>
+                </div>
+              </Card>
+              <Card title="Chaves de API" description="As chaves são usadas em sequência quando necessário.">
+                <div className="flex flex-col gap-2 border-t border-koda-fg/8 p-5">
+                  {provedorDaTela.contas.map((conta) => <div key={conta.id} className="flex flex-wrap items-center gap-2 rounded-lg bg-koda-fg/5 p-3 text-sm"><span className="flex-1">{conta.conta ?? 'Chave'}{conta.atual ? ' · em uso' : ''}</span><button type="button" onClick={() => { setSubstituindoChave(conta.id); setNovaChaveCustom('') }} className="text-xs text-koda-fg/70">Substituir</button><button type="button" onClick={() => void (async () => { if (provedorDaTela.contas.length === 1) { setMensagemCustom('Substitua a última chave ou remova o provedor.'); return } await sairDoProvedor(provedorDaTela.id, conta.id); await recarregarProvedores() })()} className="text-xs text-red-400">Remover</button>{substituindoChave === conta.id ? <div className="flex w-full gap-2"><input type="password" aria-label={`Nova chave ${conta.conta ?? ''}`} value={novaChaveCustom} onChange={(e) => setNovaChaveCustom(e.target.value)} className="min-w-0 flex-1 rounded-lg bg-koda-input p-2" /><button type="button" onClick={() => void (async () => { try { await substituirChaveCustom(provedorDaTela.id, conta.id, novaChaveCustom); setSubstituindoChave(null); setNovaChaveCustom(''); setMensagemCustom('Chave substituída.'); await recarregarProvedores() } catch (e) { setMensagemCustom(fraseDeFalha(e)) } })()} className="text-xs">Salvar chave</button></div> : null}</div>)}
+                  <textarea aria-label="Adicionar chaves" placeholder="Uma nova chave por linha" value={chavesCustom} onChange={(e) => setChavesCustom(e.target.value)} style={{ WebkitTextSecurity: 'disc' } as CSSProperties} rows={2} className="rounded-lg bg-koda-input p-2 text-sm" />
+                  <button type="button" disabled={!chavesCustom.trim()} onClick={() => void (async () => { try { for (const chave of chavesCustom.split(/\s+/).filter(Boolean)) await adicionarChaveCustom(provedorDaTela.id, chave); setChavesCustom(''); await recarregarProvedores(); setMensagemCustom('Chaves adicionadas.') } catch (e) { setMensagemCustom(fraseDeFalha(e)) } })()} className="w-fit rounded-lg bg-koda-fg/8 px-3 py-2 text-xs disabled:opacity-50">Adicionar chaves</button>
+                  {mensagemCustom ? <p role="status" className="text-xs text-koda-fg/70">{mensagemCustom}</p> : null}
+                </div>
+              </Card>
+              <Card title="Modelos" description="Modelos encontrados na API e adicionados manualmente.">
+                <div className="flex flex-col gap-3 border-t border-koda-fg/8 p-5">
+                  <div className="flex gap-2"><input aria-label="ID do modelo" value={novoModeloCustom} onChange={(e) => setNovoModeloCustom(e.target.value)} placeholder="ID do modelo" className="min-w-0 flex-1 rounded-lg bg-koda-input p-2 text-sm" /><button type="button" disabled={!novoModeloCustom.trim()} onClick={() => void (async () => { try { await atualizarCustom(provedorDaTela.id, { acao: 'adicionar', modelo: novoModeloCustom }); setNovoModeloCustom(''); await baixarModelos() } catch (e) { setMensagemCustom(fraseDeFalha(e)) } })()} className="rounded-lg bg-koda-fg/8 px-3 text-xs disabled:opacity-50">Adicionar modelo</button><button type="button" onClick={() => void baixarModelos()} className="rounded-lg bg-koda-fg/8 px-3 text-xs">Atualizar</button></div>
+                  <p className="text-xs text-koda-fg/55">{modelos.ocupado ? 'Lendo modelos…' : `${modelos.lista.length} modelos · ${modelos.fonte ?? modelos.motivo ?? ''}`}</p>
+                  <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">{modelos.lista.map((id) => <div key={id} className="rounded-lg bg-koda-fg/5 p-3 text-sm"><p className="break-all">{modelos.nomes[id] ?? id}</p><div className="mt-2 flex gap-3"><button type="button" disabled={testeDoModelo[id]?.ocupado} onClick={() => void testarModelo(id)} className="text-xs text-koda-fg/80">Testar</button><button type="button" onClick={() => void (async () => { await atualizarCustom(provedorDaTela.id, { acao: 'remover', modelo: id }); await baixarModelos() })()} className="text-xs text-red-400">Remover</button></div>{testeDoModelo[id]?.detalhe ? <p className="mt-2 text-xs">{testeDoModelo[id].detalhe}</p> : null}</div>)}</div>
+                  {ocultosCustom.length ? <div><p className="mb-2 text-xs text-koda-fg/55">Modelos removidos</p>{ocultosCustom.map((id) => <div key={id} className="flex items-center gap-2 py-1 text-xs"><span className="flex-1 break-all">{id}</span><button type="button" onClick={() => void (async () => { await atualizarCustom(provedorDaTela.id, { acao: 'restaurar', modelo: id }); await baixarModelos() })()}>Restaurar</button></div>)}</div> : null}
+                </div>
+              </Card>
+            </div>
+          ) : null}
+
+          {section === 'modelos' && provedorDaTela && provedorDaTela.id.startsWith('api-') && 'contas' in provedorDaTela ? (
+            <Card title="Chave de API" description={provedorDaTela.disponivel === false ? 'Este provedor usa um protocolo específico ainda não implementado.' : provedorDaTela.chaveOpcional ? 'Conecte o Ollama local; a chave é opcional.' : provedorDaTela.id === 'api-vertex-partner' ? 'Informe o projeto e um token OAuth de acesso do Google Cloud. O token expira e deve ser renovado.' : 'Conecte sua chave para usar os modelos deste provedor.'}>
+              <div className="flex flex-col gap-3 border-t border-koda-fg/8 p-5">
+                {provedorDaTela.disponivel !== false ? <>
+                  {['api-bedrock','api-bedrock-xai'].includes(provedorDaTela.id) ? <>
+                    <p className="text-xs text-koda-fg/60">Credenciais AWS estáticas. A chave abaixo é o Secret Access Key; sessão SSO não é suportada.</p>
+                    <input aria-label="AWS Access Key ID" value={accessIdApi} onChange={(e) => setAccessIdApi(e.target.value)} placeholder="AWS Access Key ID" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                    <input aria-label="Região AWS" value={regiaoApi} onChange={(e) => setRegiaoApi(e.target.value)} placeholder="us-east-1" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                    <input type="password" aria-label="AWS Session Token opcional" value={tokenAwsApi} onChange={(e) => setTokenAwsApi(e.target.value)} placeholder="Session Token (opcional)" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                  </> : null}
+                  {provedorDaTela.id === 'api-vertex-partner' ? <input aria-label="Projeto Google Cloud" value={deploymentApi} onChange={(e) => setDeploymentApi(e.target.value)} placeholder="ID do projeto Google Cloud" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" /> : null}
+                  {provedorDaTela.id === 'api-azure' ? <>
+                    <input aria-label="Endpoint Azure" value={endpointApi} onChange={(e) => setEndpointApi(e.target.value)} placeholder="https://recurso.openai.azure.com" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                    <input aria-label="Deployment Azure" value={deploymentApi} onChange={(e) => setDeploymentApi(e.target.value)} placeholder="Nome do deployment" className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                  </> : null}
+                  <textarea aria-label="Chave de API" value={chaveApi} onChange={(e) => setChaveApi(e.target.value)} placeholder="Uma chave por linha" style={{ WebkitTextSecurity: 'disc' } as CSSProperties} rows={3} className="rounded-lg bg-koda-input px-3 py-2 text-koda-fg" />
+                  <button type="button" disabled={!chaveApi.trim() && !('chaveOpcional' in provedorDaTela && provedorDaTela.chaveOpcional)} onClick={() => void (async () => {
+                    try { const chaves = chaveApi.split(/\s+/).filter(Boolean); if (!chaves.length) chaves.push(''); let salvo; for (const chave of chaves) salvo = await salvarChaveApi(provedorDaTela.id, chave, endpointApi, deploymentApi, accessIdApi, regiaoApi, tokenAwsApi); if (salvo) setProvedoresApi((atual) => (atual ?? []).map((p) => p.id === salvo.id ? salvo : p)); setChaveApi(''); setTokenAwsApi(''); setMensagemApi(`${chaves.length} chave(s) salva(s).`); await baixarModelos() }
+                    catch (erro) { setMensagemApi(fraseDeFalha(erro)) }
+                  })()} className="w-fit rounded-lg bg-koda-accent px-3 py-2 text-koda-bg disabled:opacity-50">Salvar chave</button>
+                  {provedorDaTela.conectado ? <p className="text-sm text-koda-fg/60">{provedorDaTela.contas.length} chave(s) salvas</p> : null}
+                  {provedorDaTela.conectado ? <button type="button" onClick={() => void (async () => { await sairDoProvedor(provedorDaTela.id); await recarregarApi(); setMensagemApi('Chave removida.') })()} className="w-fit text-sm text-red-400">Remover chave</button> : null}
+                </> : null}
+                {mensagemApi ? <p className="text-sm text-koda-fg/70">{mensagemApi}</p> : null}
+                <p className="text-sm text-koda-fg/60">{modelos.ocupado ? 'Lendo modelos…' : modelos.motivo || `${modelos.lista.length} modelos · ${modelos.fonte ?? ''}`}</p>
+                <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-4">{modelos.lista.map((id) => <div key={id} className="rounded-lg bg-koda-fg/5 p-3 text-sm"><p>{modelos.nomes[id] ?? id}</p><button type="button" disabled={!provedorDaTela.conectado || testeDoModelo[id]?.ocupado} onClick={() => void testarModelo(id)} className="mt-2 rounded-lg bg-koda-fg/6 px-2 py-1 text-xs">Testar</button>{testeDoModelo[id]?.detalhe ? <p className="mt-1 text-xs">{testeDoModelo[id].detalhe}</p> : null}</div>)}</div>
+              </div>
+            </Card>
+          ) : null}
+
+          {section === 'modelos' && provedorDaTela && !provedorDaTela.id.startsWith('api-') && !provedorDaTela.id.startsWith('custom-') ? (
             <div className="flex flex-col gap-3">
               <div className="rounded-2xl bg-koda-panel p-5 ring-1 ring-koda-fg/8">
                 {/*
@@ -2268,6 +2659,13 @@ export function SettingsScreen({
                           href={login.url}
                           target="_blank"
                           rel="noreferrer"
+                          onClick={(evento) => {
+                            // No app empacotado o `target="_blank"` não sai do webview:
+                            // quem abre o navegador do sistema é o plugin (ver
+                            // `abrirNoNavegador`). No navegador de dev, o link segue normal.
+                            evento.preventDefault()
+                            if (login.url) abrirNoNavegador(login.url)
+                          }}
                           className="text-[12px] font-medium text-koda-accent hover:underline"
                         >
                           Abrir a página
@@ -2343,14 +2741,33 @@ export function SettingsScreen({
                 <div className="grid gap-2.5 sm:grid-cols-2 md:grid-cols-4">
                   {modelos.lista.map((modelo) => {
                     const teste = testeDoModelo[modelo]
+                    const multiplo = modelos.multiplos[modelo]
+                    const textoMultiplo = textoDoMultiplo(multiplo)
                     return (
                       <div
                         key={modelo}
                         className="flex flex-col gap-1.5 rounded-xl bg-koda-panel p-3 ring-1 ring-koda-fg/8"
                       >
-                        <span className="truncate text-[12.5px] font-medium text-koda-fg/90">
-                          {modelos.nomes[modelo] ?? modelo}
-                        </span>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="truncate text-[12.5px] font-medium text-koda-fg/90">
+                            {modelos.nomes[modelo] ?? modelo}
+                          </span>
+                          {textoMultiplo ? (
+                            <span
+                              className={[
+                                'shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold ring-1',
+                                tomDoMultiplo(multiplo) === 'caro'
+                                  ? 'bg-amber-500/10 text-amber-300 ring-amber-500/20'
+                                  : tomDoMultiplo(multiplo) === 'barato'
+                                    ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/20'
+                                    : 'bg-koda-fg/6 text-koda-fg/55 ring-koda-fg/10',
+                              ].join(' ')}
+                              title={`Multiplicador de uso: ${textoMultiplo}`}
+                            >
+                              {textoMultiplo}
+                            </span>
+                          ) : null}
+                        </div>
                         <span className="truncate font-mono text-[10.5px] text-koda-fg/30">
                           {modelo}
                         </span>

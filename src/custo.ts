@@ -15,21 +15,18 @@
  * saíam pelo mesmo preço — «o flash tá competindo com a liz 4, o koda também». Preço é decisão
  * dele, e modelo nenhum é igual a outro: a tabela virou explícita, um id por linha.
  *
- * A história dos números, para ninguém precisar adivinhar de onde vieram: a tabela original era
- * **10/15/20** por porte; em 09/10/2026 ele mandou **baixar 30%**, e logo depois apontou que
- * `nano` e `mini` ainda estavam caros e que os três do degrau do meio não podiam ter o mesmo
- * preço. `liz-4` e `layze-2` ele não tocou. O `nable-4-mini-preview` entrou em 10/10/2026
- * com preço próprio, **20** — acima de todo o resto, por decisão dele.
+ * Com o catálogo novo do `host/gateway-local` (02/11/2026), os preços foram mantidos nos
+ * degraus equivalentes: o Claude Haiku 5.5 herdou o degrau do antigo `liz-4` (10,5), e os
+ * três Flash herdaram o degrau do antigo `liz-3-flash` (7). O Haiku saiu do seletor a
+ * pedido do dono, mas o preço dele fica aqui: conversas antigas ainda podem ter gasto
+ * nesse modelo, e apagar a linha faria a ficha dessas respostas cobrar o `PRECO_PADRAO`.
+ * O `PRECO_PADRAO` continua cobrindo modelo novo que apareça no seletor antes de ter preço.
  */
 export const MOEDAS_POR_MILHAO: Record<string, number> = {
-  'liz-nano': 3,
-  'liz-mini-1-3': 4,
-  'liz-mini-2': 5,
-  'liz-3-flash': 7,
-  'liz-4': 10.5,
-  'koda-1': 12,
-  'layze-2': 14,
-  'nable-4-mini-preview': 20,
+  'claude-haiku-5.5': 10.5,
+  'glm-5.3-flash': 7,
+  'qwen-3.8-flash': 7,
+  'qwen-3.8-flash-legacy': 7,
 }
 
 /**
@@ -61,10 +58,10 @@ export const TOKENS_POR_CONVERSA = 100_000
  * O modelo que serve de régua para «quantas conversas».
  *
  * Com preço por modelo **não existe mais «o modelo médio»** — a régua virou um modelo nomeado, e
- * a frase que mostra o número diz qual é. Ele é o do meio da tabela de propósito: serve para dar
+ * a frase que mostra o número diz qual é. Ele é o padrão do app de propósito: serve para dar
  * ordem de grandeza, e a régua não pode mudar de uma conversa para outra.
  */
-export const MODELO_DE_REFERENCIA = 'liz-4'
+export const MODELO_DE_REFERENCIA = 'glm-5.3-flash'
 
 /** Quantas moedas custa um tanto de tokens, num modelo. */
 export function moedasDeTokens(tokens: number, modelo: string): number {

@@ -20,6 +20,7 @@ minutos, então uma renovação por ciclo basta).
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ class RequestContext:
     nome: str | None = None
     email: str | None = None
     account_id: str | None = None
+    #: Quando esta janela falou com o backend pela última vez. O celular herda o
+    #: dono da janela mais recente quando ele próprio não carrega a conta.
+    updated: float = 0.0
 
 
 _context: ContextVar[RequestContext | None] = ContextVar("koda_request", default=None)
@@ -62,7 +66,28 @@ def proprietario() -> str:
     # Conta validada pela nuvem. Dados locais sem conta pertencem ao perfil local;
     # linhas legadas ambíguas permanecem NULL e não ficam visíveis por acidente.
     context = contexto_atual()
-    return ("account:" + context.account_id) if context.account_id else (context.email or "local:desktop")
+    if context.account_id:
+        return "account:" + context.account_id
+    if context.email:
+        return context.email
+    # O celular é um controle remoto deste PC e chega pelo link sem a sessão da
+    # conta (o link só tem o token da execução). Sem herdar o dono do desktop, o
+    # histórico criado nele caía em «local:desktop» e sumia da lista do PC quando
+    # a conta estava logada — a conversa existia, mas em outro dono.
+    if context.window == "mobile":
+        with _lock:
+            candidatos = [
+                item
+                for item in _sessions.values()
+                if item.window != "mobile" and (item.account_id or item.email)
+            ]
+        if candidatos:
+            dono = max(candidatos, key=lambda item: item.updated)
+            if dono.account_id:
+                return "account:" + dono.account_id
+            if dono.email:
+                return dono.email
+    return "local:desktop"
 
 if TYPE_CHECKING:  # pragma: no cover - só para o tipo
     from .config import Settings
@@ -89,7 +114,8 @@ def definir(
         updated = RequestContext(window=current.window, token=limpo or None,
                                  nome=(nome or "").strip() or None if limpo else None,
                                  email=(email or "").strip().casefold() or None if limpo else None,
-                                 account_id=account_id if limpo else None)
+                                 account_id=account_id if limpo else None,
+                                 updated=time.monotonic())
         with _lock:
             _sessions[current.window] = updated
         _context.set(updated)

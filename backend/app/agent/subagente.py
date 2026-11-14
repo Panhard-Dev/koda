@@ -288,13 +288,7 @@ async def executar(
             return "sim"
         return await aprovar(acao)
 
-    mensagens = [
-        {
-            "role": "system",
-            "content": _prompt_do_agente(agente, workspace, sem_mcp=not agente.mcps),
-        },
-        {"role": "user", "content": (tarefa or "").strip()},
-    ]
+    mensagens = [{"role": "user", "content": (tarefa or "").strip()}]
 
     resultado: Resultado = await rodar(
         _ModeloContado(engine, LIMITES.requisicoes_por_segundo_sub),

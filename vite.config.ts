@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { extname } from 'node:path'
+import { readFileSync, readdirSync, statSync, watch } from 'node:fs'
+import { extname, resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
@@ -127,9 +127,49 @@ function arquivoLocal(): Plugin {
   }
 }
 
+/**
+ * Recarrega o app quando o catálogo de provedores muda.
+ *
+ * O catálogo é o único arquivo do backend que o frontend importa direto. O watcher do Vite
+ * ignora `backend/**` (ver `server.watch.ignored`), então sem isto o módulo fica preso no
+ * cache e um provedor novo simplesmente não aparece em «Modelos e Provedores» — nem
+ * recarregando a página, só reiniciando o dev server. O `fs.watch` da pasta contorna o
+ * ignore do chokidar e também sobrevive a editores que salvam trocando o arquivo.
+ */
+function catalogoDeProvedores(): Plugin {
+  return {
+    name: 'koda-catalogo-de-provedores',
+    apply: 'serve',
+    configureServer(servidor) {
+      const pasta = resolve(servidor.config.root, 'backend/app')
+      const arquivo = resolve(pasta, 'provedores_koda.json')
+      let espera: ReturnType<typeof setTimeout> | undefined
+      const observador = watch(pasta, (_evento, nome) => {
+        if (nome !== 'provedores_koda.json') return
+        clearTimeout(espera)
+        espera = setTimeout(() => {
+          const modulos = servidor.moduleGraph.getModulesByFile(arquivo)
+          modulos?.forEach((modulo) => servidor.moduleGraph.invalidateModule(modulo))
+          servidor.ws.send({ type: 'full-reload' })
+        }, 100)
+      })
+      servidor.httpServer?.on('close', () => {
+        clearTimeout(espera)
+        observador.close()
+      })
+    },
+  }
+}
+
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), tailwindcss(), arquivoLocal()],
+export default defineConfig(({ command }) => ({
+  plugins: [react(), tailwindcss(), arquivoLocal(), catalogoDeProvedores()],
+  // O `VITE_API_TOKEN` de `.env.local` é só do navegador de desenvolvimento.
+  // No app empacotado o launcher entrega um token novo por `invoke`; deixar o
+  // valor de dev embutido no `dist` por `import.meta.env` gravava uma credencial
+  // fixa dentro de todo instalador. O build ignora os `.env*` locais; `serve`
+  // continua lendo `.env.local` normalmente.
+  envDir: command === 'build' ? false : undefined,
   build: {
     // As páginas de teste entram no build junto com o app. Sem declarar o `input`, o Vite
     // só compila o `index.html` — e `blocos.html` e `chat.html` existiriam no dev e
@@ -172,7 +212,18 @@ export default defineConfig({
         '**/.mimosa/**',
         '**/src-tauri/target/**',
         '**/backend/**',
+        // A pasta `data/` tem o banco do backend (`koda.db-wal`/`-shm`). Cada mensagem
+        // escrita (no PC ou vinda do celular) mexe neles, e o watcher respondia com
+        // **reload da página inteira** — o app voltava para a «última conversa» e parecia
+        // que o PC trocava de chat sozinho quando o celular mandava mensagem. Nada ali é
+        // código do frontend.
+        '**/data/**',
+        // O `.toolchain/` guarda o Wine (7 GB) e os symlinks de `dosdevices/` apontam para
+        // `~/.wine` inteiro. Vigiar isso estoura o `fs.inotify.max_user_watches` e derruba
+        // o dev server com ENOSPC — nada ali é código do frontend.
+        '**/.toolchain/**',
+        '**/backups/**',
       ],
     },
   },
-})
+}))

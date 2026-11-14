@@ -46,7 +46,7 @@ def _skills_do_koda() -> Path | None:
 
 
 def _node_do_koda() -> Path | None:
-    """O `node.exe` que viaja com o Koda, achado pelo lugar onde este arquivo está.
+    """O Node que viaja com o Koda, achado pelo lugar onde este arquivo está.
 
     Os dois servidores MCP que vêm com o app (`navegador` e `logs`) são programas **Node**.
     Sem um Node na máquina de destino eles não sobem — e o instalador promete que não é
@@ -55,13 +55,17 @@ def _node_do_koda() -> Path | None:
     A conta é a mesma do `_skills_do_koda`: este arquivo mora em `<koda>/backend/app/`, e no
     instalado o backend fica em `<instalação>/resources/backend/app/`. Daqui, `../../node` dá
     `resources/node` no instalado e `koda/node` em dev — que não existe, e é o certo: em dev
-    quem desenvolve já tem o Node dele no `PATH`. A segunda tentativa cobre o runtime montado
-    por `scripts/gerar-runtime-node.mjs` antes de empacotar.
+    quem desenvolve já tem o Node dele no `PATH`. As outras tentativas cobrem o runtime
+    montado antes de empacotar, com o nome que cada sistema usa (`node.exe` no Windows,
+    `node` no Linux).
     """
     raiz = Path(__file__).resolve().parent.parent.parent
     for candidato in (
         raiz / "node" / "node.exe",
+        raiz / "node" / "node",
         raiz / "src-tauri" / "runtime" / "node" / "node.exe",
+        raiz / "src-tauri" / "runtime" / "node" / "node",
+        raiz / "src-tauri" / "runtime-linux" / "node" / "node",
     ):
         if candidato.is_file():
             return candidato
@@ -81,11 +85,13 @@ class Settings(BaseSettings):
 
     provider: ProviderName = Field(default_factory=_provider_padrao)
     database_path: Path = Path("data/koda.db")
-    # `http://tauri.localhost` é a origem que o app desktop (Tauri/WebView2) usa
-    # quando roda empacotado; no dev a interface vem do Vite, nas portas 5173.
+    # As origens do app empacotado dependem do motor do webview: no Windows/Android o
+    # Tauri serve a interface em `http(s)://tauri.localhost`; no Linux (WebKitGTK) ela
+    # vem de `tauri://localhost`. Sem a terceira, o app instalado no Linux leva 400 em
+    # todo preflight e a tela não fala nem com a API local. No dev a interface é o Vite.
     cors_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,"
-        "http://tauri.localhost,https://tauri.localhost"
+        "http://tauri.localhost,https://tauri.localhost,tauri://localhost"
     )
     local_stream_delay_ms: int = 18
 
@@ -113,7 +119,7 @@ class Settings(BaseSettings):
     instalou. `None` quando a pasta não existe (é o caso de um checkout sem as skills).
     """
     node_path: Path | None = Field(default_factory=_node_do_koda)
-    """O `node.exe` que **vem com o Koda** — ver `_node_do_koda`.
+    """O Node que **vem com o Koda** — ver `_node_do_koda`.
 
     O gerenciador de MCP troca o `node`/`node.exe` do `mcps.json` por este caminho: os dois
     servidores que o app traz são programas Node, e o instalador promete que não é preciso
@@ -200,80 +206,68 @@ class Settings(BaseSettings):
     """Última cartada: espera essa janela e tenta uma vez mais (0 desliga)."""
     retry_final_wait_s: int = 12
 
-    # Serviço de modelos oficial (Liz): é o host em `host/c-host.exe`, que publica o
-    # catálogo em /v1/models e recebe a conversa em /v1/chat/completions.
+    # Serviço de modelos oficial: o `host/gateway-local` (Node) publica o catálogo em
+    # /v1/models e recebe a conversa em /v1/chat/completions. O backend descobre a porta
+    # sozinho quando o gateway já está no ar (ver `providers/host_boot.py`).
     host_url: str = Field(
-        default="http://127.0.0.1:21128/v1",
+        default="http://127.0.0.1:8794/v1",
         validation_alias=AliasChoices("HOST_URL", "KODA_HOST_URL"),
     )
     host_fallback_url: str = Field(
-        default="http://127.0.0.1:21129/v1",
+        default="",
         validation_alias=AliasChoices("KODA_HOST_FALLBACK_URL", "KODAHOST_URL"),
     )
     """Segundo host OpenAI-compatível, usado somente quando o principal falha.
 
-    O `kodahost1.exe` atende nesta porta quando está autorizado. Ele não recebe tráfego
-    normal enquanto o `c-host.exe` estiver saudável: entra apenas para queda de rede,
-    timeout, 5xx ou cota (HTTP 429). Deixe vazio para desligar o failover.
+    O gateway novo é um processo só, então não há reserva de fábrica. Deixe vazio para
+    desligar o failover; se um dia houver um segundo gateway, é aqui que ele entra.
     """
     host_model: str = Field(
-        default="liz-4-5-super",
+        default="layze-2.1-flash",
         validation_alias=AliasChoices("HOST_MODEL", "KODA_HOST_MODEL"),
     )
-    """Modelo padrão do serviço, para id que ele não reconheça (ou vazio).
+    """Modelo padrão do gateway, para id que ele não reconheça (ou vazio).
 
-    Era `liz-4` até 23/10/2026: o host trocou o id por `liz-4-5-super` em 16/10 e
-    passou a **recusar** a grafia antiga (`400 model_not_found`, "rejected a model
-    spelling that is not branded"). Todo pedido com id vazio ou desconhecido caía
-    no padrão e voltava com erro — medido contra o host real.
+    É o primeiro do catálogo novo depois da saída do Claude Haiku 5.5, e o padrão do
+    gateway. Os ids da casa antiga (`liz-*`, `layze-*`, `nable-*`, `koda-1`) não existem
+    mais e caem aqui via `HostProvider.LEGADOS`.
     """
 
     host_modelos_com_visao: str = Field(
-        default="liz-4-5-super,liz-3-flash,liz-mini-1-3,koda-1,layze-2,liz-nano,nable-4-mini-preview",
+        default="layze-2.1-flash,koda-1,koda-2-pro,mx-lz1-teste",
         validation_alias=AliasChoices("KODA_HOST_VISAO", "HOST_VISAO"),
     )
     """Ids do host que **enxergam imagem**, separados por vírgula — lista **curada**.
 
-    O host publica `images` por modelo em `/v1/models`, e esta lista é a segunda opinião:
-    mandar imagem para quem não enxerga derruba o pedido inteiro, então quem decide é ela.
+    O gateway publica `multimodal: true` para os modelos do catálogo, e esta lista é a
+    segunda opinião: mandar imagem para quem não enxerga derruba o pedido inteiro, então
+    quem decide é ela. Atualizada em 02/11/2026 com o catálogo do `host/gateway-local`.
 
-    Atualizada em 16/10/2026 lendo o catálogo ao vivo do host: **saiu** `liz-4` (o host o
-    trocou por `liz-4-5-super`), **entraram** `liz-4-5-super` e `liz-mini-1-3` (os dois
-    enxergam). Segue fora `liz-mini-2`, o único do catálogo com `images: false` — é a
-    exceção que justifica a lista existir.
-
-    Ela é **medida**, e por isso envelhece. Medição de 10/10/2026 (sonda crua contra o
-    upstream, com imagem): enxergam `big-pickle`, `space-bunny-free`, `mimo-v2.6`, os dois
-    `muse-spark` e `longcat`; **não** enxergam os dois `nemotron` (400 «Endpoint is
-    unavailable»). Ou seja: todos menos os dois Liz Mini.
-
-    A lista anterior tinha quatro ids e deixava de fora o `liz-nano` e o `nable-4`, que
-    **enxergam**. A justificativa era velha: citava o id `mai-experimental`, que o registro
-    do host não usa mais. Modelo fora desta lista recebe o anexo pelos metadados, em vez de
-    a imagem ir no corpo do pedido.
-
-    Ajustável por `KODA_HOST_VISAO`.
+    Modelo fora desta lista recebe o anexo pelos metadados, em vez de a imagem ir no corpo
+    do pedido. Ajustável por `KODA_HOST_VISAO`.
     """
 
     host_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("HOST_KEY", "KODA_HOST_KEY"),
     )
-    """Chave de cliente do host, para o build que exige uma.
+    """Chave de cliente do host, quando ele exigir uma.
 
-    O `c-host.exe` com autorização remota recusa quem não manda chave: 401. O host aberto
-    não olha o cabeçalho. Sem nada aqui o `Authorization` simplesmente não vai, então o
-    padrão continua funcionando com o host aberto; com o host fechado, isto é o que faz o
-    agente voltar a ter ferramentas em vez de cair no provider local.
+    O gateway headless não exige chave (`requireApiKey: false`), então o normal é ficar
+    vazio e o `Authorization` simplesmente não ir. O campo continua existindo para um
+    gateway que um dia feche a porta.
     """
 
-    dynamic_key_file: Path | None = None
+    dynamic_key_file: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices("KODA_DYNAMIC_KEY_FILE", "SERVE_LIZ_DYNAMIC_KEY_FILE"),
+    )
     """Onde mora a senha dinâmica do dia (`koda-host-dinamica.json`).
 
-    O shell do app passa este caminho ao subir o `c-host` (`SERVE_LIZ_DYNAMIC_KEY_FILE`) e
-    o backend escreve o JSON que o painel entregou no mesmo lugar — os dois precisam
-    concordar, senão o host lê um arquivo que ninguém escreve. Vazio = ao lado do banco,
-    na pasta de dados do app. Ver `host_dinamica.py`.
+    O launcher passa o mesmo caminho ao backend e ao LizProxy. Ele é gravado no
+    ambiente de ambos no início de cada execução; uma variável herdada de outra
+    instalação não pode redirecionar o arquivo no app empacotado. Vazio = ao
+    lado do banco, na pasta de dados do app. Ver `host_dinamica.py`.
     """
 
     # --- Nuvem (Koda Cloud) ---
@@ -340,8 +334,8 @@ class Settings(BaseSettings):
     def aceita_imagem(self, model: str) -> bool:
         """O modelo enxerga imagem? Decide se o anexo de imagem vai **no corpo** do pedido.
 
-        Compara pelo id do catálogo do host (`liz-4-5-super`). Um id vazio cai no modelo
-        padrão do host, que é o que o provider vai usar de verdade.
+        Compara pelo id do catálogo do gateway (`glm-5.3-flash`). Um id vazio cai no
+        modelo padrão do host, que é o que o provider vai usar de verdade.
         """
         alvo = model or self.host_model
         return alvo in {item.strip() for item in self.host_modelos_com_visao.split(",") if item.strip()}

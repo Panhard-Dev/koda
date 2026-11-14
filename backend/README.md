@@ -21,13 +21,19 @@ backend pelo `stdin` — nunca pelo ambiente, que é o que o código do agente l
 impede o agente de chamar `PUT /api/permissions`, se dar o modo `auto` e passar a agir sem
 cartão (era o achado crítico da auditoria de segurança).
 
-Sem launcher (o `uv run uvicorn` acima) o backend **imprime** o token no terminal. Para
-fixá-lo, use `KODA_API_TOKEN` — variável que só vale fora do app empacotado:
+Sem launcher (o `uv run uvicorn` acima), o backend usa o `VITE_API_TOKEN` do
+`.env.local` do checkout: é o mesmo valor que o Vite entrega à interface, então
+`npm run dev:api` e `npm run dev` concordam sem configuração extra. O terminal diz
+apenas **de onde** o token veio, nunca o valor. `KODA_API_TOKEN` tem prioridade
+quando você quiser fixar outro valor — variável que só vale fora do app empacotado:
 
 ```bash
 KODA_API_TOKEN=dev uv run uvicorn app.main:app --reload --port 8787
 curl localhost:8787/api/models -H 'authorization: Bearer dev'
 ```
+
+Sem nenhum dos dois, o backend sorteia um token por execução; nesse caso a interface
+do navegador precisa receber o mesmo valor em `VITE_API_TOKEN`.
 
 Três rotas escapam da exigência, e cada uma tem motivo: `OPTIONS` (o *preflight* do CORS
 não manda `Authorization`), `GET /api/health` (responde só `ok` e a versão, para o launcher
@@ -72,7 +78,7 @@ produto. As variáveis `OPENAI_*` são ignoradas.
 ```
 $ curl -N -X POST localhost:8787/api/chat -H 'content-type: application/json' \
     -H 'authorization: Bearer dev' \
-    -d '{"text":"oi","model":"liz-nano"}'
+    -d '{"text":"oi","model":"glm-5.3-flash"}'
 
 event: start
 data: {"conversation_id": "5f0c…", "at": 1758561234567}
@@ -621,29 +627,33 @@ respondendo) e o provider local. São **dois**, e não há um terceiro.
 - **local** — responde sem chave, em pedaços, dizendo que não há modelo configurado. **Não
   sabe chamar ferramenta**: com ele o chat funciona, mas o agente não executa nada
   (`tools_ready: false` no `/api/health`).
-- **host** — o provider do **host dos modelos oficiais** (`HOST_URL`, o `host/c-host.exe`),
-  que traz o catálogo e o tool calling. É o que liga o agente na interface. Com `HOST_KEY`
-  preenchida o `Authorization: Bearer` vai em toda chamada ao host (catálogo, esforços e
-  conversa); em branco nenhum cabeçalho é enviado, que é o certo para o host aberto. O host
-  com autorização remota recusa com 401 quem não manda chave — e 401 aqui já foi confundido
-  com "host fora do ar", jogando o `auto` no provider local e sumindo com as ferramentas.
+- **host** — o provider do **host dos modelos oficiais** (`HOST_URL`, o
+  `host/gateway-local`), que traz o catálogo e o tool calling. É o que liga o agente na
+  interface. Com `HOST_KEY` preenchida o `Authorization: Bearer` vai em toda chamada ao host
+  (catálogo, esforços e conversa); em branco nenhum cabeçalho é enviado, que é o certo para
+  o gateway headless, que não exige chave. O `c-host.exe` antigo ainda é tentado como último
+  recurso quando o gateway não existe no checkout.
 
-  O modelo padrão é **`liz-4-5-super`** (o maior do catálogo, e o primeiro da lista no
-  seletor). `KODA_HOST_MODEL` troca o padrão. O Koda envia as ferramentas disponíveis sem
-  `tool_choice` e deixa cada modelo decidir quando e qual ferramenta chamar.
+  O modelo padrão é **`glm-5.3-flash`** (o primeiro da lista no seletor depois da saída do
+  Claude Haiku 5.5). `KODA_HOST_MODEL` troca o padrão. O Koda envia as ferramentas
+  disponíveis sem `tool_choice` e deixa cada modelo decidir quando e qual ferramenta
+  chamar.
 
-  Subindo o `c-host.exe` **à mão** (fora do app), ele precisa de duas coisas que o app
-  passa sozinho e que não estão no binário: `SERVE_LIZ_AUTH_URL` com o **endereço base do
-  painel** (o host anexa `/api/public/host/authorize`; passar a URL completa dá 404) e, do
-  lado do backend, `KODA_HOST_KEY` para o `Authorization` da conversa. Sem a variável do
-  painel o host sobe e responde **503** em tudo — é *fail-closed* de propósito: ele não
-  guarda credencial nenhuma.
+  Subindo o gateway **à mão** (fora do app):
 
-      SERVE_LIZ_AUTH_URL=https://koda-cloud-api.studiosluxgames.workers.dev ./c-host.exe
+      cd host/gateway-local && npm start
+
+  O backend o descobre em `8790–8799` e adota a porta em que ele estiver respondendo; não é
+  preciso exportar `HOST_URL`. Se o gateway não estiver no ar, `host_boot.py` o sobe com o
+  Node empacotado (ou o do `PATH`) e lê a porta real do `ACCIO_PORT_FILE`. No `c-host.exe`
+  de reserva, as regras antigas continuam valendo: `SERVE_LIZ_AUTH_URL` com o endereço base
+  do painel e `KODA_HOST_KEY` do lado do backend; sem a variável do painel ele sobe e
+  responde **503** em tudo.
 
 #### A senha dinâmica do dia (duas formas de autorizar, as duas valendo)
 
-Desde 23/10/2026 o host aceita **duas** credenciais, e nenhuma substitui a outra:
+No `c-host.exe` de reserva, desde 23/10/2026 o host aceita **duas** credenciais, e nenhuma
+substitui a outra (o gateway headless não usa nenhuma das duas):
 
 1. a **sessão da conta** — o que sempre existiu: o host pergunta ao painel
    (`/api/public/host/authorize`) se o token apresentado vive. Banimento no painel
@@ -667,17 +677,17 @@ Duas decisões que o provider do serviço toma e que não são óbvias:
 
 - **o id do modelo vai como veio.** O catálogo é do serviço, não nosso, então `resolve_model`
   não inventa tradução: id desconhecido passa intacto e quem recusa é o serviço, com erro
-  explícito. Só nomes vazios ou os decorativos antigos (`koda-flash`, `koda-pro`,
-  `koda-vision`, `liz-flash`, `liz-pro`, `liz-vision`) caem no `HOST_MODEL`. Antes disso o
-  provider engolia qualquer id que não fosse de um catálogo fixo e devolvia o padrão —
-  escolher `koda-1` pedia outro modelo, **em silêncio**, e todos os modelos viravam um só.
-- **o `reasoning_effort` é ajustado ao modelo.** O host publica em `/v1/models` os níveis
-  que cada um aceita (`efforts`) e o alvo de cada um (`targetFormat`); nem todo modelo aceita
-  todos os valores, e mandar um fora da lista é **400 na tela**. O provider lê esse catálogo
-  uma vez, guarda o conjunto por modelo e sobe para o nível seguinte quando o desejado não
-  serve — `none` para os alvos `openai-responses` (`liz-4`, `layze-2`), que recusam o campo,
-  e `low` para o `koda-1`, que não tem `minimal`. Sem catálogo, cai no valor seguro
-  (`minimal`), que passa em todos os medidos.
+  explícito. Só nomes vazios ou os ids da casa antiga (`liz-*`, `layze-*`, `nable-*`,
+  `koda-1` e os decorativos `koda-flash`, `koda-pro`, `koda-vision`, `liz-flash`, `liz-pro`,
+  `liz-vision`) caem no `HOST_MODEL`. Antes disso o provider engolia qualquer id que não
+  fosse de um catálogo fixo e devolvia o padrão — escolher `koda-1` pedia outro modelo, **em
+  silêncio**, e todos os modelos viravam um só.
+- **o `reasoning_effort` é ajustado ao modelo.** O gateway publica em `/v1/models` os níveis
+  que cada um aceita (`efforts`) e o alvo de cada um; nem todo modelo aceita todos os
+  valores, e mandar um fora da lista é **400 na tela**. O provider lê esse catálogo uma vez,
+  guarda o conjunto por modelo e sobe para o nível seguinte quando o desejado não serve.
+  No catálogo atual nenhum modelo declara `efforts`; o mecanismo continua porque o gateway
+  publica os níveis por modelo. Sem catálogo, cai no valor seguro (`minimal`).
 - **a sondagem espera até 3s.** O serviço monta o catálogo na primeira chamada e demora; com
   timeout curto o `auto` concluía que o serviço estava fora e caía no `local` (sem
   ferramentas). A sonda mora em `host_disponivel()`.

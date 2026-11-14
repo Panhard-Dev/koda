@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS messages (
   reasoning_content TEXT
 );
 
+CREATE TABLE IF NOT EXISTS combo_uso_koda (
+  message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  modelo TEXT,
+  tempo_ms INTEGER NOT NULL DEFAULT 0,
+  tokens INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, at);
 CREATE INDEX IF NOT EXISTS idx_messages_at ON messages(at);
 

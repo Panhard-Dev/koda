@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ChevronDown, Download, Loader2, X } from 'lucide-react'
+import { Check, ChevronDown, Copy, Pencil, Download, Loader2, Smartphone, X } from 'lucide-react'
 import Composer from './components/Composer'
 import type { ItemDaFila, SendPayload } from './components/Composer'
 import Header from './components/Header'
@@ -13,19 +13,21 @@ import CheckoutScreen, { type CompraDoCheckout } from './components/CheckoutScre
 
 import { definirConta, definirHorasDoDia, ligar, sincronizar } from './tempo'
 import SettingsScreen from './components/SettingsScreen'
-import MessageFooter from './components/MessageFooter'
+import MessageFooter, { copiarTexto } from './components/MessageFooter'
 import Reasoning from './components/Reasoning'
 import BolhaUsuario from './components/BolhaUsuario'
 import FalaDoModelo from './components/FalaDoModelo'
+import { CartaoDePlano } from './components/BlocosVisuais'
+import { DesenhoDocumento } from './components/KodaUI/desenho'
 import { CLASSE_DA_JANELA } from './components/Janela'
 import TarefaIncompleta from './components/TarefaIncompleta'
 import ToDosMenu from './components/ToDos'
 import ToolSteps from './components/ToolSteps'
 import CartaoDeCompactacao from './components/Compactacao'
 import { separarCompactacoes } from './compactacao'
+import { abrirNoNavegador } from './abrirNoNavegador'
 import type { Compactacao as AvisoDeCompactacao } from './compactacao'
 import WorkingLine from './components/WorkingLine'
-import ReconnectingLine from './components/ReconnectingLine'
 import { LOGO_DO_PROVEDOR } from './logos-provedores'
 import { SUBS_POR_RODADA } from './components/Subs'
 import type { SessaoDeSub } from './components/Subs'
@@ -47,6 +49,7 @@ import type { RemoteModel } from './models'
 import { dayStart, dayKey, monthStart, weekStart } from './plan'
 import { PLANO_FREE, planoParaBeneficios } from './plano'
 import { moedasDeTokensPorModelo } from './custo'
+import { textoDoMultiplo } from './multiplo'
 import { DEFAULT_APPEARANCE } from './appearance'
 import type { Appearance } from './appearance'
 import {
@@ -64,6 +67,7 @@ import {
   activateProject,
   answerApproval,
   apiUrl,
+  ApiError,
   baixarAtualizacao,
   cloudUpdate,
   definirSessaoDoHost,
@@ -76,9 +80,12 @@ import {
   health,
   listAgents,
   listConversations,
+  editarMensagemEnviada,
+  listLive,
   listMcps,
   listModels,
   modelosDoProvedor,
+  listarCombos,
   provedoresDeLogin,
   listPermissions,
   listProjects,
@@ -92,6 +99,8 @@ import {
   streamChat,
   decidirPlano,
   openProject,
+  pararLive,
+  streamLive,
   toggleMcp,
   toggleSkill,
 } from './api/client'
@@ -99,11 +108,14 @@ import type {
   ApiAgente,
   ApiCloudUpdate,
   ApiConversationSummary,
+  ApiLiveSession,
   ApiAnexo,
   ApiDownload,
   ApiMessage,
   ApiMcp,
   ApiProject,
+  StreamData,
+  StreamHandlers,
   ApiSaldoDoProvedor,
   ApiSkill,
   ApiTodo,
@@ -122,6 +134,7 @@ import type {
 import {
   dormir,
   ehFalhaDeConexao,
+  ehFalhaTransitoria,
   ErroDoServico,
   esperaDaTentativa as esperaDeReconexao,
   QuedaDeConexao,
@@ -315,6 +328,8 @@ type Bloco =
   | { tipo: 'passo'; passo: ToolStep }
   | { tipo: 'raciocinio'; texto: string }
   | { tipo: 'compactacao'; compactacao: AvisoDeCompactacao }
+  | { tipo: 'plano'; dados: Record<string, unknown> }
+  | { tipo: 'ui'; documento: Record<string, unknown> }
 
 /**
  * Anexa a fala ao último bloco de texto aberto, ou abre um novo.
@@ -340,6 +355,22 @@ const anexarFala = (blocos: Bloco[] | undefined, texto: string): Bloco[] => {
     if (parte.tipo === 'texto') lista.push({ tipo: 'texto', texto: parte.texto })
     else lista.push({ tipo: 'compactacao', compactacao: parte.compactacao })
   }
+  return lista
+}
+
+/** Troca toda a fala já desenhada sem apagar raciocínio, passos e interfaces. */
+const substituirFala = (blocos: Bloco[] | undefined, texto: string): Bloco[] => {
+  const lista: Bloco[] = []
+  let colocou = false
+  for (const bloco of blocos ?? []) {
+    if (bloco.tipo !== 'texto') {
+      lista.push(bloco)
+    } else if (!colocou && texto) {
+      lista.push({ tipo: 'texto', texto })
+      colocou = true
+    }
+  }
+  if (!colocou && texto) lista.push({ tipo: 'texto', texto })
   return lista
 }
 
@@ -734,7 +765,7 @@ const SONDA_DE_SESSAO_MS = 45_000
  * aparecem na mesma tela em que esta leitura roda.
  */
 async function loadSession() {
-  const [info, usage, conversations, models, skills, mcps, agents] = await Promise.all([
+  const resultados = await Promise.allSettled([
     health(),
     fetchUsage(),
     listConversations(),
@@ -743,11 +774,40 @@ async function loadSession() {
     listMcps(),
     listAgents(),
   ])
-  return { info, usage, conversations, models, skills, mcps, agents }
+  const [info, usage, conversations, models, skills, mcps, agents] = resultados
+  // Sem a rota principal o backend não está utilizável. As demais rotas são independentes:
+  // uma falha em skills/MCPs não pode esconder o catálogo de modelos nem derrubar a sessão
+  // inteira para o modo offline. Era isso que deixava o seletor preso na lista de emergência
+  // «LIZ AI STUDIO» mesmo com `/api/models` respondendo 200.
+  if (info.status === 'rejected') throw info.reason
+  return {
+    info: info.value,
+    usage:
+      usage.status === 'fulfilled'
+        ? usage.value
+        : {
+            daily: { tempo_ms: 0, tokens_por_modelo: {} },
+            weekly: { tempo_ms: 0, tokens_por_modelo: {} },
+            monthly: { tempo_ms: 0, tokens_por_modelo: {} },
+            conversations: 0,
+            messages: 0,
+            dias: {},
+          },
+    conversations: conversations.status === 'fulfilled' ? conversations.value : [],
+    models: models.status === 'fulfilled' ? models.value : [],
+    skills: skills.status === 'fulfilled' ? skills.value : [],
+    mcps: mcps.status === 'fulfilled' ? mcps.value : [],
+    agents: agents.status === 'fulfilled' ? agents.value : [],
+  }
 }
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([])
+  const [editandoMensagem, setEditandoMensagem] = useState<string | null>(null)
+  const [textoEditado, setTextoEditado] = useState('')
+  const [erroEdicao, setErroEdicao] = useState('')
+  const [salvandoEdicao, setSalvandoEdicao] = useState(false)
+  const [mensagemCopiada, setMensagemCopiada] = useState<string | null>(null)
   /**
    * As rodadas vivas — a resposta sendo escrita agora, e de qual conversa ela é.
    *
@@ -756,6 +816,8 @@ function App() {
    * trabalho (era o que acontecia) ou dizer «trabalhando» na conversa errada.
    */
   const [rodadas, setRodadas] = useState<RodadaViva[]>([])
+  /** Rodadas que o celular está tocando agora — o modo ao vivo visto deste PC. */
+  const [liveDeFora, setLiveDeFora] = useState<ApiLiveSession[]>([])
   /**
    * Como está a credencial da conta no serviço de modelos.
    *
@@ -867,6 +929,8 @@ function App() {
     })
   }
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('geral')
+  /** O ícone de celular pediu o QR: a seção Celular abre o túnel sozinha. */
+  const [abrirQrDoCelular, setAbrirQrDoCelular] = useState(false)
   const [model, setModel] = useState(lerModeloSalvo)
   /**
    * Troca de modelo com memória.
@@ -943,6 +1007,7 @@ function App() {
    * liga de novo.
    */
   const seguirOFimRef = useRef(true)
+  const ultimoTopoRef = useRef(0)
   /** O mesmo que `seguirOFimRef`, mas em estado — é ele que mostra e esconde o botão. */
   const [noFim, setNoFim] = useState(true)
   /**
@@ -965,7 +1030,11 @@ function App() {
   const aoRolar = () => {
     const caixa = listaRef.current
     if (!caixa) return
-    marcarFim(caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight <= FOLGA_DO_FIM)
+    const topo = caixa.scrollTop
+    const subiu = topo < ultimoTopoRef.current - 0.5
+    ultimoTopoRef.current = topo
+    if (subiu) marcarFim(false)
+    else if (caixa.scrollHeight - topo - caixa.clientHeight <= FOLGA_DO_FIM) marcarFim(true)
   }
 
   /**
@@ -977,7 +1046,7 @@ function App() {
    * movimento já basta.
    */
   const aoRolarComRoda = (deltaY: number) => {
-    if (deltaY < 0) marcarFim(false)
+    if (deltaY < 0 && (listaRef.current?.scrollTop ?? 0) > 0) marcarFim(false)
   }
 
   /** O botão do fim: desce de uma vez e volta a acompanhar. */
@@ -985,20 +1054,11 @@ function App() {
     marcarFim(true)
     const caixa = listaRef.current
     if (!caixa) return
-    caixa.scrollTo({ top: caixa.scrollHeight, behavior: 'smooth' })
+    caixa.scrollTop = caixa.scrollHeight
+    ultimoTopoRef.current = caixa.scrollTop
   }
   /** Último sinal de vida vindo do backend (pensamento, palavra, ferramenta). */
   const ultimoSinalRef = useRef(0)
-  /**
-   * A rodada está **insistindo sozinha** — a conexão caiu (o laço da reconexão tentando de
-   * novo) ou o provedor falhou/respondeu vazio (o loop do agente, pelo evento `aviso`) — e
-   * a linha «Reconectando… NN/NN» diz qual tentativa é esta, sobre quantas.
-   *
-   * Regra do dono: a linha vale para **qualquer** erro, não só queda de rede. Apagada no
-   * primeiro evento de verdade que chega (`sinal`): se o backend respondeu, a insistência
-   * acabou e a linha sai de cena. `null` = ninguém insistindo.
-   */
-  const [reconexao, setReconexao] = useState<{ tentativa: number; total?: number } | null>(null)
   /** Quando a resposta em curso começou (a linha de trabalho conta a partir daqui). */
   const inicioDaRespostaRef = useRef(0)
   const timersRef = useRef<number[]>([])
@@ -1149,8 +1209,8 @@ function App() {
    * pararia a contagem no meio de uma resposta — e a hora gasta deixaria de ser contada.
    */
   useEffect(() => {
-    ligar(busy)
-  }, [busy])
+    ligar(busy && !model.startsWith('provedor:') && !model.startsWith('combo:'))
+  }, [busy, model])
 
   /*
    * O mostrador do dia é **do servidor**, não do rascunho.
@@ -1317,14 +1377,17 @@ function App() {
                 options: resultado.modelos.map((modelo) => ({
                   value: `provedor:${provedor.id}:${modelo}`,
                   label: resultado.nomes?.[modelo] ?? modelo,
+                  // O «0,03x» do Accio: quantos créditos o modelo consome por uso.
+                  hint: textoDoMultiplo(resultado.multiplos?.[modelo]) ?? undefined,
                 })),
               } as ReturnType<typeof modelMenu>[number]
             }),
           )
+          const combos = await listarCombos().catch(() => [])
           if (!cancelado) {
-            setGruposLogados(
-              grupos.filter((item): item is NonNullable<typeof item> => item !== null),
-            )
+            const disponiveis = grupos.filter((item): item is NonNullable<typeof item> => item !== null)
+            if (combos.length) disponiveis.push({ value: 'combos', label: 'Combos', options: combos.map((c) => ({ value: `combo:${c.id}`, label: c.nome })) })
+            setGruposLogados(disponiveis)
           }
         } catch {
           // Serviço local fora do ar ou provedor sem lista: o menu fica com o catálogo.
@@ -1335,9 +1398,11 @@ function App() {
     }
     buscar()
     const timer = window.setInterval(buscar, 8_000)
+    window.addEventListener('koda-combos', buscar)
     return () => {
       cancelado = true
       window.clearInterval(timer)
+      window.removeEventListener('koda-combos', buscar)
     }
   }, [sessao, backend])
 
@@ -1424,6 +1489,7 @@ function App() {
     const caixa = listaRef.current
     if (!caixa) return
     caixa.scrollTop = caixa.scrollHeight
+    ultimoTopoRef.current = caixa.scrollTop
   }
 
   useEffect(() => {
@@ -1448,10 +1514,11 @@ function App() {
       const caixa = listaRef.current
       if (!caixa) return
       caixa.scrollTop = caixa.scrollHeight
+      ultimoTopoRef.current = caixa.scrollTop
     })
     observador.observe(conteudo)
     return () => observador.disconnect()
-  }, [])
+  }, [view])
 
   // Enquanto a resposta está em curso, um relógio de 400 ms move a linha de trabalho: os
   // segundos correndo são o que distingue "está trabalhando" de "travou".
@@ -1895,8 +1962,8 @@ function App() {
    * pedido seria um jeito de continuar usando exatamente o que ele tirou, sem passar pelo
    * seletor. Aqui o modelo guardado só vale se ainda estiver de pé; se não, cai no ativo.
    *
-   * Vale igual para o modelo que saiu do catálogo do host: repetir "Continuar" no `liz-4`
-   * depois do 400 seria reintroduzir à mão o modelo que acabou de sair da lista.
+   * Vale igual para o modelo que saiu do catálogo do host: repetir "Continuar" num modelo
+   * aposentado depois do 400 seria reintroduzir à mão o modelo que acabou de sair da lista.
    */
   const modeloSeguro = (escolhido: string | null | undefined): string =>
     escolhido &&
@@ -2000,7 +2067,7 @@ function App() {
      * modelo.
      */
     const janela = (desde: number) => {
-      const dentro = all.filter((message) => message.at >= desde)
+      const dentro = all.filter((message) => message.at >= desde && !message.model?.startsWith('provedor:') && !message.model?.startsWith('combo:'))
       const porModelo: Record<string, number> = {}
       for (const message of dentro) {
         if (!message.model || !message.tokensTotal) continue
@@ -2101,6 +2168,27 @@ function App() {
     }
   }
 
+  /*
+   * O celular cria conversas na mesma conta. Sem uma olhada periódica, a lista
+   * do PC só mudava quando a pessoa mandava uma mensagem ou abria outra — a
+   * conversa feita no celular parecia não ter chegado. Só consulta com a janela
+   * visível, e o foco também atualiza na hora.
+   */
+  useEffect(() => {
+    if (sessao !== 'dentro' || backend === null) return
+    const atualizar = () => {
+      if (document.visibilityState === 'visible') void refreshHistory()
+    }
+    const timer = window.setInterval(atualizar, 10_000)
+    window.addEventListener('focus', atualizar)
+    document.addEventListener('visibilitychange', atualizar)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', atualizar)
+      document.removeEventListener('visibilitychange', atualizar)
+    }
+  }, [sessao, backend])
+
   const handleToggleSearch = () => {
     const next = !searchOpen
     setSearchOpen(next)
@@ -2154,14 +2242,396 @@ function App() {
     definirConversa(target.id)
   }
 
+  /** As sessões ao vivo que já foram anexadas nesta janela (não anexa duas vezes). */
+  const anexadasRef = useRef<Set<string>>(new Set())
+  /** As rodadas do celular já terminadas cuja conversa este PC já releu. */
+  const concluidasRef = useRef<Set<string>>(new Set())
+  /** O atalho para o efeito de polling, sempre com o fechamento deste render. */
+  const acompanharRef = useRef<((sessao: ApiLiveSession) => void) | null>(null)
+
+  /**
+   * Anexa esta tela a uma rodada que já está rodando.
+   *
+   * É o modo ao vivo: a rodada do celular aparece no PC — e a que continuou depois de o
+   * app sair aparece quando a pessoa volta. O diário do backend é lido desde o começo,
+   * então a resposta chega inteira, e não só a cauda.
+   */
+  const acompanharAoVivo = async (sessao: ApiLiveSession) => {
+    const conversa = sessao.conversa
+    if (!conversa) return
+    if (rodadasRef.current.some((item) => item.conversa === conversa)) return
+    // Relê a conversa **sempre**, e não só ao trocar de tela: quando o celular manda a
+    // mensagem, a bolha dela já está no banco e é esta leitura que a faz aparecer aqui.
+    // Sem isso o PC só mostrava a resposta, e a pergunta ficava faltando até o fim.
+    try {
+      const registro = await getConversation(conversa)
+      setMessages(registro.messages.map(fromApiMessage))
+      definirConversa(registro.id)
+    } catch {
+      return
+    }
+    const rodadaId = newId()
+    const controller = new AbortController()
+    escreverRodadas((atual) => [
+      ...atual,
+      {
+        id: rodadaId,
+        conversa,
+        mensagem: {
+          id: newId(),
+          role: 'assistant',
+          text: '',
+          model: '',
+          at: Date.now(),
+          steps: [],
+          todos: [],
+        },
+        controller,
+      },
+    ])
+    const patch = (mudar: (mensagem: Message) => Message) =>
+      patchRodada(rodadaId, mudar)
+    const abrirPasso = (dados: StreamData['tool_call']) =>
+      patch((mensagem) => {
+        const passo: ToolStep = {
+          name: dados.name,
+          arguments: dados.arguments ?? {},
+          output: '',
+          duration_ms: 0,
+          call_id: dados.id,
+          ok: true,
+          mcp: dados.mcp ?? null,
+        }
+        return {
+          ...mensagem,
+          steps: [...(mensagem.steps ?? []), passo],
+          blocos: [...(mensagem.blocos ?? []), { tipo: 'passo', passo }],
+        }
+      })
+    const fecharPasso = (dados: StreamData['tool_result']) =>
+      patch((mensagem) => ({
+        ...mensagem,
+        steps: (mensagem.steps ?? []).map((passo) =>
+          passo.call_id === dados.id
+            ? {
+                ...passo,
+                output: dados.output,
+                duration_ms: dados.duration_ms,
+                ok: dados.ok,
+                mcp: dados.mcp ?? passo.mcp ?? null,
+              }
+            : passo,
+        ),
+        blocos: fecharPassoNosBlocos(mensagem.blocos, {
+          id: dados.id,
+          output: dados.output,
+          duration_ms: dados.duration_ms,
+          ok: dados.ok,
+          mcp: dados.mcp,
+        }),
+      }))
+    const encerrar = (dados: StreamData['done']) => {
+      concluirRodada(rodadaId, (mensagem) => ({
+        ...mensagem,
+        elapsedMs: dados.elapsed_ms,
+        tokens: dados.tokens ?? null,
+        tokensTotal: dados.tokens_total ?? null,
+        contexto: dados.contexto ?? mensagem.contexto ?? null,
+        incompleto: dados.completed === false,
+        motivo: dados.reason ?? null,
+        pendentes: dados.pending_items ?? [],
+        executou: dados.executed ?? 0,
+        retomavel: dados.resumable ?? false,
+        at: Date.now(),
+      }))
+      setPermissaoPendente(null)
+      void refreshHistory()
+      // O banco já tem a mensagem com os passos: reler troca o desenho ao vivo pelo
+      // definitivo, sem depender de o stream ter chegado inteiro.
+      if (conversationIdRef.current === conversa) {
+        void getConversation(conversa)
+          .then((registro) => {
+            if (conversationIdRef.current === conversa) {
+              setMessages(registro.messages.map(fromApiMessage))
+            }
+          })
+          .catch(() => undefined)
+      }
+    }
+
+    let desde = 0
+    let terminal = false
+    try {
+      for (let tentativa = 0; tentativa < 6 && !terminal; tentativa++) {
+        try {
+          await streamLive(conversa, desde, {
+            signal: controller.signal,
+            onSeq: (seq) => {
+              desde = Math.max(desde, seq)
+            },
+            onDelta: (texto) =>
+              patch((mensagem) => ({
+                ...mensagem,
+                text: mensagem.text + texto,
+                blocos: anexarFala(mensagem.blocos, texto),
+              })),
+            onTextReplace: (texto) =>
+              patch((mensagem) => ({
+                ...mensagem,
+                text: texto,
+                blocos: substituirFala(mensagem.blocos, texto),
+              })),
+            onReasoning: (texto) =>
+              patch((mensagem) => ({
+                ...mensagem,
+                reasoning: (mensagem.reasoning ?? '') + texto,
+                blocos: anexarRaciocinio(mensagem.blocos, texto),
+              })),
+            onToolCall: abrirPasso,
+            onToolResult: fecharPasso,
+            onTodos: (dados) =>
+              patch((mensagem) => ({ ...mensagem, todos: dados.todos })),
+            onUi: (dados) => {
+              if (!dados.documento) return
+              patch((mensagem) => ({
+                ...mensagem,
+                blocos: [
+                  ...(mensagem.blocos ?? []),
+                  { tipo: 'ui', documento: dados.documento },
+                ],
+              }))
+            },
+            onPlano: (dados) => {
+              const cartao = dados.dados
+              if (!cartao) return
+              patch((mensagem) => ({
+                ...mensagem,
+                blocos: [
+                  ...(mensagem.blocos ?? []),
+                  { tipo: 'plano', dados: cartao },
+                ],
+              }))
+            },
+            onApprovalRequest: (dados) => setPermissaoPendente(dados),
+            onDone: (dados) => {
+              terminal = true
+              encerrar(dados)
+            },
+            onError: (mensagem) => {
+              terminal = true
+              patch((mensagemDaRodada) => ({
+                ...mensagemDaRodada,
+                text: mensagemDaRodada.text
+                  ? `${mensagemDaRodada.text}\n\n${mensagem}`
+                  : mensagem,
+                incompleto: true,
+              }))
+              concluirRodada(rodadaId, (mensagemDaRodada) => mensagemDaRodada)
+              setPermissaoPendente(null)
+            },
+          })
+        } catch (erro) {
+          if (controller.signal.aborted) break
+          if (tentativa >= 5) {
+            patch((mensagem) => ({
+              ...mensagem,
+              text: mensagem.text
+                ? `${mensagem.text}\n\nNão consegui continuar acompanhando: ${fraseDeFalha(erro)}`
+                : `Não consegui acompanhar a rodada: ${fraseDeFalha(erro)}`,
+              incompleto: true,
+            }))
+            concluirRodada(rodadaId, (mensagem) => mensagem)
+            break
+          }
+        }
+        if (terminal || controller.signal.aborted) break
+        // O fluxo fechou sem terminal: a rodada ainda está de pé? Então reata de onde parou.
+        const ainda = await listLive()
+          .then(({ sessoes }) => sessoes.some((item) => item.conversa === conversa && item.rodando))
+          .catch(() => false)
+        if (!ainda) {
+          // Terminou no vão entre a queda e a consulta: o banco tem o desfecho.
+          concluirRodada(rodadaId, (mensagem) => mensagem)
+          if (conversationIdRef.current === conversa) {
+            void getConversation(conversa)
+              .then((registro) => {
+                if (conversationIdRef.current === conversa) {
+                  setMessages(registro.messages.map(fromApiMessage))
+                }
+              })
+              .catch(() => undefined)
+          }
+          break
+        }
+        await new Promise((resolver) => window.setTimeout(resolver, 700))
+      }
+    } finally {
+      // A rodada anexada não pode ficar presa se a tela sair no meio.
+      if (rodadasRef.current.some((item) => item.id === rodadaId)) {
+        concluirRodada(rodadaId, (mensagem) => mensagem)
+      }
+    }
+  }
+  acompanharRef.current = (sessao) => {
+    void acompanharAoVivo(sessao)
+  }
+
+  /**
+   * O modo ao vivo do lado do PC: pergunta ao backend, de tempos em tempos, se o
+   * celular está trabalhando. Se estiver na conversa aberta, anexa sozinho; se for
+   * noutra, o aviso acima do composer oferece «Acompanhar».
+   */
+  useEffect(() => {
+    if (sessao !== 'dentro' || backend === null) return
+    let ativo = true
+    const consultar = async () => {
+      try {
+        const { sessoes } = await listLive()
+        if (!ativo) return
+        const remotas = sessoes.filter(
+          (item) => item.rodando && item.origem === 'celular',
+        )
+        setLiveDeFora(remotas)
+        const ids = new Set(remotas.map((item) => item.sessao))
+        for (const id of anexadasRef.current) {
+          if (!ids.has(id)) anexadasRef.current.delete(id)
+        }
+        // Um turno curto do celular pode começar e terminar entre duas consultas
+        // (o intervalo é de 2,5 s). O PC nunca o via «rodando» e a mensagem ficava
+        // fora da tela até trocar de conversa. Aqui as recém-terminadas são relidas
+        // uma vez: o histórico e, quando for a conversa aberta, as mensagens.
+        const agora = Date.now() / 1000
+        const recentes = sessoes.filter(
+          (item) =>
+            item.origem === 'celular' &&
+            !item.rodando &&
+            item.terminada_em !== null &&
+            agora - item.terminada_em < 30 * 60 &&
+            !concluidasRef.current.has(item.sessao),
+        )
+        if (recentes.length > 0) {
+          for (const item of recentes) concluidasRef.current.add(item.sessao)
+          void refreshHistory()
+          const daConversaAberta = recentes.find(
+            (item) => item.conversa === conversationIdRef.current,
+          )
+          if (daConversaAberta?.conversa) {
+            void getConversation(daConversaAberta.conversa)
+              .then((registro) => {
+                if (conversationIdRef.current === daConversaAberta.conversa) {
+                  setMessages(registro.messages.map(fromApiMessage))
+                }
+              })
+              .catch(() => undefined)
+          } else if (
+            !conversationIdRef.current &&
+            rodadasRef.current.length === 0
+          ) {
+            // O PC estava numa conversa nova e vazia: abre a que o celular acabou
+            // de usar, como o modo ao vivo faria se tivesse pegado a rodada. Só
+            // para turnos bem recentes, para não puxar conversa antiga na abertura.
+            const recentesParaAbrir = recentes.filter(
+              (item) =>
+                item.terminada_em !== null &&
+                agora - item.terminada_em < 2 * 60,
+            )
+            const maisRecente = recentesParaAbrir[recentesParaAbrir.length - 1]
+            const alvoNaTela = document.activeElement as HTMLElement | null
+            const digitando =
+              !!alvoNaTela &&
+              (alvoNaTela.tagName === 'TEXTAREA' ||
+                alvoNaTela.tagName === 'INPUT' ||
+                alvoNaTela.isContentEditable) &&
+              ((alvoNaTela as HTMLTextAreaElement).value ?? alvoNaTela.textContent ?? '')
+                .trim()
+                .length > 0
+            // Só entra na conversa do celular se a tela nova está de fato vazia:
+            // quem digitou algo (ou saiu da tela inicial) escolheu outro assunto,
+            // e o PC não pode arrastar a tela por conta própria.
+            const telaNovaVazia = messages.length === 0 && !query.trim()
+            if (!digitando && telaNovaVazia && maisRecente?.conversa) {
+              void getConversation(maisRecente.conversa)
+                .then((registro) => {
+                  if (!conversationIdRef.current) {
+                    setMessages(registro.messages.map(fromApiMessage))
+                    definirConversa(registro.id)
+                  }
+                })
+                .catch(() => undefined)
+            }
+          }
+        }
+        const daqui = remotas.find(
+          (item) => item.conversa === conversationIdRef.current,
+        )
+        if (
+          daqui &&
+          !anexadasRef.current.has(daqui.sessao) &&
+          !rodadasRef.current.some((item) => item.conversa === daqui.conversa)
+        ) {
+          anexadasRef.current.add(daqui.sessao)
+          acompanharRef.current?.(daqui)
+          return
+        }
+        // O celular começou a trabalhar noutra conversa e este PC está livre: entra
+        // sozinho, sem clique nenhum. É o «vejo o que estou fazendo no celular pelo PC».
+        // Só a primeira vez por sessão (`anexadasRef`), para não arrastar a tela de volta
+        // se a pessoa for olhar outra coisa; e nunca por cima de quem está digitando.
+        if (daqui || remotas.length === 0) return
+        if (rodadasRef.current.length > 0) return
+        const ativoNaTela = document.activeElement as HTMLElement | null
+        const editando =
+          !!ativoNaTela &&
+          (ativoNaTela.tagName === 'TEXTAREA' ||
+            ativoNaTela.tagName === 'INPUT' ||
+            ativoNaTela.isContentEditable) &&
+          ((ativoNaTela as HTMLTextAreaElement).value ?? ativoNaTela.textContent ?? '')
+            .trim()
+            .length > 0
+        if (editando) return
+        // Este PC só troca de conversa sozinho se estiver numa conversa nova e
+        // vazia. Num chat do histórico, quem manda é a pessoa: o aviso «Acompanhar»
+        // fica de pé (liveDeFora) e o clique dela decide.
+        const pcLivre =
+          !conversationIdRef.current &&
+          messages.length === 0 &&
+          !query.trim()
+        if (!pcLivre) return
+        const alvo = remotas.find((item) => !anexadasRef.current.has(item.sessao))
+        if (!alvo) return
+        anexadasRef.current.add(alvo.sessao)
+        acompanharRef.current?.(alvo)
+      } catch {
+        // backend caiu: a próxima consulta tenta de novo
+      }
+    }
+    void consultar()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void consultar()
+    }, 2500)
+    return () => {
+      ativo = false
+      window.clearInterval(timer)
+    }
+    // `messages` e `query` entram nos critérios de «PC livre» — o intervalo consulta
+    // sempre, mas o fechamento precisa refletir a tela na hora da decisão.
+  }, [sessao, backend, messages, query])
+
   /**
    * O botão Parar — para a rodada **desta** conversa.
    *
    * A marca de «parou» não é posta aqui à mão: quem a põe é o `pararRodada`, que fecha a
-   * rodada com o mesmo cartão que o «interrompido» de qualquer outro caminho.
+   * rodada com o mesmo cartão que o «interrompido» de qualquer outro caminho. O pedido
+   * ao backend vem antes do abort: fechar a conexão não para mais a rodada — quem para é
+   * `POST /api/live/parar`.
    */
   const handleStop = () => {
-    if (rodada) pararRodada(rodada.id)
+    if (!rodada) return
+    const conversaDaRodada = rodada.conversa ?? conversationIdRef.current
+    if (conversaDaRodada) {
+      void pararLive(conversaDaRodada).catch(() => undefined)
+    }
+    pararRodada(rodada.id)
   }
 
   // O aviso de versão nova depende de alguém ter consultado a nuvem — e quem consulta é o
@@ -2202,6 +2672,12 @@ function App() {
     setView('settings')
   }
 
+  /** O atalho do header: abre o Celular já com o QR público a caminho. */
+  const abrirCelular = () => {
+    setAbrirQrDoCelular(true)
+    openSettings('celular')
+  }
+
   const dispensarAviso = () => {
     if (!versaoNova) return
     setVersaoDispensada(versaoNova)
@@ -2223,7 +2699,7 @@ function App() {
       .then(setDownload)
       .catch(() => {
         // Backend local antigo (sem a rota) ou fora do ar: sobra o caminho de antes.
-        if (alvo) window.open(alvo, '_blank', 'noopener')
+        if (alvo) abrirNoNavegador(alvo)
         else
           setDownload({
             estado: 'erro',
@@ -2438,6 +2914,10 @@ function App() {
       if (!detail?.planId) return
       void decidirPlano(detail.planId, detail.aceito === false ? 'reject' : 'approve')
         .then(({ execution }) => {
+          // Aceitar o plano tira o app do modo Plan — o backend também grava isso, e o
+          // chip precisa acompanhar na hora. Sem esta linha ele continuava em «Plan»
+          // depois do Fazer, como se a aprovação não tivesse valido.
+          if (detail.aceito !== false) setPermissionMode('auto')
           if (execution && execution.conversation_id === conversationIdRef.current) {
             detail.onResult?.(true)
             return handleSend({ ...execution,
@@ -2610,14 +3090,9 @@ function App() {
         blocos: fecharPassoNosBlocos(message.blocos, patch),
       }))
 
-    /**
-     * Cada evento que chega do backend reinicia o silêncio que faz a linha de trabalho
-     * aparecer — e apaga a linha «Reconectando…»: se algo chegou de verdade, a insistência
-     * acabou (ou nunca houve) e a linha sai de cena.
-     */
+    /** Cada evento que chega do backend reinicia o relógio de silêncio. */
     const sinal = () => {
       ultimoSinalRef.current = Date.now()
-      setReconexao(null)
     }
 
     /**
@@ -2639,19 +3114,18 @@ function App() {
       // resolve cada id no store e a `read_attachment` é quem lê o arquivo.
       attachments: payload.attachments.map((anexo) => anexo.id),
       conversation_id: conversationIdRef.current,
+      // O modo ao vivo usa isto para dizer no celular que quem trabalha é o PC.
+      origem: 'pc' as const,
       tz_offset_minutes: new Date().getTimezoneOffset(),
       resume: retomando ? true : payload.resume,
       approved_plan_id: retomando ? undefined : payload.approved_plan_id,
     })
 
     /**
-     * O laço da reconexão: até 10 tentativas, uma depois da outra, para **qualquer**
-     * erro — queda de rede (o `fetch` sem resposta), 5xx do serviço, fluxo fechado no
-     * meio, silêncio estourado (o sinal de vivo do cliente) e até os erros de pedido
-     * (401/422/404: repetir pode não adiantar, mas dez tentativas com aviso na tela
-     * custam menos que a rodada morrer sem explicar). Só o **Parar** encerra na hora.
-     * Acertando, a rodada segue normalmente — o contexto é o do backend, que nunca
-     * saiu de lá. Esgotando, a rodada morre dizendo o erro.
+     * Repetições curtas para falhas transitórias — rede, 5xx, fluxo fechado ou silêncio.
+     * 401/404/409/422 não entram no laço: o cliente primeiro tenta reenviar a sessão ao
+     * backend atual; se o erro continuar, ele aparece na hora. Só o **Parar** interrompe
+     * uma repetição em andamento.
      */
     // Fora do laço de propósito: a tentativa 2 precisa de saber se a 1 chegou a
     // começar (aí o pedido vai como `resume`, e não como pergunta nova).
@@ -2664,13 +3138,19 @@ function App() {
     // gravado ainda, e repetir como pedido novo é o certo.
     const conversaExistiaAntes =
       Boolean(conversationIdRef.current) || payload.resume === true
+    // O último evento já desenhado. É por ele que a reconexão reata ao diário do
+    // backend sem repetir o que a tela já mostrou.
+    let ultimoSeq = 0
     for (let tentativa = 1; tentativa <= TENTATIVAS_DE_RECONEXAO; tentativa++) {
       // O fluxo fechou sem `done`/`error` nesta tentativa — queda no meio da resposta.
       let fechouSemTerminal = false
       const retomando =
         tentativa > 1 && (comecouEmAlgumaTentativa || conversaExistiaAntes)
       try {
-        await streamChat(pedido(retomando), {
+        const aoEvento: StreamHandlers = {
+          onSeq: (seq) => {
+            ultimoSeq = Math.max(ultimoSeq, seq)
+          },
           signal: controller.signal,
           onStart: (data) => {
             comecouEmAlgumaTentativa = true
@@ -2706,6 +3186,14 @@ function App() {
               blocos: anexarFala(message.blocos, text),
             }))
           },
+          onTextReplace: (text) => {
+            sinal()
+            patchAssistant((message) => ({
+              ...message,
+              text,
+              blocos: substituirFala(message.blocos, text),
+            }))
+          },
           onReasoning: (text) => {
             sinal()
             patchAssistant((message) => ({
@@ -2714,15 +3202,12 @@ function App() {
               blocos: anexarRaciocinio(message.blocos, text),
             }))
           },
-          // O provedor falhou (ou respondeu vazio) e o **backend** está insistindo: em vez
-          // de um texto de aviso, a linha «Reconectando… NN/NN» acende com o contador dele.
-          // É o que faz a linha aparecer para qualquer erro, e não só quando a conexão cai —
-          // regra do dono. O `text` do evento não é mostrado em lugar nenhum.
-          onAviso: (data) => {
+          // O provedor falhou (ou respondeu vazio) e o backend está insistindo. O aviso
+          // mantém o sinal de vida, mas não troca a interface para «Reconectando».
+          onAviso: () => {
             sinal()
-            if (data.tentativa != null) {
-              setReconexao({ tentativa: data.tentativa, total: data.total })
-            }
+            // O backend já tenta o provedor sozinho. A interface continua mostrando
+            // «Trabalhando»; não troca o texto para «Reconectando».
           },
           onToolCall: (data) => {
             sinal()
@@ -2735,6 +3220,63 @@ function App() {
           onTodos: (data) => {
             sinal()
             patchAssistant((message) => ({ ...message, todos: data.todos }))
+          },
+          // O plano chegou vinculado: troca só o bloco pelo que tem `plan_id`, e o cartão
+          // nasce com os botões Desistir/Fazer ativos. Se a resposta ainda não tinha
+          // texto nenhum (modo Plan, que segura os deltas até o fim), ele entra inteiro
+          // agora. Sem isto, o cartão ficava em «Plano antigo: peça um plano atualizado.».
+          onPlano: (data) => {
+            sinal()
+            patchAssistant((message) => {
+              // Caminho novo: o cartão veio pronto da ferramenta `mostrar_plano`. Entra
+              // como bloco próprio, na posição em que a ferramenta rodou — a interface
+              // desenha o mesmo cartão bonito, com os botões já ativos.
+              if (data.dados) {
+                return {
+                  ...message,
+                  blocos: [
+                    ...(message.blocos ?? []),
+                    { tipo: 'plano', dados: data.dados },
+                  ],
+                }
+              }
+              if (!data.text) return message
+              const blocos = message.blocos ?? []
+              const temFala =
+                Boolean(message.text) || blocos.some((b) => b.tipo === 'texto' && b.texto)
+              if (!temFala) {
+                return {
+                  ...message,
+                  text: data.text,
+                  blocos: anexarFala(message.blocos, data.text),
+                }
+              }
+              // O stream já entregou a resposta; só o bloco do plano mudou (ganhou o
+              // `plan_id`). Trocar o texto inteiro apagaria a narração e a ordem dos passos.
+              const trocar = (texto: string) =>
+                data.de && data.para ? texto.split(data.de).join(data.para) : texto
+              return {
+                ...message,
+                text: trocar(message.text),
+                blocos: blocos.map((bloco) =>
+                  bloco.tipo === 'texto' ? { ...bloco, texto: trocar(bloco.texto) } : bloco,
+                ),
+              }
+            })
+          },
+          // A ferramenta `mostrar_interface` abriu uma tela Koda UI. O documento chega
+          // validado do servidor e entra como bloco próprio, na posição em que a
+          // ferramenta rodou — o renderer desenha e o estado local fica no documento.
+          onUi: (data) => {
+            sinal()
+            if (!data.documento) return
+            patchAssistant((message) => ({
+              ...message,
+              blocos: [
+                ...(message.blocos ?? []),
+                { tipo: 'ui', documento: data.documento },
+              ],
+            }))
           },
           onApprovalRequest: (data) => {
             sinal()
@@ -2794,26 +3336,24 @@ function App() {
              * nem retry: se o relato falhar, a próxima resposta relata a dela e o limite
              * segue valendo pelo que já entrou.
              */
-            void reportarUso({
-              message_id: data.message_id,
-              conversation_id: data.conversation_id,
-              model: ultimoPayloadRef.current?.model ?? null,
-              tempo_ms: data.elapsed_ms ?? 0,
-              tokens: data.tokens_total ?? 0,
-            }).catch(() => undefined)
+            const modeloEnviado = payload.model ?? ''
+            const gastoCombo = data.cobranca_koda
+            if (modeloEnviado.startsWith('combo:') ? Boolean(gastoCombo?.modelo) : !modeloEnviado.startsWith('provedor:')) {
+              void reportarUso({
+                message_id: data.message_id,
+                conversation_id: data.conversation_id,
+                model: gastoCombo?.modelo ?? modeloEnviado,
+                tempo_ms: gastoCombo?.tempo_ms ?? data.elapsed_ms ?? 0,
+                tokens: gastoCombo?.tokens ?? data.tokens_total ?? 0,
+              }).catch(() => undefined)
+            }
             void refreshUsage()
             void refreshHistory()
           },
           onError: (message) => {
             // O backend respondeu que a rodada falhou (provedor estourou, cota,
-            // modelo recusou). Antes encerrava a rodada na hora; agora o erro passa
-            // pelo mesmo laço de 10 tentativas — regra do dono: **todo** erro tenta.
-            // Se for passageiro (o host reiniciando, um soluço do provedor), a
-            // tentativa seguinte acerta e o contexto continua; se não for, morre em
-            // 10 tentativas dizendo o motivo. Lançar aqui atravessa o `dispatch` do
-            // cliente e sai do `streamChat` como qualquer outra falha.
-            // (A tela continua saindo de "Trabalhando…": o laço, em qualquer saída,
-            // ou insiste em silêncio ou encerra a rodada.)
+            // modelo recusou). Esse evento é terminal para esta rodada; o backend já fez
+            // as tentativas transitórias dele. Repetir o POST inteiro duplicaria efeitos.
             setPermissaoPendente(null)
             throw new ErroDoServico(message)
           },
@@ -2824,62 +3364,102 @@ function App() {
             fechouSemTerminal = true
             setPermissaoPendente(null)
           },
-        },
-      )
+        }
+
+        // A rodada pode já estar de pé no backend — o celular começou, ou a conexão
+        // anterior caiu e o trabalho continuou (é o que o modo ao vivo garante). Nesse
+        // caso, reatar ao diário é o caminho certo: um POST novo levaria 409 e o
+        // trabalho ficaria invisível na tela.
+        if (tentativa > 1 && comecouEmAlgumaTentativa && conversationIdRef.current) {
+          try {
+            await streamLive(conversationIdRef.current, ultimoSeq + 1, {
+              ...aoEvento,
+              signal: controller.signal,
+            })
+            if (fechouSemTerminal && !controller.signal.aborted) {
+              throw new QuedaDeConexao()
+            }
+            return
+          } catch (erroAoVivo) {
+            if (controller.signal.aborted) throw erroAoVivo
+            // 404: a sessão já terminou e o banco tem a resposta. Recarrega a conversa
+            // e encerra a rodada com o que ficou gravado.
+            if (erroAoVivo instanceof ApiError && erroAoVivo.status === 404) {
+              const conversa = conversationIdRef.current
+              if (conversa) {
+                try {
+                  const registro = await getConversation(conversa)
+                  setMessages(registro.messages.map(fromApiMessage))
+                } catch {
+                  // mantém o que já está na tela
+                }
+              }
+              concluirRodada(rodadaId, (mensagem) => mensagem)
+              return
+            }
+            // Outra falha ao reatar: segue para o POST de retomada, como antes.
+          }
+        }
+
+        await streamChat(pedido(retomando), aoEvento)
         // A tentativa acabou. Fluxo fechado no meio (e ninguém parou no botão) é queda
         // de conexão: lança para cair no mesmo caminho da falha de rede, com reconexão.
         if (fechouSemTerminal && !controller.signal.aborted) throw new QuedaDeConexao()
         return
       } catch (error) {
-      if (controller.signal.aborted) {
-        // A pessoa parou no botão Parar. O que já saiu fica, e a resposta passa a **dizer
-        // que parou** — o mesmo cartão de qualquer outra interrupção.
-        concluirRodada(rodadaId, marcarInterrompida)
-      } else if (tentativa >= TENTATIVAS_DE_RECONEXAO) {
-        // Dez tentativas e o erro não passou: a rodada para e **diz o erro** — com
-        // quantas vezes tentou, para a pessoa saber que não foi desistência. Vale para
-        // **todo** erro (regra do dono), não só queda de rede: 401/422/404 e o
-        // silêncio estourado também tentam as dez antes de morrer.
-        if (ehFalhaDeConexao(error)) setBackend(null)
-        const detail =
-          error instanceof QuedaDeConexao ? error.message : fraseDeFalha(error)
-        const quantas = `${TENTATIVAS_DE_RECONEXAO} tentativas`
-        const porque = ehFalhaDeConexao(error)
-          ? `[a conexão com o serviço local caiu depois de ${quantas}: ${detail}]`
-          : `[o Koda tentou ${quantas} e não conseguiu: ${detail}]`
-        concluirRodada(rodadaId, (mensagem) => ({
-          ...mensagem,
-          text: mensagem.text
-            ? `${mensagem.text}\n\n${porque}`
-            : `Não consegui falar com o serviço local do Koda depois de ${quantas}. ${detail} ${COMO_DIAGNOSTICAR}`,
-        }))
-      } else {
-        // Ainda há tentativa: a linha «Reconectando…» acende com o contador **desta**
-        // insistência (a da conexão), espera o tempo da tentativa, limpa o que a tentativa
-        // anterior tinha desenhado e começa de novo. Vale para qualquer erro — regra do dono.
-        setReconexao({ tentativa: tentativa + 1, total: TENTATIVAS_DE_RECONEXAO })
-        await dormir(esperaDeReconexao(tentativa), controller.signal)
         if (controller.signal.aborted) {
+          // A pessoa parou no botão Parar. O que já saiu fica, e a resposta passa a dizer
+          // que parou — o mesmo cartão de qualquer outra interrupção.
           concluirRodada(rodadaId, marcarInterrompida)
           return
         }
-        // A tentativa que vem começa do zero na tela: com `resume`, o backend continua
-        // do histórico — o que já estava desenhado aqui repetiria a resposta.
-        patchAssistant((mensagem) => ({
+
+        const podeRepetir =
+          ehFalhaTransitoria(error) && tentativa < TENTATIVAS_DE_RECONEXAO
+        if (podeRepetir) {
+          // Repetição curta e silenciosa. A tela continua em «Trabalhando», sem piscar
+          // «Reconectando» para uma falha local que normalmente some no primeiro retry.
+          console.warn(
+            `[koda:stream] falha transitória na tentativa ${tentativa}/${TENTATIVAS_DE_RECONEXAO}`,
+            error,
+          )
+          await dormir(esperaDeReconexao(tentativa), controller.signal)
+          if (controller.signal.aborted) {
+            concluirRodada(rodadaId, marcarInterrompida)
+            return
+          }
+          // Com `resume`, o backend continua do histórico; limpar os blocos evita repetir
+          // o que já tinha sido desenhado na tentativa anterior.
+          patchAssistant((mensagem) => ({
+            ...mensagem,
+            text: '',
+            blocos: [],
+            steps: [],
+            reasoning: undefined,
+            todos: [],
+          }))
+          setPermissaoPendente(null)
+          continue
+        }
+
+        // Erro permanente ou esgotamento de falhas transitórias: encerra na hora. Não há
+        // uma sequência de dez telas de reconexão para um 404/401/422.
+        if (ehFalhaDeConexao(error)) setBackend(null)
+        const detail =
+          error instanceof QuedaDeConexao ? error.message : fraseDeFalha(error)
+        console.error('[koda:stream] rodada encerrada', {
+          tentativa,
+          transitoria: ehFalhaTransitoria(error),
+          detail,
+        })
+        concluirRodada(rodadaId, (mensagem) => ({
           ...mensagem,
-          text: '',
-          blocos: [],
-          steps: [],
-          reasoning: undefined,
-          todos: [],
+          text: mensagem.text
+            ? `${mensagem.text}\n\n[${detail}]`
+            : `${detail} ${COMO_DIAGNOSTICAR}`,
         }))
-        setPermissaoPendente(null)
-        continue
-      }
-    } finally {
+      } finally {
       setPermissaoPendente(null)
-      // A rodada acabou: nenhuma insistência fica para trás, e a linha sai de cena.
-      setReconexao(null)
       // A rodada acabou: nenhum sub-agente dela está trabalhando. As abas ficam — o que ele
       // fez continua à vista —, mas nenhuma delas diz que ainda tem alguém ali.
       setSubs((atual) => atual.map((item) => ({ ...item, vivo: false })))
@@ -2919,6 +3499,35 @@ function App() {
    */
   const handleSendRef = useRef(handleSend)
   handleSendRef.current = handleSend
+
+  /**
+   * Ação `issueNewTurn` / `form.submit` de uma interface Koda UI.
+   *
+   * O documento não conhece o App — ele dispara um evento de janela, e este é o único
+   * ouvido. O envio usa os ajustes da última rodada (modelo, esforço, web, pasta), porque
+   * a pessoa está continuando a mesma conversa. O `handleSendRef` evita capturar uma
+   * versão velha do envio quando o componente montou antes de a conversa existir.
+   */
+  useEffect(() => {
+    const aoEnviar = (evento: Event) => {
+      const texto = (evento as CustomEvent<{ texto?: string }>).detail?.texto
+      if (!texto || !texto.trim()) return
+      const anterior = ultimoPayloadRef.current
+      void handleSendRef.current({
+        text: texto.trim(),
+        attachments: [],
+        model: modeloSeguro(anterior?.model),
+        reasoning: anterior?.reasoning ?? true,
+        web: anterior?.web ?? false,
+        effort: anterior?.effort ?? EFFORT_PADRAO,
+        project_path:
+          anterior?.project_path ?? projects.find((item) => item.id === projectId)?.caminho ?? null,
+      })
+    }
+    window.addEventListener('koda-ui-enviar', aoEnviar)
+    return () => window.removeEventListener('koda-ui-enviar', aoEnviar)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model])
 
   /**
    * O `busy` da vista anterior. A fila só dispara na **transição** — trabalhando →
@@ -3076,7 +3685,20 @@ function App() {
   return (
     // `--koda-zoom` escala a interface inteira; dividir as medidas da viewport
     // por ele mantém o app exatamente do tamanho da janela em qualquer escala.
-    <div className={CLASSE_DA_JANELA}>
+    <div className={`${CLASSE_DA_JANELA} relative`}>
+      {/* O topo da conversa passa por baixo do cabeçalho; esta faixa embaça o que fica
+          atrás dos controles e some antes do conteúdo de verdade — o corte do texto no
+          topo deixa de aparecer sem escurecer a conversa inteira. */}
+      {view === 'chat' ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[44px] backdrop-blur-[6px]"
+          style={{
+            maskImage: 'linear-gradient(to bottom, black 0%, black 25%, transparent 100%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, black 0%, black 25%, transparent 100%)',
+          }}
+        />
+      ) : null}
       {/* A tela de configuração ocupa a janela inteira: sem header do chat. */}
       {view === 'chat' ? (
         <Header
@@ -3098,6 +3720,7 @@ function App() {
           onOpenFolders={() => setPastasAberto(true)}
           onOpenConversation={handleOpenConversation}
           onOpenSettings={openSettings}
+          onOpenCelular={abrirCelular}
           onOpenPresente={() => {
             setAbaDoPresente('free')
             setView('presente')
@@ -3168,7 +3791,10 @@ function App() {
 
       {view === 'settings' ? (
         <SettingsScreen
-          onClose={() => setView('chat')}
+          onClose={() => {
+            setAbrirQrDoCelular(false)
+            setView('chat')
+          }}
           usage={{
             messages: remoteUsage?.messages ?? usageCounts.messages,
             conversations: remoteUsage?.conversations ?? usageCounts.conversations,
@@ -3222,6 +3848,7 @@ function App() {
           onAssinaturaMudou={atualizarPlano}
           onSignOut={handleSignOut}
           initialSection={settingsSection}
+          abrirQrDoCelular={abrirQrDoCelular}
         />
       ) : view === 'presente' ? (
         // A página do presente entra **no mesmo if/else** dos ajustes, e não como irmã solta:
@@ -3293,6 +3920,14 @@ function App() {
             // sem ninguém pedir; quem decide a posição aqui é o `seguirOFimRef`, e só ele.
             'min-h-0 overflow-y-auto overscroll-contain transition-[opacity] duration-500 [overflow-anchor:none]',
             EASE,
+            // A conversa usa as faixas vazias da casca em vez de ser cortada por elas:
+            // sobe até o topo da janela, atrás do cabeçalho (os controles e o «To-dos»
+            // continuam por cima, com `z-20`) e desce sob a faixa da aba do prompt. A
+            // folga de baixo é só a do `py-6` do conteúdo — o bastante para a última
+            // linha não ficar atrás da aba, e o prompt não muda de tamanho nem de lugar.
+            // Os 124px são o cabeçalho (108) mais a linha do «To-dos» (24 - 8 do
+            // `-mt-2`): é o que separa o topo da `main` do topo da janela.
+            hasMessages ? '-mt-[124px] -mb-6' : '',
             hasMessages ? 'flex-1 opacity-100' : 'flex-none opacity-0',
           ].join(' ')}
         >
@@ -3325,7 +3960,14 @@ function App() {
                     dimmed ? 'opacity-20' : 'opacity-100',
                   ].join(' ')}
                 >
-                  <BolhaUsuario texto={message.text} anexos={message.attachments} />
+                  <div className="flex max-w-[90%] min-w-0 flex-col items-end gap-1">
+                    {editandoMensagem === message.id ? <div className="w-full min-w-[min(32rem,80vw)] rounded-2xl bg-koda-input p-3 ring-1 ring-koda-accent/40">
+                      <textarea aria-label="Editar mensagem" value={textoEditado} onChange={(e) => setTextoEditado(e.target.value)} rows={4} className="w-full resize-y bg-transparent text-sm text-koda-fg outline-none" />
+                      <p className="mb-2 text-xs text-koda-fg/50">A resposta anterior permanece como foi gerada.</p>
+                      {erroEdicao ? <p role="alert" className="mb-2 text-xs text-red-400">{erroEdicao}</p> : null}
+                      <div className="flex justify-end gap-2"><button type="button" disabled={salvandoEdicao} onClick={() => setEditandoMensagem(null)} className="rounded-lg px-3 py-1 text-xs">Cancelar</button><button type="button" disabled={salvandoEdicao || !textoEditado.trim()} onClick={() => void (async () => { const id = conversationIdRef.current; if (!id) { setErroEdicao('Conversa ainda não salva.'); return } setSalvandoEdicao(true); setErroEdicao(''); try { const registro = await getConversation(id); const indice = messages.findIndex((m) => m.id === message.id); const original = registro.messages[indice]; if (!original || original.role !== 'user' || original.text !== message.text) throw new Error('A conversa mudou. Reabra a conversa e tente novamente.'); const resultado = await editarMensagemEnviada(id, original.id, textoEditado); setMessages((atual) => atual.map((m) => m.id === message.id ? { ...m, text: resultado.text } : m)); setEditandoMensagem(null); void refreshHistory() } catch (erro) { setErroEdicao(fraseDeFalha(erro)) } finally { setSalvandoEdicao(false) } })()} className="rounded-lg bg-koda-accent px-3 py-1 text-xs text-koda-bg disabled:opacity-50">Salvar</button></div>
+                    </div> : <><BolhaUsuario texto={message.text} anexos={message.attachments} /><div className="flex items-center gap-1 text-koda-fg/45"><button type="button" aria-label="Copiar mensagem" title={mensagemCopiada === message.id ? 'Copiado' : 'Copiar mensagem'} onClick={() => void (async () => { if (await copiarTexto(message.text)) { setMensagemCopiada(message.id); window.setTimeout(() => setMensagemCopiada((id) => id === message.id ? null : id), 2000) } })()} className="rounded-lg p-1.5 hover:bg-koda-fg/8 hover:text-koda-fg">{mensagemCopiada === message.id ? <Check size={14} /> : <Copy size={14} />}</button><button type="button" aria-label="Editar mensagem" title="Editar mensagem" disabled={busy} onClick={() => { setEditandoMensagem(message.id); setTextoEditado(message.text); setErroEdicao('') }} className="rounded-lg p-1.5 hover:bg-koda-fg/8 hover:text-koda-fg disabled:opacity-40"><Pencil size={14} /></button></div></>}
+                  </div>
                 </div>
               ) : (
                 <div
@@ -3381,6 +4023,12 @@ function App() {
                           />
                         )
                       }
+                      if (bloco.tipo === 'plano') {
+                        return <CartaoDePlano key={`plano-${indice}`} dados={bloco.dados} />
+                      }
+                      if (bloco.tipo === 'ui') {
+                        return <DesenhoDocumento key={`ui-${indice}`} documento={bloco.documento} />
+                      }
                       return (
                         <FalaDoModelo key={`texto-${indice}`} texto={bloco.texto} />
                       )
@@ -3395,20 +4043,11 @@ function App() {
                    * quando a tela fica calada: com o passo da ferramenta logo acima, a
                    * linha logo abaixo é o que mostra que a tarefa não parou ali.
                    *
-                   * Uma linha só, e ela troca: durante a insistência (a conexão caindo ou o
-                   * provedor falhando) é a «Reconectando… NN/NN» que fala — no lugar dos
-                   * segundos. As duas juntas eram o defeito que o dono reprovou: a linha
-                   * daqui e a solta lá de baixo acendiam ao mesmo tempo.
+                   * Uma linha só. As repetições de rede são curtas e silenciosas; a tela
+                   * continua dizendo que há trabalho em curso.
                    */}
                   {ehViva ? (
-                    reconexao ? (
-                      <ReconnectingLine
-                        tentativa={reconexao.tentativa}
-                        total={reconexao.total}
-                      />
-                    ) : (
-                      <WorkingLine passo={passoEmCurso} segundos={segundosDaResposta} />
-                    )
+                    <WorkingLine passo={passoEmCurso} segundos={segundosDaResposta} />
                   ) : null}
                   {/* A ficha fecha a resposta: só quando ela terminou de verdade. */}
                   {message.elapsedMs ? (
@@ -3445,14 +4084,9 @@ function App() {
             {/*
               A linha **solta**: só quando a resposta viva não está nesta lista — a
               conversa foi trocada no meio da rodada, e a linha não tem mensagem para
-              morar. É a mesma regra de uma linha só: «Reconectando… NN/NN» durante a
-              insistência, «Trabalhando…» no resto. Quando a viva está na lista, quem
-              mostra a linha é ela (lá em cima) — nos dois lugares ao mesmo tempo é que
-              nascia a dupla que o dono reprovou.
+              morar. Quando a viva está na lista, quem mostra a linha é ela.
             */}
-            {!viva && reconexao ? (
-              <ReconnectingLine tentativa={reconexao.tentativa} total={reconexao.total} />
-            ) : waiting ? (
+            {!viva && waiting ? (
               <WorkingLine segundos={segundosDaResposta} />
             ) : null}
           </div>
@@ -3479,6 +4113,46 @@ function App() {
           </div>
 
           <div className="relative flex w-full max-w-3xl flex-col gap-2.5">
+            {/*
+             * O modo ao vivo visto do PC: o celular está tocando uma conversa que não é
+             * a que está na tela. Um clique abre a conversa e anexa ao diário do backend.
+             */}
+            {liveDeFora
+              .filter((item) => item.conversa !== conversa)
+              .slice(0, 1)
+              .map((item) => {
+                const titulo = history
+                  .find((conversaDaLista) => conversaDaLista.id === item.conversa)
+                  ?.title?.trim()
+                const trecho = item.texto.replace(/\s+/g, ' ').trim().slice(-90)
+                return (
+                  <button
+                    key={item.sessao}
+                    type="button"
+                    onClick={() => {
+                      anexadasRef.current.add(item.sessao)
+                      acompanharRef.current?.(item)
+                    }}
+                    className="menu-in flex w-full items-center gap-2.5 rounded-xl border border-koda-fg/10 bg-koda-fg/[0.03] px-3 py-2 text-left transition-colors duration-150 hover:bg-koda-fg/[0.06] focus-visible:ring-2 focus-visible:ring-koda-accent focus-visible:outline-none"
+                  >
+                    <Smartphone
+                      className="h-4 w-4 shrink-0 text-koda-accent"
+                      strokeWidth={1.7}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-medium text-koda-fg/75">
+                        O celular está trabalhando
+                      </span>
+                      <span className="block truncate text-[11px] text-koda-fg/40">
+                        {trecho || titulo || 'ver a resposta ao vivo'}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[11px] font-medium text-koda-accent">
+                      Acompanhar
+                    </span>
+                  </button>
+                )
+              })}
             {/*
              * O atalho do fim.
              *

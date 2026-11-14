@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url'
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..')
 const VENV = join(RAIZ, 'backend', '.venv')
 const DESTINO = join(RAIZ, 'src-tauri', 'runtime', 'backend')
+const DESTINO_LINUX = join(RAIZ, 'src-tauri', 'runtime-linux', 'backend')
 
 /** Pasta do interpretador, do jeito que o `.venv` a registra. */
 function interpretador() {
@@ -89,25 +90,45 @@ function copia(origem, destino) {
   cpSync(origem, destino, { recursive: true, filter: incluir, dereference: true })
 }
 
-const python = interpretador()
-console.log(`interpretador: ${python}`)
+const pythonWindowsPronto = join(DESTINO, 'python', 'python.exe')
+let python = null
+try {
+  python = interpretador()
+} catch (erro) {
+  // Uma build Linux usa `backend/.venv/bin/python`; ele não serve para montar
+  // o runtime Windows. Nesse caso preservamos o runtime Windows já gerado e
+  // sincronizamos só o código, em vez de quebrar o empacotamento cruzado.
+  if (!existsSync(pythonWindowsPronto)) throw erro
+  console.warn(
+    `[koda] runtime Windows preservado: ${erro instanceof Error ? erro.message : erro}`,
+  )
+}
 
-rmSync(DESTINO, { recursive: true, force: true })
-mkdirSync(DESTINO, { recursive: true })
+if (python) {
+  console.log(`interpretador Windows: ${python}`)
+  rmSync(DESTINO, { recursive: true, force: true })
+  mkdirSync(DESTINO, { recursive: true })
 
-// 1. O interpretador inteiro, do jeito que ele é.
-copia(python, join(DESTINO, 'python'))
+  // 1. O interpretador inteiro, do jeito que ele é.
+  copia(python, join(DESTINO, 'python'))
 
-// 2. As dependências do backend por cima do `site-packages` dele.
-const siteOrigem = join(VENV, 'Lib', 'site-packages')
-const siteDestino = join(DESTINO, 'python', 'Lib', 'site-packages')
-mkdirSync(siteDestino, { recursive: true })
-for (const item of readdirSync(siteOrigem)) {
-  copia(join(siteOrigem, item), join(siteDestino, item))
+  // 2. As dependências do backend por cima do `site-packages` dele.
+  const siteOrigem = join(VENV, 'Lib', 'site-packages')
+  const siteDestino = join(DESTINO, 'python', 'Lib', 'site-packages')
+  mkdirSync(siteDestino, { recursive: true })
+  for (const item of readdirSync(siteOrigem)) {
+    copia(join(siteOrigem, item), join(siteDestino, item))
+  }
 }
 
 // 3. O código do backend.
 copia(join(RAIZ, 'backend', 'app'), join(DESTINO, 'app'))
+// A build Linux mantém o interpretador e as dependências próprios, mas precisa
+// receber o mesmo código do backend. Isto impede que um recurso corrigido só
+// entre no instalador Windows e continue velho no AppImage/DEB.
+if (existsSync(DESTINO_LINUX)) {
+  copia(join(RAIZ, 'backend', 'app'), join(DESTINO_LINUX, 'app'))
+}
 
 let arquivos = 0
 let bytes = 0

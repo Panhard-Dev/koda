@@ -32,7 +32,7 @@ const formatarHora = (ms: number): string =>
  * antigo (campo temporário + `execCommand`) funciona no clique do usuário mesmo assim — e
  * o que importa é que copiar copie, não qual API fez o serviço.
  */
-async function copiarTexto(conteudo: string): Promise<boolean> {
+export async function copiarTexto(conteudo: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(conteudo)
     return true
@@ -156,7 +156,8 @@ export default function MessageFooter({
   // antes de o custo existir, ou provedor que não conta —, e aí a ficha não mostra o gasto em
   // vez de mostrar um zero que mente.
   const moedas =
-    tokensTotal !== null && modelo ? moedasDeTokens(tokensTotal, modelo) : null
+    tokensTotal !== null && modelo && !modelo.startsWith('provedor:') && !modelo.startsWith('combo:')
+      ? moedasDeTokens(tokensTotal, modelo) : null
 
   useEffect(
     () => () => {

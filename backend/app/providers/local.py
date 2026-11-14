@@ -20,15 +20,9 @@ from .base import ChatOptions, ChatTurn, Piece, TransientProviderError
 #: Nomes de exibição dos modelos, para a resposta offline ficar legível.
 #: É só rótulo: quem serve os modelos de verdade é o serviço.
 MODEL_LABELS = {
-    "liz-nano": "Liz Nano",
-    "liz-4": "Liz 4",
-    "liz-4-5-super": "Liz 4.5 Super",
-    "liz-3-flash": "Liz 3 Flash",
-    "liz-mini-1-3": "Liz Mini 1.3",
-    "liz-mini-2": "Liz Mini 2",
-    "koda-1": "Koda 1",
-    "layze-2": "Layze 2",
-    "nable-4-mini-preview": "Nable 4 Mini Preview",
+    "glm-5.3-flash": "GLM 5.3 Flash",
+    "qwen-3.8-flash": "Qwen 3.8 Flash",
+    "qwen-3.8-flash-legacy": "Qwen 3.8 Flash (Legacy)",
 }
 
 
@@ -132,3 +126,24 @@ class LocalProvider:
             "O Koda reabre ele sozinho — se mesmo assim não voltar, suba o host à mão "
             "(host/c-host.exe) e mande de novo."
         )
+
+    async def step_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str = "",
+        reasoning: bool = True,
+        effort: str | None = None,
+    ) -> AsyncIterator[Any]:
+        """Mesma regra do `step`: conta responde pela conta; o resto, pelo `step` (que erra).
+
+        Sem este método o laço caía no `step` de qualquer jeito — mas com ele o modelo de
+        conta continua narrando o passo quando o host está fora do ar, que é justamente
+        quando o `local` entra em cena.
+        """
+        da_conta = _conta_para(self.settings, model)
+        if da_conta is not None:
+            async for pedaco in da_conta.step_streaming(messages, tools, model, reasoning, effort):
+                yield pedaco
+            return
+        yield await self.step(messages, tools, model)

@@ -24,6 +24,7 @@ reescolha do provider, sempre com espera entre tentativas). Quem apaga é
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -48,10 +49,12 @@ ROTA_NO_PAINEL = "/api/host/senha-dinamica"
 #: sessão de tempos em tempos; cada renovação não precisa virar uma ida à rede.
 INTERVALO_MINIMO_S = 60.0
 
-#: Com a senha faltando ou expirada a espera é menor: aí a busca é a única
-#: coisa que pode devolver o serviço, e uma rodada diária não pode esperar
-#: um minuto por educação.
-INTERVALO_SEM_SENHA_S = 5.0
+#: Uma falha de rede no painel não pode bloquear a próxima tentativa: noutro
+#: PC, DNS/TLS/proxy podem falhar na primeira abertura e voltar no segundo
+#: seguinte. O throttle de 60 s vale apenas quando já existe chave válida;
+#: sem chave, o LizProxy atual não aceita o access token puro e devolve 401.
+FALHAS_DE_REDE = ("ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+                  "PoolTimeout", "ProtocolError", "NetworkError", "TimeoutException")
 
 _trava = threading.Lock()
 _ultima_busca = 0.0
@@ -150,10 +153,11 @@ def _gravar(arquivo: Path, documento: dict[str, Any]) -> bool:
 def atualizar(settings: "Settings", token: str) -> bool:
     """Busca a senha do dia no painel e grava o JSON. `True` quando gravou.
 
-    Falha em silêncio (devolvendo `False`) em tudo que é de rede ou de painel:
-    quem chama está no caminho de escolher o provider, e a sessão da continua
-    valendo enquanto a senha não vem. A espera entre tentativas é o que impede
-    a tela insistindo de transformar cada renovação em uma rajada de pedidos.
+    Devolve `False` em falha de rede ou do painel sem derrubar o login: quem
+    chama está no caminho de escolher o provider e a sessão da conta continua
+    valendo. Sem senha vigente, a busca pode ser repetida imediatamente: o
+    LizProxy atual não aceita access token puro, então esperar 60 s com o
+    arquivo ausente deixaria o chat preso no 401 depois de uma oscilação.
     """
     global _ultima_busca
     token = (token or "").strip()
@@ -165,8 +169,11 @@ def atualizar(settings: "Settings", token: str) -> bool:
     precisa = vigente(settings) is None
     with _trava:
         agora = time.monotonic()
-        intervalo = INTERVALO_SEM_SENHA_S if precisa else INTERVALO_MINIMO_S
-        if agora - _ultima_busca < intervalo:
+        # Sem chave válida, a espera não pode ser aplicada: o login faz três
+        # tentativas seguidas para vencer uma oscilação de rede e a rotação
+        # diária não pode esperar cinco segundos com o LizProxy devolvendo 401.
+        # O intervalo de 60 s continua protegendo a renovação com chave válida.
+        if not precisa and agora - _ultima_busca < INTERVALO_MINIMO_S:
             return False
         _ultima_busca = agora
 
@@ -178,9 +185,15 @@ def atualizar(settings: "Settings", token: str) -> bool:
             timeout=settings.cloud_timeout_s,
             follow_redirects=False,
         )
-    except httpx.HTTPError:
+    except httpx.HTTPError as erro:
+        if type(erro).__name__ in FALHAS_DE_REDE:
+            with _trava:
+                _ultima_busca = 0.0
+        # Loga só a categoria: nunca URL com query, token, corpo ou chave.
+        logging.getLogger(__name__).warning("senha_dinamica_rede_indisponivel tipo=%s", type(erro).__name__)
         return False
     if resposta.status_code != 200:
+        logging.getLogger(__name__).warning("senha_dinamica_painel_recusou status=%d", resposta.status_code)
         return False
     try:
         dados = resposta.json()

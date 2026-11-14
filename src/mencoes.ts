@@ -154,7 +154,9 @@ export function mencaoDigitada(
   if (ponto < 0) return { tipo: null, consulta: resto, inicio }
 
   const tipo = resto.slice(0, ponto).toLowerCase()
-  if (!TIPOS.includes(tipo as TipoDeMencao)) return null
+  if (!TIPOS.includes(tipo as TipoDeMencao)) {
+    return { tipo: null, consulta: resto, inicio }
+  }
   return { tipo: tipo as TipoDeMencao, consulta: resto.slice(ponto + 1), inicio }
 }
 

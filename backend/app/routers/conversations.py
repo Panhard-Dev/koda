@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from .. import host_auth
 
 from ..db import Database
 from .. import anexos
@@ -71,3 +73,26 @@ async def destroy(conversation_id: str, request: Request) -> None:
     if not removed:
         raise HTTPException(status_code=404, detail="conversa não encontrada")
     await call(anexos.reconciliar, request.app.state.settings)
+
+
+class EdicaoMensagem(BaseModel):
+    text: str
+
+
+@router.patch("/{conversation_id}/messages/{message_id}")
+def editar_mensagem(conversation_id: str, message_id: str, corpo: EdicaoMensagem, request: Request) -> dict:
+    texto = corpo.text.strip()
+    if not texto:
+        raise HTTPException(400, "A mensagem não pode ficar vazia")
+    ativos = getattr(request.app.state, "active_conversations", set())
+    if (host_auth.proprietario(), conversation_id) in ativos:
+        raise HTTPException(409, "Aguarde a resposta terminar para editar")
+    with database(request).connect() as conn:
+        conversa = get_conversation(conn, conversation_id)
+        if conversa is None:
+            raise HTTPException(404, "Conversa não encontrada")
+        cursor = conn.execute("UPDATE messages SET text = ? WHERE id = ? AND conversation_id = ? AND role = 'user'", (texto, message_id, conversation_id))
+        if cursor.rowcount != 1:
+            raise HTTPException(404, "Mensagem não encontrada")
+        conn.execute("UPDATE conversations SET resumo = NULL, resumo_mensagens = 0 WHERE id = ?", (conversation_id,))
+    return {"ok": True, "text": texto}

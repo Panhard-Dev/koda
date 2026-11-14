@@ -77,6 +77,9 @@ TIPOS: dict[str, str] = {
     ".h": "text/x-c",
     ".cpp": "text/x-c++",
     ".pdf": "application/pdf",
+    # Zip não é lido pela IA, mas é o jeito comum de levar uma pasta do celular para o PC:
+    # entra no store e sai pelo `save_attachment` com os bytes intactos.
+    ".zip": "application/zip",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -156,11 +159,15 @@ def validar(nome: str, dados: bytes) -> tuple[str, str]:
     if mime is None:
         raise AnexoError(
             f"tipo .{ext.lstrip('.')} não é aceito como anexo "
-            "(texto, código, pdf ou imagem png/jpeg/gif/webp)"
+            "(texto, código, pdf, zip, imagem ou vídeo)"
         )
     # Binário: confere a assinatura — não confia na extensão nem no tipo declarado.
     if mime == "application/pdf" and not dados.startswith(b"%PDF"):
         raise AnexoError("o arquivo .pdf não começa com %PDF — não é um PDF")
+    if mime == "application/zip" and not dados.startswith(
+        (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    ):
+        raise AnexoError("o arquivo .zip não tem a assinatura de um zip")
     if mime.startswith("image/"):
         detectado = _imagem(dados)
         if detectado is None:

@@ -37,6 +37,9 @@ const ROTULOS: Record<string, string> = {
   uninstall_package: 'Remover dependência',
   download_file: 'Baixar arquivo',
   upload_file: 'Enviar arquivo',
+  read_attachment: 'Ler anexo',
+  save_attachment: 'Salvar anexo no PC',
+  send_to_phone: 'Enviar para o celular',
   use_skill: 'Usar skill',
 }
 

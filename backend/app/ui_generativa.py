@@ -28,7 +28,9 @@ import re
 from collections.abc import AsyncIterator
 
 #: Marca de abertura de um bloco koda-ui (com a linguagem na primeira linha).
-_ABRE = re.compile(r"```koda-ui\b", re.IGNORECASE)
+#: `koda-ui-doc` é o protocolo JSON validado do servidor — não passa pelo avaliador
+#: de expressões e não pode ser rebaixado para `js` só por ser grande.
+_ABRE = re.compile(r"```koda-ui(?!-doc)\b", re.IGNORECASE)
 
 #: Fecha de um bloco de código: a próxima cerca sozinha.
 _FECHA = re.compile(r"```")

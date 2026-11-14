@@ -1,0 +1,249 @@
+[
+  {
+    "results": [
+      {
+        "quick_check": "ok"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 14.0059
+      },
+      "duration": 14.0059,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 14901,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.3162
+      },
+      "duration": 0.3162,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 1087,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "name": "0001_init.sql"
+      },
+      {
+        "name": "0002_pagamentos.sql"
+      },
+      {
+        "name": "0003_creditos_avulsos.sql"
+      },
+      {
+        "name": "0004_uso.sql"
+      },
+      {
+        "name": "0005_mcps.sql"
+      },
+      {
+        "name": "0006_payment_applications.sql"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0675
+      },
+      "duration": 0.0675,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 6,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "status": "cancelled",
+        "total": 3
+      },
+      {
+        "status": "pending",
+        "total": 3
+      },
+      {
+        "status": "refunded",
+        "total": 5
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0714
+      },
+      "duration": 0.0714,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 11,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "subscriptions": 12
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0574
+      },
+      "duration": 0.0574,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 12,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "legacy_expected": 5
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.046
+      },
+      "duration": 0.046,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 11,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "applications": 5
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0563
+      },
+      "duration": 0.0563,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 5,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "approved_missing_application": 0
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0839
+      },
+      "duration": 0.0839,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 0,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "version": "0.7.7",
+        "published": 1,
+        "mandatory": 1
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.0607
+      },
+      "duration": 0.0607,
+      "changes": 0,
+      "last_row_id": 6894,
+      "changed_db": false,
+      "size_after": 10162176,
+      "rows_read": 1,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

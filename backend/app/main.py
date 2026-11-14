@@ -10,6 +10,7 @@ import asyncio
 import threading
 import hmac
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlsplit
@@ -18,7 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import __version__, anexos, host_auth, mcp, seguranca, semente
+from . import __version__, anexos, host_auth, live, mcp, seguranca, semente, transferencias
 from .config import Settings, get_settings
 from .db import Database
 from .instalador import Baixador
@@ -32,15 +33,20 @@ from .routers import (
     conversations,
     dev_browser,
     dev_logs,
+    economia,
     host,
+    live as live_rotas,
     mcps,
     models,
+    navegador as navegador_rotas,
     nuvem,
     projects,
     prompt,
     provedores,
+    remoto,
     skills,
     store,
+    transferencias as transferencias_rotas,
     usage,
 )
 from .schemas import CloudEstado, Health, HealthMinimo
@@ -63,6 +69,26 @@ HOSTS_LOCAIS = frozenset(
 )
 
 
+def _aquecer_modelos(settings: Settings) -> None:
+    """Enche o cache de modelos dos provedores conectados, fora do caminho da tela.
+
+    O seletor do celular pede um catálogo por provedor; sem cache, cada abertura era uma
+    ida à rede de cada fornecedor. Aquecer na subida faz o seletor abrir com o que já
+    está aqui. Falha de um provedor não impede os outros — é melhor esforço.
+    """
+    from . import provedores as catalogo
+
+    try:
+        conectados = [item for item in catalogo.listar(settings) if item.get("conectado")]
+    except Exception:  # noqa: BLE001 — aquecer nunca derruba a subida
+        return
+    for item in conectados:
+        try:
+            catalogo.modelos(str(item["id"]), settings)
+        except Exception:  # noqa: BLE001 — um provedor fora do ar não para os outros
+            continue
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or get_settings()
 
@@ -75,9 +101,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database = Database(config.database_path)
         database.initialize()
         await asyncio.to_thread(anexos.reconciliar, config)
+        # A pasta das transferências para o celular, ao lado do banco — fora do workspace.
+        transferencias.configurar(config)
         app.state.settings = config
         app.state.db = database
         app.state.provider = build_provider(config)
+        # As rodadas ao vivo deste processo: a tarefa é do backend, e não da conexão
+        # que a pediu. É isso que mantém o trabalho andando quando o celular sai do app.
+        app.state.live = live.GerenciadorAoVivo()
+        # A preferência «entrada pela rede local» e o link que ela mantém no ar
+        # entre execuções: sem isto, reiniciar o app desligava a busca do celular
+        # e o interruptor voltava a «desligado» sozinho.
+        remoto.configurar(config.database_path.parent)
+        threading.Thread(
+            target=remoto.iniciar_rede_salva, name="koda-link-rede", daemon=True
+        ).start()
+        # O catálogo de modelos dos provedores conectados, aquecido em segundo plano:
+        # o seletor do celular abre com o cache cheio em vez de esperar a rede de cada
+        # fornecedor (5–10 s com 17 provedores).
+        threading.Thread(
+            target=_aquecer_modelos, args=(config,), name="koda-modelos", daemon=True
+        ).start()
         # Permissões esperando resposta da tela, por id. Vive no processo: é o mesmo
         # processo que está rodando o loop da mensagem que pediu.
         app.state.aprovacoes = {}
@@ -161,13 +205,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None if empacotado else "/openapi.json",
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=config.origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    logger_http = logging.getLogger("koda.http")
+
+    @app.middleware("http")
+    async def _registrar_requisicao(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Registra latência e resultado sem expor corpo, query ou credenciais."""
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        inicio = time.perf_counter()
+        request_id = (request.headers.get("x-koda-request-id") or "-")[:32]
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger_http.exception(
+                "http method=%s path=%s status=exception duration_ms=%.0f request_id=%s",
+                request.method,
+                request.url.path,
+                (time.perf_counter() - inicio) * 1000,
+                request_id,
+            )
+            raise
+        logger_http.info(
+            "http method=%s path=%s status=%s duration_ms=%.0f request_id=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.perf_counter() - inicio) * 1000,
+            request_id,
+        )
+        return response
 
     @app.middleware("http")
     async def _so_host_local(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -234,8 +300,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             host_auth.desvincular(binding)
 
+    # O CORS fica **por fora** de todos os outros middlewares: assim o cabeçalho de
+    # origem vai também nas respostas de erro (401, 403, 500 e exceção). Quando ele
+    # era registrado antes dos `@app.middleware("http")`, uma rajada de catálogos
+    # concorrentes perdia a corrida com o login e o navegador lia o 401 como
+    # «sem Access-Control-Allow-Origin» — um erro de CORS escondendo uma
+    # renovação de sessão. O backend continua preso a loopback pelo
+    # `_so_host_local`, e só origens locais/Tauri são liberadas.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.origins,
+        # O Vite sobe na 5173, mas quando a porta está ocupada ele anda para a 5174, 5175…
+        # e a interface passa a ser recusada com **400 no preflight** — um erro que não diz
+        # nada. Como o backend só escuta em localhost (e `_so_host_local` já recusa `Host`
+        # que não seja local), aceitar qualquer porta local não abre nada para fora.
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(chat.router, prefix="/api")
+    app.include_router(live_rotas.router, prefix="/api")
     app.include_router(attachments.router, prefix="/api")
+    app.include_router(transferencias_rotas.router, prefix="/api")
+    # O navegador tem rotas dentro e fora de `/api` (o iframe não manda Authorization),
+    # então o prefixo vai no próprio router.
+    app.include_router(navegador_rotas.router)
     app.include_router(models.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(usage.router, prefix="/api")
@@ -249,8 +340,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(store.router, prefix="/api")
     app.include_router(dev_browser.router, prefix="/api")
     app.include_router(dev_logs.router, prefix="/api")
+    app.include_router(economia.router, prefix="/api")
     app.include_router(prompt.router, prefix="/api")
+    app.include_router(remoto.router, prefix="/api")
     app.include_router(provedores.router, prefix="/api")
+    from .routers import combos as combos_rotas
+    app.include_router(combos_rotas.router, prefix="/api")
 
     @app.get("/api/handshake", tags=["system"])
     async def handshake(nonce: str = "") -> dict[str, str]:
@@ -273,9 +368,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthMinimo(version=__version__)
 
     @app.get("/api/health/detalhado", response_model=Health, tags=["system"])
-    async def health_detalhado() -> Health:
+    async def health_detalhado(request: Request) -> Health:
         """O retrato completo do backend — só com o token da execução."""
-        engine = app.state.provider
+        engine = getattr(app.state, "providers", {}).get(
+            host_auth.contexto_atual().window,
+            app.state.provider,
+        )
         return Health(
             provider=engine.name,
             provider_ready=engine.ready,
@@ -285,6 +383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             version=__version__,
             workspace=str(config.workspace_path),
             tools_ready=hasattr(engine, "step"),
+            account_session=host_auth.atual() is not None,
             tools=[item["function"]["name"] for item in registry.catalogo(config.tools_negadas)],
             contexto_tokens=config.contexto_tokens,
             cloud=_cloud(app),
